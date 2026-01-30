@@ -2,7 +2,7 @@ id: github-actions-vercel
 version: "1.0.0"
 updated_at: "2026-01-30"
 author: "nyko-team"
-status: stable
+status: beta
 
 name: "GitHub Actions CI/CD with Vercel"
 description: "Automated CI/CD pipeline with GitHub Actions deploying to Vercel"

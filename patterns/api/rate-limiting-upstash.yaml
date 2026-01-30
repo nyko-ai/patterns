@@ -2,7 +2,7 @@ id: rate-limiting-upstash
 version: "1.0.0"
 updated_at: "2026-01-30"
 author: "nyko-team"
-status: stable
+status: beta
 
 name: "Rate Limiting with Upstash Redis"
 description: "Serverless rate limiting using Upstash Redis for API routes and edge functions"

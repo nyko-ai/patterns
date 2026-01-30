@@ -2,7 +2,7 @@ id: docker-compose-dev
 version: "1.0.0"
 updated_at: "2026-01-30"
 author: "nyko-team"
-status: stable
+status: beta
 
 name: "Docker Compose Development Setup"
 description: "Docker Compose configuration for local development with PostgreSQL and optional services"

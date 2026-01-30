@@ -2,7 +2,7 @@ id: supabase-github-oauth
 version: "1.0.0"
 updated_at: "2026-01-30"
 author: "nyko-team"
-status: stable
+status: beta
 
 name: "Supabase GitHub OAuth"
 description: "Complete GitHub OAuth authentication with Supabase Auth for Next.js App Router"

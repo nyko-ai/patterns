@@ -2,7 +2,7 @@ id: supabase-google-oauth
 version: "1.0.0"
 updated_at: "2026-01-30"
 author: "nyko-team"
-status: stable
+status: beta
 
 name: "Supabase Google OAuth"
 description: "Complete Google OAuth authentication with Supabase Auth for Next.js App Router"

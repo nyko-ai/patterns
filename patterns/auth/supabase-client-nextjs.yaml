@@ -2,7 +2,7 @@ id: supabase-client-nextjs
 version: "1.0.0"
 updated_at: "2026-01-30"
 author: "nyko-team"
-status: stable
+status: beta
 
 name: "Supabase Client Setup for Next.js"
 description: "Base Supabase client configuration for Next.js 15+ App Router using @supabase/ssr"

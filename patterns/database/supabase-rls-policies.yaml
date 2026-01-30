@@ -2,7 +2,7 @@ id: supabase-rls-policies
 version: "1.0.0"
 updated_at: "2026-01-30"
 author: "nyko-team"
-status: stable
+status: beta
 
 name: "Supabase Row Level Security Policies"
 description: "Common RLS policy patterns for securing Supabase database tables"

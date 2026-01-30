@@ -2,7 +2,7 @@ id: stripe-customer-portal
 version: "1.0.0"
 updated_at: "2026-01-30"
 author: "nyko-team"
-status: stable
+status: beta
 
 name: "Stripe Customer Portal"
 description: "Redirect customers to Stripe's hosted billing portal for subscription management"
