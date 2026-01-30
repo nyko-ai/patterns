@@ -4,13 +4,18 @@ name: "Email"
 description: "Transactional email patterns"
 icon: "mail"
 
-patterns: []
+patterns:
+  - resend-setup
+  - resend-verify-email
+
+recommended_order:
+  - resend-setup  # Base setup with React Email templates
+  - resend-verify-email  # Email verification flow
 
 coming_soon:
-  - resend-basic-email
-  - resend-react-email-template
-  - resend-welcome-email
+  - resend-reset-password
+  - resend-team-invite
 
 notes: |
-  Email patterns coming soon.
-  Will use Resend as the primary provider for its React Email support.
+  Email patterns use Resend as the primary provider for its React Email support.
+  resend-setup is required before other email patterns.

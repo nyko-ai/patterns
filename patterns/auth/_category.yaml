@@ -11,13 +11,20 @@ patterns:
   - supabase-magic-link
   - supabase-protected-routes
   - supabase-signout
+  - nextauth-credentials
+  - nextauth-google
 
 recommended_order:
+  # Supabase path
   - supabase-client-nextjs  # Always first - sets up the client
   - supabase-protected-routes  # Then middleware
   - supabase-google-oauth  # Or other auth method
   - supabase-signout  # Finally signout
+  # NextAuth path
+  - nextauth-google  # Or nextauth-credentials
+  - nextauth-credentials  # Can combine with Google OAuth
 
 notes: |
-  All Supabase auth patterns require the base client setup (supabase-client-nextjs).
-  As of January 2026, use @supabase/ssr instead of @supabase/auth-helpers-nextjs.
+  Supabase patterns require the base client setup (supabase-client-nextjs).
+  NextAuth patterns are standalone and use Prisma adapter.
+  Choose either Supabase OR NextAuth - don't mix them in the same project.

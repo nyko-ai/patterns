@@ -1,0 +1,723 @@
+id: resend-verify-email
+version: "1.0.0"
+updated_at: "2026-01-31"
+author: "nyko-team"
+status: beta
+
+name: "Email Verification with Resend"
+description: "Complete email verification flow with secure token generation and validation"
+
+category: email
+tags:
+  - resend
+  - email
+  - verification
+  - token
+  - nextjs
+  - prisma
+
+difficulty: intermediate
+time_estimate: "20-30 min"
+
+stack:
+  required:
+    - name: "next"
+      version: "^15.1.0"
+      reason: "App Router with server components"
+    - name: "resend"
+      version: "^4.0.0"
+      reason: "Resend SDK for sending emails"
+    - name: "@react-email/components"
+      version: "^0.0.31"
+      reason: "React Email component library"
+    - name: "@prisma/client"
+      version: "^6.0.0"
+      reason: "Database ORM for token storage"
+    - name: "prisma"
+      version: "^6.0.0"
+      reason: "Prisma CLI for migrations"
+    - name: "crypto"
+      version: "built-in"
+      reason: "Secure token generation (Node.js built-in)"
+
+requires:
+  - resend-setup
+
+enables: []
+
+env_vars:
+  required:
+    - key: RESEND_API_KEY
+      description: "Resend API key for sending emails"
+      format: "re_xxxx"
+      where_to_find: "Resend Dashboard > API Keys"
+    - key: DATABASE_URL
+      description: "PostgreSQL connection string"
+      format: "postgresql://user:password@host:5432/database"
+      where_to_find: "Your database provider dashboard"
+    - key: NEXT_PUBLIC_APP_URL
+      description: "Your application URL"
+      format: "https://yourapp.com"
+      where_to_find: "Your deployment URL"
+  optional:
+    - key: RESEND_FROM_EMAIL
+      description: "Sender email address"
+      default: "onboarding@resend.dev"
+    - key: VERIFICATION_TOKEN_EXPIRES_HOURS
+      description: "Token expiration time in hours"
+      default: "24"
+
+external_setup:
+  - service: "Resend"
+    url: "https://resend.com/api-keys"
+    steps:
+      - "Ensure RESEND_API_KEY is configured"
+      - "For production, verify your domain at resend.com/domains"
+
+  - service: "Database"
+    url: "Your database provider"
+    steps:
+      - "Run: npx prisma db push to apply schema changes"
+      - "Verify VerificationToken table is created"
+
+files:
+  - path: "prisma/schema.prisma"
+    action: modify
+    description: "Add VerificationToken model to existing schema"
+    priority: 1
+
+  - path: "lib/tokens.ts"
+    action: create
+    description: "Token generation and validation utilities"
+    priority: 2
+
+  - path: "emails/verify-email.tsx"
+    action: create
+    description: "Email verification template"
+    priority: 3
+
+  - path: "lib/email.ts"
+    action: modify
+    description: "Add verification email function"
+    priority: 4
+
+  - path: "app/api/auth/verify-email/route.ts"
+    action: create
+    description: "Email verification endpoint"
+    priority: 5
+
+  - path: "app/api/auth/send-verification/route.ts"
+    action: create
+    description: "Send verification email endpoint"
+    priority: 6
+
+  - path: "app/verify-email/page.tsx"
+    action: create
+    description: "Email verification status page"
+    priority: 7
+
+  - path: "components/auth/resend-verification.tsx"
+    action: create
+    description: "Resend verification email button"
+    priority: 8
+
+code:
+  prisma/schema.prisma: |
+    // Add this model to your existing schema.prisma
+
+    model VerificationToken {
+      id         String   @id @default(cuid())
+      identifier String   // email address
+      token      String   @unique
+      expires    DateTime
+      createdAt  DateTime @default(now())
+
+      @@unique([identifier, token])
+      @@index([identifier])
+    }
+
+    // Also add emailVerified field to your User model if not present:
+    // emailVerified DateTime?
+
+  lib/tokens.ts: |
+    import { prisma } from "@/lib/prisma";
+    import crypto from "crypto";
+
+    const VERIFICATION_TOKEN_EXPIRES_HOURS = parseInt(
+      process.env.VERIFICATION_TOKEN_EXPIRES_HOURS || "24"
+    );
+
+    export async function generateVerificationToken(email: string) {
+      // Delete any existing tokens for this email
+      await prisma.verificationToken.deleteMany({
+        where: { identifier: email },
+      });
+
+      // Generate a secure random token
+      const token = crypto.randomBytes(32).toString("hex");
+
+      // Calculate expiration time
+      const expires = new Date();
+      expires.setHours(expires.getHours() + VERIFICATION_TOKEN_EXPIRES_HOURS);
+
+      // Store the token
+      const verificationToken = await prisma.verificationToken.create({
+        data: {
+          identifier: email,
+          token,
+          expires,
+        },
+      });
+
+      return verificationToken;
+    }
+
+    export async function validateVerificationToken(token: string) {
+      const verificationToken = await prisma.verificationToken.findUnique({
+        where: { token },
+      });
+
+      if (!verificationToken) {
+        return { valid: false, error: "Invalid token" };
+      }
+
+      if (verificationToken.expires < new Date()) {
+        // Clean up expired token
+        await prisma.verificationToken.delete({
+          where: { token },
+        });
+        return { valid: false, error: "Token expired" };
+      }
+
+      return {
+        valid: true,
+        email: verificationToken.identifier,
+        token: verificationToken,
+      };
+    }
+
+    export async function consumeVerificationToken(token: string) {
+      const result = await validateVerificationToken(token);
+
+      if (!result.valid) {
+        return result;
+      }
+
+      // Delete the token after successful validation
+      await prisma.verificationToken.delete({
+        where: { token },
+      });
+
+      // Update user's emailVerified status
+      await prisma.user.update({
+        where: { email: result.email },
+        data: { emailVerified: new Date() },
+      });
+
+      return { valid: true, email: result.email };
+    }
+
+  emails/verify-email.tsx: |
+    import {
+      Body,
+      Button,
+      Container,
+      Head,
+      Heading,
+      Html,
+      Preview,
+      Section,
+      Text,
+    } from "@react-email/components";
+    import * as React from "react";
+
+    interface VerifyEmailProps {
+      verificationUrl: string;
+      expiresIn?: string;
+    }
+
+    export default function VerifyEmail({
+      verificationUrl,
+      expiresIn = "24 hours",
+    }: VerifyEmailProps) {
+      return (
+        <Html>
+          <Head />
+          <Preview>Verify your email address</Preview>
+          <Body style={main}>
+            <Container style={container}>
+              <Heading style={h1}>Verify your email</Heading>
+
+              <Text style={text}>
+                Thanks for signing up! Please verify your email address by clicking
+                the button below.
+              </Text>
+
+              <Section style={buttonContainer}>
+                <Button style={button} href={verificationUrl}>
+                  Verify Email Address
+                </Button>
+              </Section>
+
+              <Text style={text}>
+                This link will expire in {expiresIn}. If you didn&apos;t create an
+                account, you can safely ignore this email.
+              </Text>
+
+              <Text style={smallText}>
+                If the button doesn&apos;t work, copy and paste this link into your
+                browser:
+              </Text>
+              <Text style={link}>{verificationUrl}</Text>
+            </Container>
+          </Body>
+        </Html>
+      );
+    }
+
+    const main = {
+      backgroundColor: "#f6f9fc",
+      fontFamily:
+        '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Ubuntu, sans-serif',
+    };
+
+    const container = {
+      backgroundColor: "#ffffff",
+      margin: "0 auto",
+      padding: "40px 20px",
+      maxWidth: "560px",
+      borderRadius: "8px",
+    };
+
+    const h1 = {
+      color: "#1f2937",
+      fontSize: "24px",
+      fontWeight: "600",
+      lineHeight: "1.25",
+      marginBottom: "24px",
+    };
+
+    const text = {
+      color: "#4b5563",
+      fontSize: "16px",
+      lineHeight: "1.5",
+      marginBottom: "24px",
+    };
+
+    const smallText = {
+      color: "#6b7280",
+      fontSize: "14px",
+      lineHeight: "1.5",
+      marginBottom: "8px",
+    };
+
+    const link = {
+      color: "#2563eb",
+      fontSize: "14px",
+      lineHeight: "1.5",
+      wordBreak: "break-all" as const,
+    };
+
+    const buttonContainer = {
+      textAlign: "center" as const,
+      marginBottom: "24px",
+    };
+
+    const button = {
+      backgroundColor: "#2563eb",
+      borderRadius: "6px",
+      color: "#ffffff",
+      fontSize: "16px",
+      fontWeight: "600",
+      textDecoration: "none",
+      textAlign: "center" as const,
+      display: "inline-block",
+      padding: "12px 24px",
+    };
+
+  lib/email.ts: |
+    import { resend, emailConfig } from "@/lib/resend";
+    import VerifyEmail from "@/emails/verify-email";
+    import WelcomeEmail from "@/emails/welcome";
+
+    export type EmailTemplate = "welcome" | "verify-email";
+
+    interface SendEmailOptions {
+      to: string | string[];
+      subject: string;
+      template: EmailTemplate;
+      props: Record<string, unknown>;
+    }
+
+    export async function sendEmail({ to, subject, template, props }: SendEmailOptions) {
+      let emailComponent: React.ReactElement;
+
+      switch (template) {
+        case "welcome":
+          emailComponent = WelcomeEmail(props as { name?: string });
+          break;
+        case "verify-email":
+          emailComponent = VerifyEmail(props as { verificationUrl: string; expiresIn?: string });
+          break;
+        default:
+          throw new Error(`Unknown email template: ${template}`);
+      }
+
+      const { data, error } = await resend.emails.send({
+        from: emailConfig.from,
+        to: Array.isArray(to) ? to : [to],
+        subject,
+        react: emailComponent,
+      });
+
+      if (error) {
+        console.error("Failed to send email:", error);
+        throw new Error(`Failed to send email: ${error.message}`);
+      }
+
+      return data;
+    }
+
+    export async function sendVerificationEmail(email: string, token: string) {
+      const verificationUrl = `${process.env.NEXT_PUBLIC_APP_URL}/verify-email?token=${token}`;
+
+      return sendEmail({
+        to: email,
+        subject: "Verify your email address",
+        template: "verify-email",
+        props: {
+          verificationUrl,
+          expiresIn: `${process.env.VERIFICATION_TOKEN_EXPIRES_HOURS || "24"} hours`,
+        },
+      });
+    }
+
+    export async function sendWelcomeEmail(email: string, name?: string) {
+      return sendEmail({
+        to: email,
+        subject: "Welcome to our platform!",
+        template: "welcome",
+        props: { name: name || "there" },
+      });
+    }
+
+  app/api/auth/verify-email/route.ts: |
+    import { NextResponse } from "next/server";
+    import { consumeVerificationToken } from "@/lib/tokens";
+
+    export async function GET(request: Request) {
+      const { searchParams } = new URL(request.url);
+      const token = searchParams.get("token");
+
+      if (!token) {
+        return NextResponse.redirect(
+          new URL("/verify-email?error=missing-token", request.url)
+        );
+      }
+
+      const result = await consumeVerificationToken(token);
+
+      if (!result.valid) {
+        return NextResponse.redirect(
+          new URL(`/verify-email?error=${result.error}`, request.url)
+        );
+      }
+
+      return NextResponse.redirect(
+        new URL("/verify-email?success=true", request.url)
+      );
+    }
+
+  app/api/auth/send-verification/route.ts: |
+    import { NextResponse } from "next/server";
+    import { prisma } from "@/lib/prisma";
+    import { generateVerificationToken } from "@/lib/tokens";
+    import { sendVerificationEmail } from "@/lib/email";
+
+    export async function POST(request: Request) {
+      try {
+        const { email } = await request.json();
+
+        if (!email) {
+          return NextResponse.json(
+            { error: "Email is required" },
+            { status: 400 }
+          );
+        }
+
+        // Check if user exists
+        const user = await prisma.user.findUnique({
+          where: { email },
+        });
+
+        if (!user) {
+          // Don't reveal whether user exists
+          return NextResponse.json({ success: true });
+        }
+
+        if (user.emailVerified) {
+          return NextResponse.json(
+            { error: "Email already verified" },
+            { status: 400 }
+          );
+        }
+
+        // Generate and send verification token
+        const verificationToken = await generateVerificationToken(email);
+        await sendVerificationEmail(email, verificationToken.token);
+
+        return NextResponse.json({ success: true });
+      } catch (error) {
+        console.error("Send verification error:", error);
+        return NextResponse.json(
+          { error: "Failed to send verification email" },
+          { status: 500 }
+        );
+      }
+    }
+
+  app/verify-email/page.tsx: |
+    import Link from "next/link";
+    import { ResendVerification } from "@/components/auth/resend-verification";
+
+    interface VerifyEmailPageProps {
+      searchParams: Promise<{ token?: string; error?: string; success?: string }>;
+    }
+
+    export default async function VerifyEmailPage({ searchParams }: VerifyEmailPageProps) {
+      const params = await searchParams;
+      const { error, success } = params;
+
+      if (success) {
+        return (
+          <div className="flex min-h-screen items-center justify-center">
+            <div className="w-full max-w-sm space-y-6 p-8 text-center">
+              <div className="mx-auto flex h-16 w-16 items-center justify-center rounded-full bg-green-100">
+                <svg
+                  className="h-8 w-8 text-green-600"
+                  fill="none"
+                  viewBox="0 0 24 24"
+                  stroke="currentColor"
+                >
+                  <path
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    strokeWidth={2}
+                    d="M5 13l4 4L19 7"
+                  />
+                </svg>
+              </div>
+
+              <div>
+                <h1 className="text-2xl font-bold">Email verified!</h1>
+                <p className="text-gray-500 mt-2">
+                  Your email has been successfully verified.
+                </p>
+              </div>
+
+              <Link
+                href="/login"
+                className="inline-block rounded-lg bg-blue-600 px-6 py-3 text-sm font-medium text-white hover:bg-blue-700"
+              >
+                Continue to login
+              </Link>
+            </div>
+          </div>
+        );
+      }
+
+      const errorMessages: Record<string, string> = {
+        "missing-token": "No verification token provided.",
+        "Invalid token": "This verification link is invalid.",
+        "Token expired": "This verification link has expired.",
+      };
+
+      const errorMessage = error ? errorMessages[error] || error : null;
+
+      return (
+        <div className="flex min-h-screen items-center justify-center">
+          <div className="w-full max-w-sm space-y-6 p-8 text-center">
+            {errorMessage ? (
+              <>
+                <div className="mx-auto flex h-16 w-16 items-center justify-center rounded-full bg-red-100">
+                  <svg
+                    className="h-8 w-8 text-red-600"
+                    fill="none"
+                    viewBox="0 0 24 24"
+                    stroke="currentColor"
+                  >
+                    <path
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      strokeWidth={2}
+                      d="M6 18L18 6M6 6l12 12"
+                    />
+                  </svg>
+                </div>
+
+                <div>
+                  <h1 className="text-2xl font-bold">Verification failed</h1>
+                  <p className="text-gray-500 mt-2">{errorMessage}</p>
+                </div>
+
+                <ResendVerification />
+              </>
+            ) : (
+              <>
+                <div className="mx-auto flex h-16 w-16 items-center justify-center rounded-full bg-blue-100">
+                  <svg
+                    className="h-8 w-8 text-blue-600"
+                    fill="none"
+                    viewBox="0 0 24 24"
+                    stroke="currentColor"
+                  >
+                    <path
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      strokeWidth={2}
+                      d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"
+                    />
+                  </svg>
+                </div>
+
+                <div>
+                  <h1 className="text-2xl font-bold">Check your email</h1>
+                  <p className="text-gray-500 mt-2">
+                    We sent you a verification link. Click the link to verify your
+                    email address.
+                  </p>
+                </div>
+
+                <ResendVerification />
+              </>
+            )}
+          </div>
+        </div>
+      );
+    }
+
+  components/auth/resend-verification.tsx: |
+    "use client";
+
+    import { useState } from "react";
+
+    export function ResendVerification() {
+      const [email, setEmail] = useState("");
+      const [isLoading, setIsLoading] = useState(false);
+      const [message, setMessage] = useState<string | null>(null);
+      const [error, setError] = useState<string | null>(null);
+
+      const handleResend = async (e: React.FormEvent) => {
+        e.preventDefault();
+        setIsLoading(true);
+        setMessage(null);
+        setError(null);
+
+        try {
+          const response = await fetch("/api/auth/send-verification", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ email }),
+          });
+
+          const data = await response.json();
+
+          if (!response.ok) {
+            setError(data.error || "Failed to send verification email");
+            return;
+          }
+
+          setMessage("If an account exists, a verification email has been sent.");
+          setEmail("");
+        } catch {
+          setError("Something went wrong. Please try again.");
+        } finally {
+          setIsLoading(false);
+        }
+      };
+
+      return (
+        <form onSubmit={handleResend} className="space-y-4">
+          <div>
+            <input
+              type="email"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              placeholder="Enter your email"
+              required
+              className="w-full rounded-lg border border-gray-300 px-4 py-3 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+            />
+          </div>
+
+          {message && (
+            <div className="rounded-lg bg-green-50 p-3 text-sm text-green-600">
+              {message}
+            </div>
+          )}
+
+          {error && (
+            <div className="rounded-lg bg-red-50 p-3 text-sm text-red-600">
+              {error}
+            </div>
+          )}
+
+          <button
+            type="submit"
+            disabled={isLoading}
+            className="w-full rounded-lg bg-gray-100 px-4 py-3 text-sm font-medium text-gray-700 hover:bg-gray-200 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {isLoading ? "Sending..." : "Resend verification email"}
+          </button>
+        </form>
+      );
+    }
+
+edge_cases:
+  - id: token-already-used
+    symptom: "Invalid token error when clicking verification link"
+    cause: "Token was already consumed or doesn't exist"
+    solution: |
+      Verification tokens are single-use for security.
+      If the user clicks the link twice:
+      1. First click verifies successfully
+      2. Second click shows "Invalid token"
+
+      The user can request a new verification email if needed.
+
+  - id: token-expired
+    symptom: "Token expired error"
+    cause: "User didn't verify within the expiration window"
+    solution: |
+      1. User requests a new verification email
+      2. Previous tokens are automatically deleted when generating new ones
+      3. Adjust VERIFICATION_TOKEN_EXPIRES_HOURS if needed
+
+  - id: email-not-received
+    symptom: "User doesn't receive verification email"
+    cause: "Email in spam, incorrect email, or Resend delivery issues"
+    solution: |
+      1. Check spam/junk folder
+      2. Verify correct email address was entered
+      3. Check Resend Dashboard > Logs for delivery status
+      4. For production, ensure domain is verified
+
+  - id: race-condition-multiple-requests
+    symptom: "Previous token invalidated unexpectedly"
+    cause: "User requested multiple verification emails quickly"
+    solution: |
+      The generateVerificationToken function deletes existing tokens
+      before creating new ones. This is intentional for security.
+      Add rate limiting to prevent abuse:
+
+      Consider using Upstash rate limiting pattern.
+
+validation:
+  manual_test:
+    - "Run: npx prisma db push"
+    - "Register a new user (should trigger verification email)"
+    - "Check email inbox for verification link"
+    - "Click verification link"
+    - "Verify redirect to success page"
+    - "Check database - user.emailVerified should be set"
+    - "Try clicking link again - should show invalid token"
+    - "Test resend functionality with valid email"

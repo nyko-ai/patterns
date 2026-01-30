@@ -1,0 +1,395 @@
+id: resend-setup
+version: "1.0.0"
+updated_at: "2026-01-31"
+author: "nyko-team"
+status: beta
+
+name: "Resend Email Setup"
+description: "Setup Resend client with React Email templates for transactional emails"
+
+category: email
+tags:
+  - resend
+  - email
+  - react-email
+  - transactional
+  - nextjs
+
+difficulty: beginner
+time_estimate: "15-20 min"
+
+stack:
+  required:
+    - name: "next"
+      version: "^15.1.0"
+      reason: "App Router with server components"
+    - name: "resend"
+      version: "^4.0.0"
+      reason: "Resend SDK for sending emails"
+    - name: "@react-email/components"
+      version: "^0.0.31"
+      reason: "React Email component library"
+    - name: "react-email"
+      version: "^3.0.0"
+      reason: "React Email preview and development"
+
+requires: []
+
+enables:
+  - resend-verify-email
+
+env_vars:
+  required:
+    - key: RESEND_API_KEY
+      description: "Resend API key for sending emails"
+      format: "re_xxxx"
+      where_to_find: "Resend Dashboard > API Keys"
+  optional:
+    - key: RESEND_FROM_EMAIL
+      description: "Default sender email address"
+      default: "onboarding@resend.dev"
+    - key: RESEND_FROM_NAME
+      description: "Default sender name"
+      default: "Your App"
+
+external_setup:
+  - service: "Resend"
+    url: "https://resend.com/api-keys"
+    steps:
+      - "Create a Resend account at resend.com"
+      - "Go to API Keys in the dashboard"
+      - "Create a new API key"
+      - "Copy the key (starts with re_)"
+      - "Add RESEND_API_KEY to your .env file"
+
+  - service: "Domain Verification (Production)"
+    url: "https://resend.com/domains"
+    steps:
+      - "Go to Domains in Resend dashboard"
+      - "Add your domain"
+      - "Add the DNS records to your domain provider"
+      - "Wait for verification (can take up to 24h)"
+      - "Update RESEND_FROM_EMAIL to use your domain"
+
+files:
+  - path: "lib/resend.ts"
+    action: create
+    description: "Resend client singleton"
+    priority: 1
+
+  - path: "lib/email.ts"
+    action: create
+    description: "Email sending utility functions"
+    priority: 2
+
+  - path: "emails/welcome.tsx"
+    action: create
+    description: "Welcome email template"
+    priority: 3
+
+  - path: "emails/base-layout.tsx"
+    action: create
+    description: "Base email layout component"
+    priority: 4
+
+  - path: "app/api/email/send/route.ts"
+    action: create
+    description: "API route for sending emails"
+    priority: 5
+
+code:
+  lib/resend.ts: |
+    import { Resend } from "resend";
+
+    if (!process.env.RESEND_API_KEY) {
+      throw new Error("Missing RESEND_API_KEY environment variable");
+    }
+
+    export const resend = new Resend(process.env.RESEND_API_KEY);
+
+    export const emailConfig = {
+      from: `${process.env.RESEND_FROM_NAME || "Your App"} <${process.env.RESEND_FROM_EMAIL || "onboarding@resend.dev"}>`,
+    };
+
+  lib/email.ts: |
+    import { resend, emailConfig } from "@/lib/resend";
+    import WelcomeEmail from "@/emails/welcome";
+
+    export type EmailTemplate = "welcome" | "verify-email" | "reset-password";
+
+    interface SendEmailOptions {
+      to: string | string[];
+      subject: string;
+      template: EmailTemplate;
+      props: Record<string, unknown>;
+    }
+
+    const templates = {
+      welcome: WelcomeEmail,
+    } as const;
+
+    export async function sendEmail({ to, subject, template, props }: SendEmailOptions) {
+      const Template = templates[template as keyof typeof templates];
+
+      if (!Template) {
+        throw new Error(`Unknown email template: ${template}`);
+      }
+
+      const { data, error } = await resend.emails.send({
+        from: emailConfig.from,
+        to: Array.isArray(to) ? to : [to],
+        subject,
+        react: Template(props as Parameters<typeof Template>[0]),
+      });
+
+      if (error) {
+        console.error("Failed to send email:", error);
+        throw new Error(`Failed to send email: ${error.message}`);
+      }
+
+      return data;
+    }
+
+    export async function sendWelcomeEmail(email: string, name?: string) {
+      return sendEmail({
+        to: email,
+        subject: "Welcome to our platform!",
+        template: "welcome",
+        props: { name: name || "there" },
+      });
+    }
+
+  emails/welcome.tsx: |
+    import {
+      Body,
+      Button,
+      Container,
+      Head,
+      Heading,
+      Html,
+      Preview,
+      Section,
+      Text,
+    } from "@react-email/components";
+    import * as React from "react";
+
+    interface WelcomeEmailProps {
+      name?: string;
+    }
+
+    export default function WelcomeEmail({ name = "there" }: WelcomeEmailProps) {
+      return (
+        <Html>
+          <Head />
+          <Preview>Welcome to our platform!</Preview>
+          <Body style={main}>
+            <Container style={container}>
+              <Heading style={h1}>Welcome, {name}!</Heading>
+
+              <Text style={text}>
+                We&apos;re excited to have you on board. Your account has been
+                created successfully.
+              </Text>
+
+              <Section style={buttonContainer}>
+                <Button style={button} href="https://yourapp.com/dashboard">
+                  Get Started
+                </Button>
+              </Section>
+
+              <Text style={text}>
+                If you have any questions, feel free to reply to this email.
+              </Text>
+
+              <Text style={footer}>
+                Best regards,
+                <br />
+                The Team
+              </Text>
+            </Container>
+          </Body>
+        </Html>
+      );
+    }
+
+    const main = {
+      backgroundColor: "#f6f9fc",
+      fontFamily:
+        '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Ubuntu, sans-serif',
+    };
+
+    const container = {
+      backgroundColor: "#ffffff",
+      margin: "0 auto",
+      padding: "40px 20px",
+      maxWidth: "560px",
+      borderRadius: "8px",
+    };
+
+    const h1 = {
+      color: "#1f2937",
+      fontSize: "24px",
+      fontWeight: "600",
+      lineHeight: "1.25",
+      marginBottom: "24px",
+    };
+
+    const text = {
+      color: "#4b5563",
+      fontSize: "16px",
+      lineHeight: "1.5",
+      marginBottom: "24px",
+    };
+
+    const buttonContainer = {
+      textAlign: "center" as const,
+      marginBottom: "24px",
+    };
+
+    const button = {
+      backgroundColor: "#2563eb",
+      borderRadius: "6px",
+      color: "#ffffff",
+      fontSize: "16px",
+      fontWeight: "600",
+      textDecoration: "none",
+      textAlign: "center" as const,
+      display: "inline-block",
+      padding: "12px 24px",
+    };
+
+    const footer = {
+      color: "#6b7280",
+      fontSize: "14px",
+      lineHeight: "1.5",
+      marginTop: "32px",
+    };
+
+  emails/base-layout.tsx: |
+    import {
+      Body,
+      Container,
+      Head,
+      Html,
+      Preview,
+      Tailwind,
+    } from "@react-email/components";
+    import * as React from "react";
+
+    interface BaseLayoutProps {
+      preview: string;
+      children: React.ReactNode;
+    }
+
+    export default function BaseLayout({ preview, children }: BaseLayoutProps) {
+      return (
+        <Html>
+          <Head />
+          <Preview>{preview}</Preview>
+          <Tailwind>
+            <Body className="bg-gray-100 font-sans">
+              <Container className="mx-auto max-w-[560px] rounded-lg bg-white p-10">
+                {children}
+              </Container>
+            </Body>
+          </Tailwind>
+        </Html>
+      );
+    }
+
+  app/api/email/send/route.ts: |
+    import { NextResponse } from "next/server";
+    import { sendEmail, type EmailTemplate } from "@/lib/email";
+
+    interface SendEmailRequest {
+      to: string;
+      subject: string;
+      template: EmailTemplate;
+      props?: Record<string, unknown>;
+    }
+
+    export async function POST(request: Request) {
+      try {
+        const body: SendEmailRequest = await request.json();
+
+        if (!body.to || !body.subject || !body.template) {
+          return NextResponse.json(
+            { error: "Missing required fields: to, subject, template" },
+            { status: 400 }
+          );
+        }
+
+        const result = await sendEmail({
+          to: body.to,
+          subject: body.subject,
+          template: body.template,
+          props: body.props || {},
+        });
+
+        return NextResponse.json({ success: true, id: result?.id });
+      } catch (error) {
+        console.error("Email API error:", error);
+        return NextResponse.json(
+          { error: error instanceof Error ? error.message : "Failed to send email" },
+          { status: 500 }
+        );
+      }
+    }
+
+edge_cases:
+  - id: api-key-invalid
+    symptom: "Error: Invalid API key"
+    cause: "RESEND_API_KEY is incorrect or revoked"
+    solution: |
+      1. Go to Resend Dashboard > API Keys
+      2. Verify the key is active
+      3. Create a new key if needed
+      4. Update RESEND_API_KEY in .env
+      5. Restart your development server
+
+  - id: domain-not-verified
+    symptom: "Error: You can only send testing emails to your own email address"
+    cause: "Using onboarding@resend.dev or domain not verified"
+    solution: |
+      For development:
+      - Use onboarding@resend.dev as sender
+      - Send only to your own email address
+
+      For production:
+      1. Add and verify your domain at resend.com/domains
+      2. Update RESEND_FROM_EMAIL to your verified domain
+      3. You can then send to any email address
+
+  - id: rate-limited
+    symptom: "Error: Rate limit exceeded"
+    cause: "Exceeded Resend's rate limits"
+    solution: |
+      Resend limits depend on your plan:
+      - Free: 100 emails/day, 1 email/second
+      - Pro: 50,000 emails/month
+
+      To handle rate limits:
+      1. Implement exponential backoff
+      2. Queue emails for bulk sending
+      3. Upgrade your Resend plan if needed
+
+  - id: email-bounced
+    symptom: "Email sent but not delivered"
+    cause: "Invalid email address or spam filter"
+    solution: |
+      1. Check Resend Dashboard > Logs for delivery status
+      2. Verify recipient email is valid
+      3. Check spam folder
+      4. For production, ensure SPF, DKIM, and DMARC records are set
+
+validation:
+  manual_test:
+    - "Start development server: npm run dev"
+    - "Create a simple test endpoint or use API route"
+    - "Send a test email to your own address"
+    - "Check Resend Dashboard > Logs for delivery status"
+    - "Verify email received in inbox"
+    - "Optional: Run 'npx react-email dev' to preview templates"
+  automated_test:
+    command: "npx react-email dev"
+    expected: "React Email preview server starts on port 3001"
