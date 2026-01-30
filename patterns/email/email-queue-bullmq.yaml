@@ -1,0 +1,599 @@
+id: email-queue-bullmq
+version: "1.0.0"
+updated_at: "2026-01-31"
+author: "nyko-team"
+status: beta
+
+name: "Email Queue with BullMQ"
+description: "Background email processing with BullMQ and Redis for reliable delivery"
+
+category: email
+tags:
+  - email
+  - queue
+  - bullmq
+  - redis
+  - background-jobs
+  - nextjs
+
+difficulty: advanced
+time_estimate: "30-40 min"
+
+stack:
+  required:
+    - name: "next"
+      version: "^15.1.0"
+      reason: "App Router with route handlers"
+    - name: "bullmq"
+      version: "^5.0.0"
+      reason: "Redis-based job queue"
+    - name: "ioredis"
+      version: "^5.0.0"
+      reason: "Redis client for BullMQ"
+    - name: "resend"
+      version: "^6.0.0"
+      reason: "Email sending service"
+
+requires:
+  - resend-setup
+
+enables: []
+
+env_vars:
+  required:
+    - key: REDIS_URL
+      description: "Redis connection string"
+      format: "redis://user:password@host:6379"
+      where_to_find: "Upstash, Railway, or local Redis"
+    - key: RESEND_API_KEY
+      description: "Resend API key"
+      format: "re_xxxx"
+      where_to_find: "Resend Dashboard > API Keys"
+
+external_setup:
+  - service: "Redis (Upstash)"
+    url: "https://console.upstash.com"
+    steps:
+      - "Create an Upstash account"
+      - "Create a new Redis database"
+      - "Copy the Redis URL"
+      - "Add REDIS_URL to .env"
+
+  - service: "Redis (Local/Docker)"
+    url: "https://redis.io"
+    steps:
+      - "Run: docker run -d -p 6379:6379 redis:7-alpine"
+      - "Set REDIS_URL=redis://localhost:6379"
+
+files:
+  - path: "lib/queue/connection.ts"
+    action: create
+    description: "Redis connection for BullMQ"
+    priority: 1
+
+  - path: "lib/queue/email-queue.ts"
+    action: create
+    description: "Email queue configuration"
+    priority: 2
+
+  - path: "lib/queue/email-worker.ts"
+    action: create
+    description: "Email worker processor"
+    priority: 3
+
+  - path: "lib/queue/types.ts"
+    action: create
+    description: "Job type definitions"
+    priority: 4
+
+  - path: "app/api/email/queue/route.ts"
+    action: create
+    description: "API route to add emails to queue"
+    priority: 5
+
+  - path: "scripts/start-worker.ts"
+    action: create
+    description: "Worker startup script"
+    priority: 6
+
+code:
+  lib/queue/connection.ts: |
+    import IORedis from "ioredis";
+
+    let connection: IORedis | null = null;
+
+    export function getRedisConnection(): IORedis {
+      if (!process.env.REDIS_URL) {
+        throw new Error("REDIS_URL environment variable is not set");
+      }
+
+      if (!connection) {
+        connection = new IORedis(process.env.REDIS_URL, {
+          maxRetriesPerRequest: null, // Required for BullMQ
+          enableReadyCheck: false,
+        });
+
+        connection.on("error", (err) => {
+          console.error("Redis connection error:", err);
+        });
+
+        connection.on("connect", () => {
+          console.log("Connected to Redis");
+        });
+      }
+
+      return connection;
+    }
+
+    export async function closeRedisConnection(): Promise<void> {
+      if (connection) {
+        await connection.quit();
+        connection = null;
+      }
+    }
+
+  lib/queue/types.ts: |
+    export interface EmailJobData {
+      to: string | string[];
+      subject: string;
+      template: string;
+      props: Record<string, unknown>;
+      priority?: "high" | "normal" | "low";
+      scheduledFor?: Date;
+      metadata?: {
+        userId?: string;
+        type?: string;
+        [key: string]: unknown;
+      };
+    }
+
+    export interface EmailJobResult {
+      success: boolean;
+      messageId?: string;
+      error?: string;
+      sentAt: Date;
+    }
+
+    export const EMAIL_QUEUE_NAME = "email-queue";
+
+    export const PRIORITY_MAP = {
+      high: 1,
+      normal: 5,
+      low: 10,
+    } as const;
+
+  lib/queue/email-queue.ts: |
+    import { Queue, QueueEvents } from "bullmq";
+    import { getRedisConnection } from "./connection";
+    import {
+      EmailJobData,
+      EMAIL_QUEUE_NAME,
+      PRIORITY_MAP,
+    } from "./types";
+
+    let emailQueue: Queue<EmailJobData> | null = null;
+    let queueEvents: QueueEvents | null = null;
+
+    export function getEmailQueue(): Queue<EmailJobData> {
+      if (!emailQueue) {
+        emailQueue = new Queue<EmailJobData>(EMAIL_QUEUE_NAME, {
+          connection: getRedisConnection(),
+          defaultJobOptions: {
+            attempts: 3,
+            backoff: {
+              type: "exponential",
+              delay: 1000,
+            },
+            removeOnComplete: {
+              count: 1000,
+              age: 24 * 60 * 60, // Keep completed jobs for 24 hours
+            },
+            removeOnFail: {
+              count: 5000,
+              age: 7 * 24 * 60 * 60, // Keep failed jobs for 7 days
+            },
+          },
+        });
+      }
+
+      return emailQueue;
+    }
+
+    export function getQueueEvents(): QueueEvents {
+      if (!queueEvents) {
+        queueEvents = new QueueEvents(EMAIL_QUEUE_NAME, {
+          connection: getRedisConnection(),
+        });
+      }
+      return queueEvents;
+    }
+
+    /**
+     * Add a single email to the queue
+     */
+    export async function queueEmail(data: EmailJobData) {
+      const queue = getEmailQueue();
+      const priority = PRIORITY_MAP[data.priority || "normal"];
+
+      const jobOptions: Parameters<typeof queue.add>[2] = {
+        priority,
+        jobId: `email-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+      };
+
+      if (data.scheduledFor) {
+        jobOptions.delay = new Date(data.scheduledFor).getTime() - Date.now();
+      }
+
+      const job = await queue.add("send-email", data, jobOptions);
+
+      return {
+        jobId: job.id,
+        status: "queued",
+      };
+    }
+
+    /**
+     * Add multiple emails to the queue in bulk
+     */
+    export async function queueBulkEmails(emails: EmailJobData[]) {
+      const queue = getEmailQueue();
+
+      const jobs = emails.map((data, index) => ({
+        name: "send-email",
+        data,
+        opts: {
+          priority: PRIORITY_MAP[data.priority || "normal"],
+          jobId: `email-bulk-${Date.now()}-${index}`,
+        },
+      }));
+
+      const results = await queue.addBulk(jobs);
+
+      return results.map((job) => ({
+        jobId: job.id,
+        status: "queued",
+      }));
+    }
+
+    /**
+     * Get queue statistics
+     */
+    export async function getQueueStats() {
+      const queue = getEmailQueue();
+
+      const [waiting, active, completed, failed, delayed] = await Promise.all([
+        queue.getWaitingCount(),
+        queue.getActiveCount(),
+        queue.getCompletedCount(),
+        queue.getFailedCount(),
+        queue.getDelayedCount(),
+      ]);
+
+      return {
+        waiting,
+        active,
+        completed,
+        failed,
+        delayed,
+        total: waiting + active + delayed,
+      };
+    }
+
+    /**
+     * Get job status by ID
+     */
+    export async function getJobStatus(jobId: string) {
+      const queue = getEmailQueue();
+      const job = await queue.getJob(jobId);
+
+      if (!job) {
+        return null;
+      }
+
+      const state = await job.getState();
+
+      return {
+        id: job.id,
+        state,
+        data: job.data,
+        progress: job.progress,
+        attemptsMade: job.attemptsMade,
+        failedReason: job.failedReason,
+        finishedOn: job.finishedOn,
+        processedOn: job.processedOn,
+      };
+    }
+
+  lib/queue/email-worker.ts: |
+    import { Worker, Job } from "bullmq";
+    import { Resend } from "resend";
+    import { getRedisConnection } from "./connection";
+    import { EmailJobData, EmailJobResult, EMAIL_QUEUE_NAME } from "./types";
+
+    // Import your email templates here
+    // import WelcomeEmail from "@/emails/welcome";
+
+    let worker: Worker<EmailJobData, EmailJobResult> | null = null;
+
+    const resend = new Resend(process.env.RESEND_API_KEY);
+
+    async function processEmailJob(
+      job: Job<EmailJobData, EmailJobResult>
+    ): Promise<EmailJobResult> {
+      const { to, subject, template, props } = job.data;
+
+      console.log(`Processing email job ${job.id}: ${template} to ${to}`);
+
+      try {
+        // Update progress
+        await job.updateProgress(10);
+
+        // Get the email template component
+        // In a real implementation, you'd import and use your React Email templates
+        const emailHtml = `
+          <html>
+            <body>
+              <h1>${subject}</h1>
+              <p>Template: ${template}</p>
+              <pre>${JSON.stringify(props, null, 2)}</pre>
+            </body>
+          </html>
+        `;
+
+        await job.updateProgress(50);
+
+        // Send the email
+        const { data, error } = await resend.emails.send({
+          from: process.env.RESEND_FROM_EMAIL || "onboarding@resend.dev",
+          to: Array.isArray(to) ? to : [to],
+          subject,
+          html: emailHtml,
+          // react: YourReactEmailComponent(props), // Use this for React Email
+        });
+
+        await job.updateProgress(100);
+
+        if (error) {
+          throw new Error(error.message);
+        }
+
+        console.log(`Email sent successfully: ${data?.id}`);
+
+        return {
+          success: true,
+          messageId: data?.id,
+          sentAt: new Date(),
+        };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Unknown error";
+        console.error(`Failed to send email: ${message}`);
+
+        return {
+          success: false,
+          error: message,
+          sentAt: new Date(),
+        };
+      }
+    }
+
+    export function startEmailWorker(): Worker<EmailJobData, EmailJobResult> {
+      if (worker) {
+        return worker;
+      }
+
+      worker = new Worker<EmailJobData, EmailJobResult>(
+        EMAIL_QUEUE_NAME,
+        processEmailJob,
+        {
+          connection: getRedisConnection(),
+          concurrency: 5, // Process up to 5 emails concurrently
+          limiter: {
+            max: 10, // Max 10 jobs
+            duration: 1000, // Per second (respect Resend rate limits)
+          },
+        }
+      );
+
+      worker.on("completed", (job, result) => {
+        console.log(`Job ${job.id} completed:`, result);
+      });
+
+      worker.on("failed", (job, err) => {
+        console.error(`Job ${job?.id} failed:`, err.message);
+      });
+
+      worker.on("error", (err) => {
+        console.error("Worker error:", err);
+      });
+
+      console.log("Email worker started");
+
+      return worker;
+    }
+
+    export async function stopEmailWorker(): Promise<void> {
+      if (worker) {
+        await worker.close();
+        worker = null;
+        console.log("Email worker stopped");
+      }
+    }
+
+  app/api/email/queue/route.ts: |
+    import { NextRequest, NextResponse } from "next/server";
+    import {
+      queueEmail,
+      queueBulkEmails,
+      getQueueStats,
+      getJobStatus,
+    } from "@/lib/queue/email-queue";
+    import type { EmailJobData } from "@/lib/queue/types";
+
+    // Queue a single email
+    export async function POST(request: NextRequest) {
+      try {
+        const body = await request.json();
+
+        // Validate required fields
+        if (!body.to || !body.subject || !body.template) {
+          return NextResponse.json(
+            { error: "Missing required fields: to, subject, template" },
+            { status: 400 }
+          );
+        }
+
+        const emailData: EmailJobData = {
+          to: body.to,
+          subject: body.subject,
+          template: body.template,
+          props: body.props || {},
+          priority: body.priority,
+          scheduledFor: body.scheduledFor
+            ? new Date(body.scheduledFor)
+            : undefined,
+          metadata: body.metadata,
+        };
+
+        // Handle bulk emails
+        if (Array.isArray(body.emails)) {
+          const results = await queueBulkEmails(body.emails);
+          return NextResponse.json({
+            success: true,
+            queued: results.length,
+            jobs: results,
+          });
+        }
+
+        const result = await queueEmail(emailData);
+
+        return NextResponse.json({
+          success: true,
+          ...result,
+        });
+      } catch (error) {
+        console.error("Queue email error:", error);
+        return NextResponse.json(
+          { error: error instanceof Error ? error.message : "Failed to queue email" },
+          { status: 500 }
+        );
+      }
+    }
+
+    // Get queue statistics or job status
+    export async function GET(request: NextRequest) {
+      try {
+        const { searchParams } = new URL(request.url);
+        const jobId = searchParams.get("jobId");
+
+        if (jobId) {
+          const status = await getJobStatus(jobId);
+          if (!status) {
+            return NextResponse.json({ error: "Job not found" }, { status: 404 });
+          }
+          return NextResponse.json(status);
+        }
+
+        const stats = await getQueueStats();
+        return NextResponse.json(stats);
+      } catch (error) {
+        console.error("Queue stats error:", error);
+        return NextResponse.json(
+          { error: error instanceof Error ? error.message : "Failed to get queue stats" },
+          { status: 500 }
+        );
+      }
+    }
+
+  scripts/start-worker.ts: |
+    /**
+     * Email Worker Startup Script
+     *
+     * Run with: npx tsx scripts/start-worker.ts
+     * Or add to package.json:
+     * "scripts": {
+     *   "worker:email": "tsx scripts/start-worker.ts"
+     * }
+     */
+
+    import { startEmailWorker, stopEmailWorker } from "../lib/queue/email-worker";
+    import { closeRedisConnection } from "../lib/queue/connection";
+
+    async function main() {
+      console.log("Starting email worker...");
+
+      // Start the worker
+      startEmailWorker();
+
+      // Handle graceful shutdown
+      const shutdown = async (signal: string) => {
+        console.log(`Received ${signal}, shutting down gracefully...`);
+
+        try {
+          await stopEmailWorker();
+          await closeRedisConnection();
+          console.log("Shutdown complete");
+          process.exit(0);
+        } catch (error) {
+          console.error("Error during shutdown:", error);
+          process.exit(1);
+        }
+      };
+
+      process.on("SIGTERM", () => shutdown("SIGTERM"));
+      process.on("SIGINT", () => shutdown("SIGINT"));
+
+      // Keep the process alive
+      console.log("Email worker is running. Press Ctrl+C to stop.");
+    }
+
+    main().catch((error) => {
+      console.error("Fatal error:", error);
+      process.exit(1);
+    });
+
+edge_cases:
+  - id: redis-connection-failed
+    symptom: "Error: Redis connection failed"
+    cause: "Invalid REDIS_URL or Redis not running"
+    solution: |
+      1. Verify REDIS_URL is correct
+      2. For local: ensure Redis is running (docker ps)
+      3. For Upstash: check if database is active
+      4. Test connection: redis-cli -u $REDIS_URL PING
+
+  - id: worker-not-processing
+    symptom: "Jobs queued but not being processed"
+    cause: "Worker not started"
+    solution: |
+      1. Start the worker: npm run worker:email
+      2. Check worker logs for errors
+      3. Verify worker can connect to Redis
+      4. In development, start worker in a separate terminal
+
+  - id: duplicate-emails
+    symptom: "Same email sent multiple times"
+    cause: "Job retried due to timeout or error"
+    solution: |
+      1. Ensure email sending is idempotent
+      2. Use unique jobId based on content hash
+      3. Check for existing job before queuing:
+         const existing = await queue.getJob(jobId);
+         if (existing) return existing;
+
+  - id: memory-leak
+    symptom: "Worker memory usage keeps growing"
+    cause: "Completed jobs not being cleaned up"
+    solution: |
+      Configure job cleanup in queue options:
+      removeOnComplete: { count: 1000, age: 86400 }
+      removeOnFail: { count: 5000, age: 604800 }
+
+validation:
+  manual_test:
+    - "Start Redis: docker run -d -p 6379:6379 redis:7-alpine"
+    - "Add REDIS_URL=redis://localhost:6379 to .env"
+    - "Start worker: npx tsx scripts/start-worker.ts"
+    - "In another terminal, start Next.js: npm run dev"
+    - "POST to /api/email/queue with email data"
+    - "GET /api/email/queue to see queue stats"
+    - "Check worker logs for processing"
