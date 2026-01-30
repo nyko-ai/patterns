@@ -154,6 +154,78 @@
       "tags": ["resend", "email", "verification", "token", "prisma"],
       "difficulty": "intermediate",
       "status": "beta"
+    },
+    {
+      "id": "prisma-setup",
+      "category": "database",
+      "name": "Prisma ORM Setup",
+      "description": "Complete Prisma ORM setup with PostgreSQL, migrations, and best practices",
+      "tags": ["prisma", "orm", "postgresql", "database", "typescript"],
+      "difficulty": "beginner",
+      "status": "beta"
+    },
+    {
+      "id": "drizzle-setup",
+      "category": "database",
+      "name": "Drizzle ORM Setup",
+      "description": "Lightweight Drizzle ORM with Neon serverless PostgreSQL",
+      "tags": ["drizzle", "orm", "neon", "postgresql", "serverless"],
+      "difficulty": "intermediate",
+      "status": "beta"
+    },
+    {
+      "id": "supabase-realtime",
+      "category": "database",
+      "name": "Supabase Realtime Subscriptions",
+      "description": "Real-time database subscriptions and presence tracking with Supabase",
+      "tags": ["supabase", "realtime", "subscriptions", "presence", "websocket"],
+      "difficulty": "intermediate",
+      "status": "beta"
+    },
+    {
+      "id": "optimistic-updates",
+      "category": "database",
+      "name": "Optimistic Updates with React Query",
+      "description": "Implement optimistic UI updates with TanStack React Query for instant feedback",
+      "tags": ["react-query", "tanstack", "optimistic", "mutations", "ux"],
+      "difficulty": "intermediate",
+      "status": "beta"
+    },
+    {
+      "id": "soft-deletes",
+      "category": "database",
+      "name": "Prisma Soft Delete Pattern",
+      "description": "Implement soft deletes with Prisma middleware for data recovery and audit trails",
+      "tags": ["prisma", "soft-delete", "middleware", "audit"],
+      "difficulty": "intermediate",
+      "status": "beta"
+    },
+    {
+      "id": "email-queue-bullmq",
+      "category": "email",
+      "name": "Email Queue with BullMQ",
+      "description": "Background email processing with BullMQ and Redis for reliable delivery",
+      "tags": ["bullmq", "redis", "queue", "email", "background-jobs"],
+      "difficulty": "advanced",
+      "status": "beta"
+    },
+    {
+      "id": "nginx-ssl-certbot",
+      "category": "deploy",
+      "name": "Nginx with SSL via Certbot",
+      "description": "Production Nginx reverse proxy with automatic SSL certificates from Let's Encrypt",
+      "tags": ["nginx", "ssl", "certbot", "lets-encrypt", "reverse-proxy"],
+      "difficulty": "intermediate",
+      "status": "beta"
+    },
+    {
+      "id": "pm2-ecosystem",
+      "category": "deploy",
+      "name": "PM2 Ecosystem Configuration",
+      "description": "Production-ready PM2 process manager configuration for Next.js applications",
+      "tags": ["pm2", "process-manager", "production", "nodejs", "clustering"],
+      "difficulty": "intermediate",
+      "status": "beta"
     }
   ]
 }
