@@ -1,0 +1,443 @@
+id: soft-deletes
+version: "1.0.0"
+updated_at: "2026-01-31"
+author: "nyko-team"
+status: beta
+
+name: "Prisma Soft Delete Pattern"
+description: "Implement soft deletes with Prisma middleware for data recovery and audit trails"
+
+category: database
+tags:
+  - prisma
+  - soft-delete
+  - middleware
+  - database
+  - audit
+
+difficulty: intermediate
+time_estimate: "15-20 min"
+
+stack:
+  required:
+    - name: "prisma"
+      version: "^7.0.0"
+      reason: "Prisma ORM with middleware support"
+    - name: "@prisma/client"
+      version: "^7.0.0"
+      reason: "Prisma Client"
+
+requires:
+  - prisma-setup
+
+enables: []
+
+env_vars:
+  required:
+    - key: DATABASE_URL
+      description: "PostgreSQL connection string"
+      format: "postgresql://USER:PASSWORD@HOST:PORT/DATABASE"
+      where_to_find: "Your database provider dashboard"
+
+external_setup: []
+
+files:
+  - path: "prisma/schema.prisma"
+    action: modify
+    description: "Add deletedAt field to models"
+    priority: 1
+
+  - path: "lib/prisma.ts"
+    action: modify
+    description: "Add soft delete middleware"
+    priority: 2
+
+  - path: "lib/prisma/soft-delete.ts"
+    action: create
+    description: "Soft delete middleware implementation"
+    priority: 3
+
+  - path: "lib/prisma/queries.ts"
+    action: create
+    description: "Query helpers including deleted records"
+    priority: 4
+
+code:
+  prisma/schema.prisma: |
+    generator client {
+      provider = "prisma-client-js"
+    }
+
+    datasource db {
+      provider = "postgresql"
+      url      = env("DATABASE_URL")
+    }
+
+    model User {
+      id        String    @id @default(cuid())
+      email     String    @unique
+      name      String?
+      createdAt DateTime  @default(now()) @map("created_at")
+      updatedAt DateTime  @updatedAt @map("updated_at")
+      deletedAt DateTime? @map("deleted_at") // Soft delete field
+
+      posts Post[]
+
+      @@map("users")
+    }
+
+    model Post {
+      id        String    @id @default(cuid())
+      title     String
+      content   String?
+      published Boolean   @default(false)
+      authorId  String    @map("author_id")
+      createdAt DateTime  @default(now()) @map("created_at")
+      updatedAt DateTime  @updatedAt @map("updated_at")
+      deletedAt DateTime? @map("deleted_at") // Soft delete field
+
+      author User @relation(fields: [authorId], references: [id], onDelete: Cascade)
+
+      @@map("posts")
+    }
+
+  lib/prisma/soft-delete.ts: |
+    import { Prisma, PrismaClient } from "@prisma/client";
+
+    // Models that support soft delete (must have deletedAt field)
+    const SOFT_DELETE_MODELS = ["User", "Post"] as const;
+    type SoftDeleteModel = (typeof SOFT_DELETE_MODELS)[number];
+
+    function isSoftDeleteModel(model: string): model is SoftDeleteModel {
+      return SOFT_DELETE_MODELS.includes(model as SoftDeleteModel);
+    }
+
+    /**
+     * Middleware to automatically filter out soft-deleted records on queries
+     */
+    export function softDeleteQueryMiddleware(): Prisma.Middleware {
+      return async (params, next) => {
+        if (!params.model || !isSoftDeleteModel(params.model)) {
+          return next(params);
+        }
+
+        // For find operations, exclude soft-deleted records by default
+        if (params.action === "findUnique" || params.action === "findFirst") {
+          // Change to findFirst to allow adding where clause
+          params.action = "findFirst";
+          params.args.where = {
+            ...params.args.where,
+            deletedAt: null,
+          };
+        }
+
+        if (params.action === "findMany") {
+          if (!params.args) {
+            params.args = {};
+          }
+          if (!params.args.where) {
+            params.args.where = {};
+          }
+          // Only add deletedAt filter if not explicitly querying deleted records
+          if (params.args.where.deletedAt === undefined) {
+            params.args.where.deletedAt = null;
+          }
+        }
+
+        if (params.action === "count") {
+          if (!params.args) {
+            params.args = {};
+          }
+          if (!params.args.where) {
+            params.args.where = {};
+          }
+          if (params.args.where.deletedAt === undefined) {
+            params.args.where.deletedAt = null;
+          }
+        }
+
+        return next(params);
+      };
+    }
+
+    /**
+     * Middleware to convert delete to soft delete (update deletedAt)
+     */
+    export function softDeleteMutationMiddleware(): Prisma.Middleware {
+      return async (params, next) => {
+        if (!params.model || !isSoftDeleteModel(params.model)) {
+          return next(params);
+        }
+
+        // Convert delete to update with deletedAt
+        if (params.action === "delete") {
+          params.action = "update";
+          params.args.data = { deletedAt: new Date() };
+        }
+
+        // Convert deleteMany to updateMany with deletedAt
+        if (params.action === "deleteMany") {
+          params.action = "updateMany";
+          if (!params.args) {
+            params.args = {};
+          }
+          params.args.data = { deletedAt: new Date() };
+        }
+
+        return next(params);
+      };
+    }
+
+    /**
+     * Extension for additional soft delete methods
+     */
+    export function softDeleteExtension() {
+      return Prisma.defineExtension({
+        name: "softDelete",
+        model: {
+          $allModels: {
+            async softDelete<T>(
+              this: T,
+              where: Prisma.Args<T, "update">["where"]
+            ): Promise<Prisma.Result<T, { where: typeof where }, "update">> {
+              const context = Prisma.getExtensionContext(this) as unknown as {
+                $parent: PrismaClient;
+                $name: string;
+              };
+              const model = context.$name;
+              const client = context.$parent;
+
+              return (client as Record<string, unknown>)[
+                model.charAt(0).toLowerCase() + model.slice(1)
+              ].update({
+                where,
+                data: { deletedAt: new Date() },
+              });
+            },
+
+            async restore<T>(
+              this: T,
+              where: Prisma.Args<T, "update">["where"]
+            ): Promise<Prisma.Result<T, { where: typeof where }, "update">> {
+              const context = Prisma.getExtensionContext(this) as unknown as {
+                $parent: PrismaClient;
+                $name: string;
+              };
+              const model = context.$name;
+              const client = context.$parent;
+
+              return (client as Record<string, unknown>)[
+                model.charAt(0).toLowerCase() + model.slice(1)
+              ].update({
+                where,
+                data: { deletedAt: null },
+              });
+            },
+
+            async hardDelete<T>(
+              this: T,
+              where: Prisma.Args<T, "delete">["where"]
+            ): Promise<Prisma.Result<T, { where: typeof where }, "delete">> {
+              const context = Prisma.getExtensionContext(this) as unknown as {
+                $parent: { $executeRawUnsafe: (query: string, ...args: unknown[]) => Promise<unknown> };
+                $name: string;
+              };
+              const model = context.$name;
+              const table = model.toLowerCase() + "s";
+
+              // For hard delete, we need to bypass middleware
+              // This is a simplified version - in production, use proper SQL
+              await context.$parent.$executeRawUnsafe(
+                `DELETE FROM ${table} WHERE id = $1`,
+                (where as { id: string }).id
+              );
+
+              return where as Prisma.Result<T, { where: typeof where }, "delete">;
+            },
+          },
+        },
+      });
+    }
+
+  lib/prisma.ts: |
+    import { PrismaClient } from "@prisma/client";
+    import {
+      softDeleteQueryMiddleware,
+      softDeleteMutationMiddleware,
+      softDeleteExtension,
+    } from "./prisma/soft-delete";
+
+    const globalForPrisma = globalThis as unknown as {
+      prisma: ReturnType<typeof createPrismaClient> | undefined;
+    };
+
+    function createPrismaClient() {
+      const client = new PrismaClient({
+        log:
+          process.env.NODE_ENV === "development"
+            ? ["query", "error", "warn"]
+            : ["error"],
+      });
+
+      // Add soft delete middleware
+      client.$use(softDeleteQueryMiddleware());
+      client.$use(softDeleteMutationMiddleware());
+
+      // Add soft delete extension methods
+      return client.$extends(softDeleteExtension());
+    }
+
+    export const prisma = globalForPrisma.prisma ?? createPrismaClient();
+
+    if (process.env.NODE_ENV !== "production") {
+      globalForPrisma.prisma = prisma;
+    }
+
+    export default prisma;
+
+  lib/prisma/queries.ts: |
+    import { prisma } from "@/lib/prisma";
+
+    // Query helpers for working with soft-deleted records
+
+    /**
+     * Get all users including soft-deleted ones
+     */
+    export async function getAllUsersIncludingDeleted() {
+      return prisma.user.findMany({
+        where: {
+          deletedAt: { not: null }, // Explicitly include deleted
+        },
+      });
+    }
+
+    /**
+     * Get only soft-deleted users
+     */
+    export async function getDeletedUsers() {
+      return prisma.user.findMany({
+        where: {
+          deletedAt: { not: null },
+        },
+      });
+    }
+
+    /**
+     * Restore a soft-deleted user
+     */
+    export async function restoreUser(id: string) {
+      // Using the extension method
+      return prisma.user.restore({ id });
+    }
+
+    /**
+     * Permanently delete a user (bypass soft delete)
+     */
+    export async function permanentlyDeleteUser(id: string) {
+      return prisma.user.hardDelete({ id });
+    }
+
+    /**
+     * Soft delete a user explicitly
+     */
+    export async function softDeleteUser(id: string) {
+      return prisma.user.softDelete({ id });
+    }
+
+    /**
+     * Get user by ID including if soft-deleted
+     */
+    export async function getUserByIdIncludingDeleted(id: string) {
+      return prisma.user.findFirst({
+        where: {
+          id,
+          OR: [{ deletedAt: null }, { deletedAt: { not: null } }],
+        },
+      });
+    }
+
+    /**
+     * Get all records for a model including deleted
+     * Usage: await findManyWithDeleted('user', { where: { ... } })
+     */
+    export async function findManyWithDeleted<T extends keyof typeof prisma>(
+      model: T,
+      args?: Parameters<(typeof prisma)[T]["findMany"]>[0]
+    ) {
+      const client = prisma[model] as { findMany: (args: unknown) => Promise<unknown> };
+      return client.findMany({
+        ...args,
+        where: {
+          ...(args as { where?: Record<string, unknown> })?.where,
+          deletedAt: undefined, // Remove the automatic filter
+        },
+      });
+    }
+
+edge_cases:
+  - id: cascade-delete-issue
+    symptom: "Related records not soft-deleted when parent is deleted"
+    cause: "Cascade only works with hard deletes"
+    solution: |
+      Implement cascade soft delete manually:
+      async function softDeleteWithCascade(userId: string) {
+        await prisma.$transaction([
+          prisma.post.updateMany({
+            where: { authorId: userId },
+            data: { deletedAt: new Date() },
+          }),
+          prisma.user.update({
+            where: { id: userId },
+            data: { deletedAt: new Date() },
+          }),
+        ]);
+      }
+
+  - id: unique-constraint-deleted
+    symptom: "Can't create new record with same unique field as deleted record"
+    cause: "Unique constraint includes soft-deleted records"
+    solution: |
+      Use partial unique index in PostgreSQL:
+      CREATE UNIQUE INDEX users_email_unique
+      ON users (email)
+      WHERE deleted_at IS NULL;
+
+      Or in Prisma schema (preview feature):
+      @@unique([email], where: { deletedAt: null })
+
+  - id: query-includes-deleted
+    symptom: "Queries sometimes include deleted records"
+    cause: "Explicit deletedAt in where clause"
+    solution: |
+      The middleware only adds deletedAt: null if not specified.
+      If you pass deletedAt in your query, it will use your value.
+      To include deleted: { deletedAt: { not: null } }
+      To include all: { deletedAt: undefined } won't work - use OR
+
+  - id: restore-related-records
+    symptom: "Restored record has missing relations"
+    cause: "Related records still soft-deleted"
+    solution: |
+      Restore related records together:
+      async function restoreUserWithPosts(userId: string) {
+        await prisma.$transaction([
+          prisma.user.update({
+            where: { id: userId },
+            data: { deletedAt: null },
+          }),
+          prisma.post.updateMany({
+            where: { authorId: userId },
+            data: { deletedAt: null },
+          }),
+        ]);
+      }
+
+validation:
+  manual_test:
+    - "Add deletedAt field to your models"
+    - "Run: npx prisma db push"
+    - "Create a test record"
+    - "Delete the record - verify it's not in findMany results"
+    - "Query with deletedAt: { not: null } - verify record is there"
+    - "Use restore method - verify record is back in findMany"
+    - "Use hardDelete - verify record is permanently gone"

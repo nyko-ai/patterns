@@ -1,0 +1,532 @@
+id: supabase-realtime
+version: "1.0.0"
+updated_at: "2026-01-31"
+author: "nyko-team"
+status: beta
+
+name: "Supabase Realtime Subscriptions"
+description: "Real-time data subscriptions with Supabase for live updates"
+
+category: database
+tags:
+  - supabase
+  - realtime
+  - websocket
+  - subscriptions
+  - nextjs
+
+difficulty: intermediate
+time_estimate: "20-25 min"
+
+stack:
+  required:
+    - name: "next"
+      version: "^15.1.0"
+      reason: "App Router with client components"
+    - name: "@supabase/supabase-js"
+      version: "^2.90.0"
+      reason: "Supabase client with realtime support"
+
+requires:
+  - supabase-client-nextjs
+
+enables: []
+
+env_vars:
+  required:
+    - key: NEXT_PUBLIC_SUPABASE_URL
+      description: "Supabase project URL"
+      format: "https://xxx.supabase.co"
+      where_to_find: "Supabase Dashboard > Project Settings > API"
+    - key: NEXT_PUBLIC_SUPABASE_ANON_KEY
+      description: "Supabase anonymous/public key"
+      format: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+      where_to_find: "Supabase Dashboard > Project Settings > API"
+
+external_setup:
+  - service: "Supabase"
+    url: "https://supabase.com/dashboard"
+    steps:
+      - "Go to Database > Replication"
+      - "Enable replication for tables you want to subscribe to"
+      - "Or use SQL: ALTER PUBLICATION supabase_realtime ADD TABLE your_table"
+      - "Ensure RLS policies allow SELECT for subscribed users"
+
+files:
+  - path: "lib/supabase/realtime.ts"
+    action: create
+    description: "Realtime subscription utilities"
+    priority: 1
+
+  - path: "hooks/use-realtime.ts"
+    action: create
+    description: "React hook for realtime subscriptions"
+    priority: 2
+
+  - path: "hooks/use-presence.ts"
+    action: create
+    description: "React hook for presence tracking"
+    priority: 3
+
+  - path: "components/realtime-messages.tsx"
+    action: create
+    description: "Example realtime messages component"
+    priority: 4
+
+  - path: "components/online-users.tsx"
+    action: create
+    description: "Example presence component"
+    priority: 5
+
+code:
+  lib/supabase/realtime.ts: |
+    import { createClient } from "@/lib/supabase/client";
+    import type { RealtimeChannel, RealtimePostgresChangesPayload } from "@supabase/supabase-js";
+
+    export type RealtimeEvent = "INSERT" | "UPDATE" | "DELETE" | "*";
+
+    export interface SubscriptionConfig<T extends Record<string, unknown>> {
+      table: string;
+      schema?: string;
+      event?: RealtimeEvent;
+      filter?: string;
+      onInsert?: (payload: T) => void;
+      onUpdate?: (payload: { old: T; new: T }) => void;
+      onDelete?: (payload: T) => void;
+      onChange?: (payload: RealtimePostgresChangesPayload<T>) => void;
+    }
+
+    export function subscribeToTable<T extends Record<string, unknown>>(
+      config: SubscriptionConfig<T>
+    ): RealtimeChannel {
+      const supabase = createClient();
+      const {
+        table,
+        schema = "public",
+        event = "*",
+        filter,
+        onInsert,
+        onUpdate,
+        onDelete,
+        onChange,
+      } = config;
+
+      const channelName = `${schema}:${table}:${filter || "all"}`;
+
+      const channel = supabase
+        .channel(channelName)
+        .on(
+          "postgres_changes" as const,
+          {
+            event,
+            schema,
+            table,
+            filter,
+          },
+          (payload: RealtimePostgresChangesPayload<T>) => {
+            onChange?.(payload);
+
+            switch (payload.eventType) {
+              case "INSERT":
+                onInsert?.(payload.new as T);
+                break;
+              case "UPDATE":
+                onUpdate?.({
+                  old: payload.old as T,
+                  new: payload.new as T,
+                });
+                break;
+              case "DELETE":
+                onDelete?.(payload.old as T);
+                break;
+            }
+          }
+        )
+        .subscribe();
+
+      return channel;
+    }
+
+    export function unsubscribe(channel: RealtimeChannel) {
+      const supabase = createClient();
+      supabase.removeChannel(channel);
+    }
+
+  hooks/use-realtime.ts: |
+    "use client";
+
+    import { useEffect, useState, useCallback } from "react";
+    import { createClient } from "@/lib/supabase/client";
+    import type { RealtimeChannel } from "@supabase/supabase-js";
+
+    interface UseRealtimeOptions<T> {
+      table: string;
+      schema?: string;
+      filter?: string;
+      initialData?: T[];
+      primaryKey?: keyof T;
+    }
+
+    export function useRealtime<T extends Record<string, unknown>>({
+      table,
+      schema = "public",
+      filter,
+      initialData = [],
+      primaryKey = "id" as keyof T,
+    }: UseRealtimeOptions<T>) {
+      const [data, setData] = useState<T[]>(initialData);
+      const [isConnected, setIsConnected] = useState(false);
+      const [error, setError] = useState<Error | null>(null);
+
+      useEffect(() => {
+        const supabase = createClient();
+        let channel: RealtimeChannel;
+
+        const setupSubscription = () => {
+          channel = supabase
+            .channel(`${schema}:${table}`)
+            .on(
+              "postgres_changes",
+              {
+                event: "*",
+                schema,
+                table,
+                filter,
+              },
+              (payload) => {
+                switch (payload.eventType) {
+                  case "INSERT":
+                    setData((current) => [payload.new as T, ...current]);
+                    break;
+                  case "UPDATE":
+                    setData((current) =>
+                      current.map((item) =>
+                        item[primaryKey] === (payload.new as T)[primaryKey]
+                          ? (payload.new as T)
+                          : item
+                      )
+                    );
+                    break;
+                  case "DELETE":
+                    setData((current) =>
+                      current.filter(
+                        (item) =>
+                          item[primaryKey] !== (payload.old as T)[primaryKey]
+                      )
+                    );
+                    break;
+                }
+              }
+            )
+            .subscribe((status) => {
+              setIsConnected(status === "SUBSCRIBED");
+              if (status === "CHANNEL_ERROR") {
+                setError(new Error("Failed to subscribe to channel"));
+              }
+            });
+        };
+
+        setupSubscription();
+
+        return () => {
+          if (channel) {
+            supabase.removeChannel(channel);
+          }
+        };
+      }, [table, schema, filter, primaryKey]);
+
+      const refresh = useCallback(async () => {
+        const supabase = createClient();
+        const { data: freshData, error: fetchError } = await supabase
+          .from(table)
+          .select("*")
+          .order("created_at", { ascending: false });
+
+        if (fetchError) {
+          setError(fetchError);
+        } else {
+          setData(freshData as T[]);
+        }
+      }, [table]);
+
+      return { data, setData, isConnected, error, refresh };
+    }
+
+  hooks/use-presence.ts: |
+    "use client";
+
+    import { useEffect, useState, useCallback } from "react";
+    import { createClient } from "@/lib/supabase/client";
+    import type { RealtimeChannel, RealtimePresenceState } from "@supabase/supabase-js";
+
+    export interface PresenceUser {
+      id: string;
+      email?: string;
+      name?: string;
+      avatar?: string;
+      online_at: string;
+      [key: string]: unknown;
+    }
+
+    interface UsePresenceOptions {
+      channelName: string;
+      user: Partial<PresenceUser>;
+    }
+
+    export function usePresence({ channelName, user }: UsePresenceOptions) {
+      const [onlineUsers, setOnlineUsers] = useState<PresenceUser[]>([]);
+      const [isConnected, setIsConnected] = useState(false);
+
+      useEffect(() => {
+        const supabase = createClient();
+        let channel: RealtimeChannel;
+
+        const setupPresence = async () => {
+          channel = supabase.channel(channelName, {
+            config: {
+              presence: {
+                key: user.id,
+              },
+            },
+          });
+
+          channel
+            .on("presence", { event: "sync" }, () => {
+              const state = channel.presenceState<PresenceUser>();
+              const users = Object.values(state).flat();
+              setOnlineUsers(users);
+            })
+            .on("presence", { event: "join" }, ({ newPresences }) => {
+              console.log("User joined:", newPresences);
+            })
+            .on("presence", { event: "leave" }, ({ leftPresences }) => {
+              console.log("User left:", leftPresences);
+            })
+            .subscribe(async (status) => {
+              if (status === "SUBSCRIBED") {
+                setIsConnected(true);
+                await channel.track({
+                  ...user,
+                  online_at: new Date().toISOString(),
+                });
+              }
+            });
+        };
+
+        setupPresence();
+
+        return () => {
+          if (channel) {
+            channel.untrack();
+            supabase.removeChannel(channel);
+          }
+        };
+      }, [channelName, user]);
+
+      const updatePresence = useCallback(
+        async (updates: Partial<PresenceUser>) => {
+          const supabase = createClient();
+          const channel = supabase.channel(channelName);
+          await channel.track({ ...user, ...updates });
+        },
+        [channelName, user]
+      );
+
+      return { onlineUsers, isConnected, updatePresence };
+    }
+
+  components/realtime-messages.tsx: |
+    "use client";
+
+    import { useRealtime } from "@/hooks/use-realtime";
+    import { useEffect } from "react";
+
+    interface Message {
+      id: string;
+      content: string;
+      user_id: string;
+      created_at: string;
+    }
+
+    interface RealtimeMessagesProps {
+      initialMessages: Message[];
+    }
+
+    export function RealtimeMessages({ initialMessages }: RealtimeMessagesProps) {
+      const { data: messages, isConnected, error, refresh } = useRealtime<Message>({
+        table: "messages",
+        initialData: initialMessages,
+        primaryKey: "id",
+      });
+
+      useEffect(() => {
+        // Fetch initial data if not provided
+        if (initialMessages.length === 0) {
+          refresh();
+        }
+      }, [initialMessages.length, refresh]);
+
+      if (error) {
+        return (
+          <div className="rounded-lg bg-red-50 p-4 text-red-600">
+            Error: {error.message}
+          </div>
+        );
+      }
+
+      return (
+        <div className="space-y-4">
+          <div className="flex items-center gap-2">
+            <span
+              className={`h-2 w-2 rounded-full ${
+                isConnected ? "bg-green-500" : "bg-yellow-500"
+              }`}
+            />
+            <span className="text-sm text-gray-500">
+              {isConnected ? "Live" : "Connecting..."}
+            </span>
+          </div>
+
+          <div className="space-y-2">
+            {messages.map((message) => (
+              <div
+                key={message.id}
+                className="rounded-lg border p-3"
+              >
+                <p>{message.content}</p>
+                <span className="text-xs text-gray-400">
+                  {new Date(message.created_at).toLocaleTimeString()}
+                </span>
+              </div>
+            ))}
+
+            {messages.length === 0 && (
+              <p className="text-center text-gray-500">No messages yet</p>
+            )}
+          </div>
+        </div>
+      );
+    }
+
+  components/online-users.tsx: |
+    "use client";
+
+    import { usePresence, type PresenceUser } from "@/hooks/use-presence";
+
+    interface OnlineUsersProps {
+      currentUser: {
+        id: string;
+        email?: string;
+        name?: string;
+        avatar?: string;
+      };
+      channelName?: string;
+    }
+
+    export function OnlineUsers({
+      currentUser,
+      channelName = "online-users",
+    }: OnlineUsersProps) {
+      const { onlineUsers, isConnected } = usePresence({
+        channelName,
+        user: currentUser,
+      });
+
+      return (
+        <div className="space-y-3">
+          <div className="flex items-center justify-between">
+            <h3 className="font-medium">Online Users</h3>
+            <span
+              className={`h-2 w-2 rounded-full ${
+                isConnected ? "bg-green-500" : "bg-yellow-500"
+              }`}
+            />
+          </div>
+
+          <div className="space-y-2">
+            {onlineUsers.map((user) => (
+              <div
+                key={user.id}
+                className="flex items-center gap-2 rounded-lg border p-2"
+              >
+                {user.avatar ? (
+                  <img
+                    src={user.avatar}
+                    alt={user.name || "User"}
+                    className="h-8 w-8 rounded-full"
+                  />
+                ) : (
+                  <div className="flex h-8 w-8 items-center justify-center rounded-full bg-blue-100 text-sm font-medium text-blue-600">
+                    {(user.name || user.email || "U")[0].toUpperCase()}
+                  </div>
+                )}
+                <div className="flex-1 min-w-0">
+                  <p className="truncate text-sm font-medium">
+                    {user.name || user.email || "Anonymous"}
+                  </p>
+                  <p className="text-xs text-gray-500">
+                    {user.id === currentUser.id ? "You" : "Online"}
+                  </p>
+                </div>
+                <span className="h-2 w-2 rounded-full bg-green-500" />
+              </div>
+            ))}
+
+            {onlineUsers.length === 0 && (
+              <p className="text-center text-sm text-gray-500">
+                No users online
+              </p>
+            )}
+          </div>
+        </div>
+      );
+    }
+
+edge_cases:
+  - id: not-receiving-updates
+    symptom: "Changes in database not reflected in UI"
+    cause: "Table not enabled for replication"
+    solution: |
+      Enable replication for the table:
+      1. Go to Supabase Dashboard > Database > Replication
+      2. Enable the table, or run SQL:
+         ALTER PUBLICATION supabase_realtime ADD TABLE your_table;
+
+  - id: rls-blocking-subscription
+    symptom: "Subscription works but no data received"
+    cause: "RLS policies blocking SELECT for the user"
+    solution: |
+      Ensure your RLS policies allow the user to SELECT:
+      CREATE POLICY "Users can view messages"
+        ON messages FOR SELECT
+        USING (auth.uid() = user_id OR is_public = true);
+
+  - id: connection-limit
+    symptom: "Too many connections error"
+    cause: "Multiple subscriptions not cleaned up"
+    solution: |
+      Always clean up subscriptions in useEffect cleanup:
+      useEffect(() => {
+        const channel = ...subscribe();
+        return () => supabase.removeChannel(channel);
+      }, []);
+
+  - id: presence-not-syncing
+    symptom: "Presence state inconsistent"
+    cause: "Track called before subscription ready"
+    solution: |
+      Wait for SUBSCRIBED status before tracking:
+      channel.subscribe(async (status) => {
+        if (status === "SUBSCRIBED") {
+          await channel.track({ ... });
+        }
+      });
+
+validation:
+  manual_test:
+    - "Enable replication for target table in Supabase"
+    - "Add the RealtimeMessages component to a page"
+    - "Open the page in two browser windows"
+    - "Insert a row in Supabase Table Editor"
+    - "Verify both windows show the new row"
+    - "Delete the row and verify it disappears"

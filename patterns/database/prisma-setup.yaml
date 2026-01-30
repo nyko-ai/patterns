@@ -1,0 +1,218 @@
+id: prisma-setup
+version: "1.0.0"
+updated_at: "2026-01-31"
+author: "nyko-team"
+status: beta
+
+name: "Prisma Setup for Next.js"
+description: "Complete Prisma ORM setup with PostgreSQL for Next.js App Router"
+
+category: database
+tags:
+  - prisma
+  - postgresql
+  - orm
+  - nextjs
+  - database
+
+difficulty: beginner
+time_estimate: "15-20 min"
+
+stack:
+  required:
+    - name: "next"
+      version: "^15.1.0"
+      reason: "App Router with server components"
+    - name: "prisma"
+      version: "^7.0.0"
+      reason: "Prisma CLI for migrations and schema"
+    - name: "@prisma/client"
+      version: "^7.0.0"
+      reason: "Prisma Client for database queries"
+
+requires: []
+
+enables:
+  - soft-deletes
+  - optimistic-updates
+
+env_vars:
+  required:
+    - key: DATABASE_URL
+      description: "PostgreSQL connection string"
+      format: "postgresql://USER:PASSWORD@HOST:PORT/DATABASE?schema=public"
+      where_to_find: "Your database provider dashboard or local setup"
+
+external_setup:
+  - service: "PostgreSQL Database"
+    url: "https://neon.tech or https://supabase.com"
+    steps:
+      - "Create a PostgreSQL database (Neon, Supabase, Railway, or local)"
+      - "Copy the connection string"
+      - "Add DATABASE_URL to .env file"
+      - "Run: npx prisma db push"
+
+files:
+  - path: "prisma/schema.prisma"
+    action: create
+    description: "Prisma schema with User model example"
+    priority: 1
+
+  - path: "lib/prisma.ts"
+    action: create
+    description: "Prisma client singleton"
+    priority: 2
+
+  - path: "app/api/users/route.ts"
+    action: create
+    description: "Example API route using Prisma"
+    priority: 3
+
+code:
+  prisma/schema.prisma: |
+    generator client {
+      provider = "prisma-client-js"
+    }
+
+    datasource db {
+      provider = "postgresql"
+      url      = env("DATABASE_URL")
+    }
+
+    model User {
+      id        String   @id @default(cuid())
+      email     String   @unique
+      name      String?
+      image     String?
+      createdAt DateTime @default(now()) @map("created_at")
+      updatedAt DateTime @updatedAt @map("updated_at")
+
+      @@map("users")
+    }
+
+  lib/prisma.ts: |
+    import { PrismaClient } from "@prisma/client";
+
+    const globalForPrisma = globalThis as unknown as {
+      prisma: PrismaClient | undefined;
+    };
+
+    function createPrismaClient() {
+      return new PrismaClient({
+        log:
+          process.env.NODE_ENV === "development"
+            ? ["query", "error", "warn"]
+            : ["error"],
+      });
+    }
+
+    export const prisma = globalForPrisma.prisma ?? createPrismaClient();
+
+    if (process.env.NODE_ENV !== "production") {
+      globalForPrisma.prisma = prisma;
+    }
+
+    export default prisma;
+
+  app/api/users/route.ts: |
+    import { prisma } from "@/lib/prisma";
+    import { NextRequest, NextResponse } from "next/server";
+
+    export async function GET() {
+      try {
+        const users = await prisma.user.findMany({
+          orderBy: { createdAt: "desc" },
+        });
+
+        return NextResponse.json(users);
+      } catch (error) {
+        console.error("Error fetching users:", error);
+        return NextResponse.json(
+          { error: "Failed to fetch users" },
+          { status: 500 }
+        );
+      }
+    }
+
+    export async function POST(request: NextRequest) {
+      try {
+        const body = await request.json();
+        const { email, name } = body;
+
+        if (!email) {
+          return NextResponse.json(
+            { error: "Email is required" },
+            { status: 400 }
+          );
+        }
+
+        const user = await prisma.user.create({
+          data: {
+            email,
+            name,
+          },
+        });
+
+        return NextResponse.json(user, { status: 201 });
+      } catch (error) {
+        console.error("Error creating user:", error);
+
+        if ((error as { code?: string }).code === "P2002") {
+          return NextResponse.json(
+            { error: "A user with this email already exists" },
+            { status: 409 }
+          );
+        }
+
+        return NextResponse.json(
+          { error: "Failed to create user" },
+          { status: 500 }
+        );
+      }
+    }
+
+edge_cases:
+  - id: connection-refused
+    symptom: "Error: Can't reach database server"
+    cause: "Database not running or wrong connection string"
+    solution: |
+      1. Verify DATABASE_URL is correct in .env
+      2. Check if database server is running
+      3. For cloud databases, check if IP is whitelisted
+      4. Test connection: npx prisma db pull
+
+  - id: prisma-client-not-generated
+    symptom: "Error: @prisma/client did not initialize"
+    cause: "Prisma Client not generated after schema changes"
+    solution: |
+      Run: npx prisma generate
+      This regenerates the Prisma Client from your schema.
+
+  - id: migration-failed
+    symptom: "Error during prisma migrate"
+    cause: "Schema conflicts or database state mismatch"
+    solution: |
+      For development:
+      1. npx prisma db push --force-reset (WARNING: deletes data)
+
+      For production:
+      1. npx prisma migrate resolve --rolled-back <migration>
+      2. Fix schema issues
+      3. npx prisma migrate dev
+
+  - id: too-many-connections
+    symptom: "Error: Too many database connections"
+    cause: "Multiple Prisma Client instances in development"
+    solution: |
+      Ensure you're using the singleton pattern from lib/prisma.ts.
+      The globalForPrisma pattern prevents creating new clients on hot reload.
+
+validation:
+  manual_test:
+    - "Add DATABASE_URL to .env"
+    - "Run: npx prisma generate"
+    - "Run: npx prisma db push"
+    - "Start dev server: npm run dev"
+    - "Test POST /api/users with email in body"
+    - "Test GET /api/users to see created user"
+    - "Check database with: npx prisma studio"

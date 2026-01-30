@@ -1,0 +1,463 @@
+id: optimistic-updates
+version: "1.0.0"
+updated_at: "2026-01-31"
+author: "nyko-team"
+status: beta
+
+name: "Optimistic Updates with React Query"
+description: "Implement optimistic UI updates with TanStack React Query for instant feedback"
+
+category: database
+tags:
+  - react-query
+  - tanstack
+  - optimistic
+  - mutations
+  - nextjs
+  - ux
+
+difficulty: intermediate
+time_estimate: "25-30 min"
+
+stack:
+  required:
+    - name: "next"
+      version: "^15.1.0"
+      reason: "App Router with client components"
+    - name: "@tanstack/react-query"
+      version: "^5.90.0"
+      reason: "Data fetching and caching library"
+
+requires: []
+
+enables: []
+
+env_vars:
+  required: []
+
+external_setup: []
+
+files:
+  - path: "lib/query-client.ts"
+    action: create
+    description: "React Query client configuration"
+    priority: 1
+
+  - path: "components/providers/query-provider.tsx"
+    action: create
+    description: "React Query provider component"
+    priority: 2
+
+  - path: "hooks/use-optimistic-mutation.ts"
+    action: create
+    description: "Generic optimistic mutation hook"
+    priority: 3
+
+  - path: "hooks/use-todos.ts"
+    action: create
+    description: "Example: Todo CRUD with optimistic updates"
+    priority: 4
+
+  - path: "components/todo-list.tsx"
+    action: create
+    description: "Example: Todo list with optimistic UI"
+    priority: 5
+
+  - path: "app/layout.tsx"
+    action: modify
+    description: "Add QueryProvider to layout"
+    priority: 6
+
+code:
+  lib/query-client.ts: |
+    import { QueryClient } from "@tanstack/react-query";
+
+    function makeQueryClient() {
+      return new QueryClient({
+        defaultOptions: {
+          queries: {
+            staleTime: 60 * 1000, // 1 minute
+            gcTime: 5 * 60 * 1000, // 5 minutes
+            retry: 1,
+            refetchOnWindowFocus: false,
+          },
+          mutations: {
+            retry: 1,
+          },
+        },
+      });
+    }
+
+    let browserQueryClient: QueryClient | undefined = undefined;
+
+    export function getQueryClient() {
+      if (typeof window === "undefined") {
+        // Server: always make a new query client
+        return makeQueryClient();
+      } else {
+        // Browser: make a new client if we don't already have one
+        if (!browserQueryClient) {
+          browserQueryClient = makeQueryClient();
+        }
+        return browserQueryClient;
+      }
+    }
+
+  components/providers/query-provider.tsx: |
+    "use client";
+
+    import { QueryClientProvider } from "@tanstack/react-query";
+    import { ReactQueryDevtools } from "@tanstack/react-query-devtools";
+    import { getQueryClient } from "@/lib/query-client";
+
+    export function QueryProvider({ children }: { children: React.ReactNode }) {
+      const queryClient = getQueryClient();
+
+      return (
+        <QueryClientProvider client={queryClient}>
+          {children}
+          <ReactQueryDevtools initialIsOpen={false} />
+        </QueryClientProvider>
+      );
+    }
+
+  hooks/use-optimistic-mutation.ts: |
+    import {
+      useMutation,
+      useQueryClient,
+      type QueryKey,
+    } from "@tanstack/react-query";
+
+    interface OptimisticMutationOptions<TData, TVariables, TContext> {
+      mutationFn: (variables: TVariables) => Promise<TData>;
+      queryKey: QueryKey;
+      // Transform current cache data before mutation
+      optimisticUpdate: (currentData: TData[] | undefined, variables: TVariables) => TData[];
+      // Optional: transform after successful mutation
+      onSuccessUpdate?: (currentData: TData[] | undefined, newData: TData) => TData[];
+      onError?: (error: Error, variables: TVariables, context: TContext | undefined) => void;
+    }
+
+    export function useOptimisticMutation<TData, TVariables>({
+      mutationFn,
+      queryKey,
+      optimisticUpdate,
+      onSuccessUpdate,
+      onError,
+    }: OptimisticMutationOptions<TData, TVariables, { previousData: TData[] | undefined }>) {
+      const queryClient = useQueryClient();
+
+      return useMutation({
+        mutationFn,
+        onMutate: async (variables) => {
+          // Cancel any outgoing refetches
+          await queryClient.cancelQueries({ queryKey });
+
+          // Snapshot the previous value
+          const previousData = queryClient.getQueryData<TData[]>(queryKey);
+
+          // Optimistically update to the new value
+          queryClient.setQueryData<TData[]>(queryKey, (old) =>
+            optimisticUpdate(old, variables)
+          );
+
+          // Return a context with the previous data
+          return { previousData };
+        },
+        onError: (error, variables, context) => {
+          // Rollback to the previous value on error
+          if (context?.previousData) {
+            queryClient.setQueryData(queryKey, context.previousData);
+          }
+          onError?.(error as Error, variables, context);
+        },
+        onSuccess: (data) => {
+          // Optionally update with server response
+          if (onSuccessUpdate) {
+            queryClient.setQueryData<TData[]>(queryKey, (old) =>
+              onSuccessUpdate(old, data)
+            );
+          }
+        },
+        onSettled: () => {
+          // Invalidate to ensure we're in sync with server
+          queryClient.invalidateQueries({ queryKey });
+        },
+      });
+    }
+
+  hooks/use-todos.ts: |
+    import { useQuery, useQueryClient } from "@tanstack/react-query";
+    import { useOptimisticMutation } from "./use-optimistic-mutation";
+
+    export interface Todo {
+      id: string;
+      title: string;
+      completed: boolean;
+      createdAt: string;
+    }
+
+    const TODOS_KEY = ["todos"];
+
+    // API functions
+    async function fetchTodos(): Promise<Todo[]> {
+      const res = await fetch("/api/todos");
+      if (!res.ok) throw new Error("Failed to fetch todos");
+      return res.json();
+    }
+
+    async function createTodo(title: string): Promise<Todo> {
+      const res = await fetch("/api/todos", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ title }),
+      });
+      if (!res.ok) throw new Error("Failed to create todo");
+      return res.json();
+    }
+
+    async function updateTodo(data: { id: string; completed: boolean }): Promise<Todo> {
+      const res = await fetch(`/api/todos/${data.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ completed: data.completed }),
+      });
+      if (!res.ok) throw new Error("Failed to update todo");
+      return res.json();
+    }
+
+    async function deleteTodo(id: string): Promise<void> {
+      const res = await fetch(`/api/todos/${id}`, { method: "DELETE" });
+      if (!res.ok) throw new Error("Failed to delete todo");
+    }
+
+    // Hooks
+    export function useTodos() {
+      return useQuery({
+        queryKey: TODOS_KEY,
+        queryFn: fetchTodos,
+      });
+    }
+
+    export function useCreateTodo() {
+      const queryClient = useQueryClient();
+
+      return useOptimisticMutation<Todo, string>({
+        mutationFn: createTodo,
+        queryKey: TODOS_KEY,
+        optimisticUpdate: (currentData, title) => {
+          const optimisticTodo: Todo = {
+            id: `temp-${Date.now()}`, // Temporary ID
+            title,
+            completed: false,
+            createdAt: new Date().toISOString(),
+          };
+          return [optimisticTodo, ...(currentData || [])];
+        },
+        onSuccessUpdate: (currentData, newTodo) => {
+          // Replace temp todo with real one from server
+          return (currentData || []).map((todo) =>
+            todo.id.startsWith("temp-") ? newTodo : todo
+          );
+        },
+      });
+    }
+
+    export function useToggleTodo() {
+      return useOptimisticMutation<Todo, { id: string; completed: boolean }>({
+        mutationFn: updateTodo,
+        queryKey: TODOS_KEY,
+        optimisticUpdate: (currentData, { id, completed }) => {
+          return (currentData || []).map((todo) =>
+            todo.id === id ? { ...todo, completed } : todo
+          );
+        },
+      });
+    }
+
+    export function useDeleteTodo() {
+      return useOptimisticMutation<void, string>({
+        mutationFn: deleteTodo,
+        queryKey: TODOS_KEY,
+        optimisticUpdate: (currentData, id) => {
+          return (currentData || []).filter((todo) => todo.id !== id);
+        },
+      });
+    }
+
+  components/todo-list.tsx: |
+    "use client";
+
+    import { useState } from "react";
+    import {
+      useTodos,
+      useCreateTodo,
+      useToggleTodo,
+      useDeleteTodo,
+    } from "@/hooks/use-todos";
+
+    export function TodoList() {
+      const [newTodo, setNewTodo] = useState("");
+      const { data: todos, isLoading, error } = useTodos();
+      const createTodo = useCreateTodo();
+      const toggleTodo = useToggleTodo();
+      const deleteTodo = useDeleteTodo();
+
+      const handleSubmit = (e: React.FormEvent) => {
+        e.preventDefault();
+        if (!newTodo.trim()) return;
+
+        createTodo.mutate(newTodo.trim());
+        setNewTodo("");
+      };
+
+      if (error) {
+        return (
+          <div className="rounded-lg bg-red-50 p-4 text-red-600">
+            Error: {error.message}
+          </div>
+        );
+      }
+
+      return (
+        <div className="mx-auto max-w-md space-y-4">
+          <form onSubmit={handleSubmit} className="flex gap-2">
+            <input
+              type="text"
+              value={newTodo}
+              onChange={(e) => setNewTodo(e.target.value)}
+              placeholder="Add a new todo..."
+              className="flex-1 rounded-lg border px-4 py-2 focus:border-blue-500 focus:outline-none"
+              disabled={createTodo.isPending}
+            />
+            <button
+              type="submit"
+              disabled={createTodo.isPending || !newTodo.trim()}
+              className="rounded-lg bg-blue-600 px-4 py-2 text-white hover:bg-blue-700 disabled:opacity-50"
+            >
+              {createTodo.isPending ? "Adding..." : "Add"}
+            </button>
+          </form>
+
+          {isLoading ? (
+            <div className="text-center text-gray-500">Loading...</div>
+          ) : (
+            <ul className="space-y-2">
+              {todos?.map((todo) => (
+                <li
+                  key={todo.id}
+                  className={`flex items-center gap-3 rounded-lg border p-3 transition-opacity ${
+                    todo.id.startsWith("temp-") ? "opacity-50" : ""
+                  }`}
+                >
+                  <input
+                    type="checkbox"
+                    checked={todo.completed}
+                    onChange={() =>
+                      toggleTodo.mutate({
+                        id: todo.id,
+                        completed: !todo.completed,
+                      })
+                    }
+                    disabled={todo.id.startsWith("temp-")}
+                    className="h-5 w-5 rounded border-gray-300"
+                  />
+                  <span
+                    className={`flex-1 ${
+                      todo.completed ? "text-gray-400 line-through" : ""
+                    }`}
+                  >
+                    {todo.title}
+                  </span>
+                  <button
+                    onClick={() => deleteTodo.mutate(todo.id)}
+                    disabled={
+                      todo.id.startsWith("temp-") || deleteTodo.isPending
+                    }
+                    className="text-red-500 hover:text-red-700 disabled:opacity-50"
+                  >
+                    Delete
+                  </button>
+                </li>
+              ))}
+
+              {todos?.length === 0 && (
+                <li className="text-center text-gray-500">No todos yet</li>
+              )}
+            </ul>
+          )}
+        </div>
+      );
+    }
+
+  app/layout.tsx: |
+    // Add to your existing layout.tsx:
+    import { QueryProvider } from "@/components/providers/query-provider";
+
+    export default function RootLayout({
+      children,
+    }: {
+      children: React.ReactNode;
+    }) {
+      return (
+        <html lang="en">
+          <body>
+            <QueryProvider>
+              {children}
+            </QueryProvider>
+          </body>
+        </html>
+      );
+    }
+
+edge_cases:
+  - id: rollback-flash
+    symptom: "UI briefly shows old state after error"
+    cause: "Optimistic update rolled back but user sees flash"
+    solution: |
+      Add error state feedback:
+      const { mutate, isError, error } = useMutation(...);
+      {isError && <div className="text-red-500">{error.message}</div>}
+
+  - id: stale-after-navigation
+    symptom: "Data stale after navigating back to page"
+    cause: "Query not refetching on mount"
+    solution: |
+      Reduce staleTime or add refetchOnMount:
+      useQuery({
+        queryKey: TODOS_KEY,
+        queryFn: fetchTodos,
+        staleTime: 0, // Always refetch
+        refetchOnMount: true,
+      });
+
+  - id: race-condition
+    symptom: "Optimistic update overwritten by slow query"
+    cause: "Background refetch replacing optimistic data"
+    solution: |
+      Cancel queries before mutation:
+      onMutate: async () => {
+        await queryClient.cancelQueries({ queryKey });
+        // ... rest of optimistic update
+      }
+
+  - id: temp-id-conflicts
+    symptom: "Multiple items with temp IDs cause issues"
+    cause: "Not replacing temp IDs with real ones"
+    solution: |
+      Use unique temp IDs and replace on success:
+      optimisticUpdate: (data, vars) => [{
+        id: `temp-${Date.now()}-${Math.random()}`,
+        ...
+      }, ...data];
+
+validation:
+  manual_test:
+    - "Add QueryProvider to your layout"
+    - "Add TodoList component to a page"
+    - "Create a todo - it should appear instantly"
+    - "Toggle a todo - it should update instantly"
+    - "Delete a todo - it should disappear instantly"
+    - "Open DevTools Network and throttle to Slow 3G"
+    - "Verify UI still feels instant"
+    - "Disconnect network and try actions - should rollback on error"

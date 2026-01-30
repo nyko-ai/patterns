@@ -1,0 +1,309 @@
+id: drizzle-setup
+version: "1.0.0"
+updated_at: "2026-01-31"
+author: "nyko-team"
+status: beta
+
+name: "Drizzle ORM Setup for Next.js"
+description: "Complete Drizzle ORM setup with PostgreSQL for Next.js App Router"
+
+category: database
+tags:
+  - drizzle
+  - postgresql
+  - orm
+  - nextjs
+  - database
+  - typescript
+
+difficulty: intermediate
+time_estimate: "20-25 min"
+
+stack:
+  required:
+    - name: "next"
+      version: "^15.1.0"
+      reason: "App Router with server components"
+    - name: "drizzle-orm"
+      version: "^0.45.0"
+      reason: "Drizzle ORM for type-safe queries"
+    - name: "drizzle-kit"
+      version: "^0.31.0"
+      reason: "Drizzle CLI for migrations"
+    - name: "@neondatabase/serverless"
+      version: "^0.10.0"
+      reason: "Neon serverless driver (or use 'pg' for standard PostgreSQL)"
+
+requires: []
+
+enables:
+  - optimistic-updates
+
+env_vars:
+  required:
+    - key: DATABASE_URL
+      description: "PostgreSQL connection string"
+      format: "postgresql://USER:PASSWORD@HOST:PORT/DATABASE?sslmode=require"
+      where_to_find: "Your database provider dashboard"
+
+external_setup:
+  - service: "PostgreSQL Database"
+    url: "https://neon.tech"
+    steps:
+      - "Create a Neon account and project"
+      - "Copy the connection string from the dashboard"
+      - "Add DATABASE_URL to .env file"
+      - "Run: npx drizzle-kit push"
+
+files:
+  - path: "drizzle.config.ts"
+    action: create
+    description: "Drizzle Kit configuration"
+    priority: 1
+
+  - path: "lib/db/schema.ts"
+    action: create
+    description: "Database schema definitions"
+    priority: 2
+
+  - path: "lib/db/index.ts"
+    action: create
+    description: "Database client"
+    priority: 3
+
+  - path: "lib/db/queries.ts"
+    action: create
+    description: "Type-safe query helpers"
+    priority: 4
+
+  - path: "app/api/users/route.ts"
+    action: create
+    description: "Example API route using Drizzle"
+    priority: 5
+
+code:
+  drizzle.config.ts: |
+    import { defineConfig } from "drizzle-kit";
+
+    if (!process.env.DATABASE_URL) {
+      throw new Error("DATABASE_URL is not set");
+    }
+
+    export default defineConfig({
+      schema: "./lib/db/schema.ts",
+      out: "./drizzle",
+      dialect: "postgresql",
+      dbCredentials: {
+        url: process.env.DATABASE_URL,
+      },
+      verbose: true,
+      strict: true,
+    });
+
+  lib/db/schema.ts: |
+    import {
+      pgTable,
+      text,
+      timestamp,
+      boolean,
+      uuid,
+    } from "drizzle-orm/pg-core";
+
+    export const users = pgTable("users", {
+      id: uuid("id").primaryKey().defaultRandom(),
+      email: text("email").notNull().unique(),
+      name: text("name"),
+      image: text("image"),
+      emailVerified: boolean("email_verified").default(false),
+      createdAt: timestamp("created_at").defaultNow().notNull(),
+      updatedAt: timestamp("updated_at").defaultNow().notNull(),
+    });
+
+    export const posts = pgTable("posts", {
+      id: uuid("id").primaryKey().defaultRandom(),
+      title: text("title").notNull(),
+      content: text("content"),
+      published: boolean("published").default(false),
+      authorId: uuid("author_id")
+        .notNull()
+        .references(() => users.id, { onDelete: "cascade" }),
+      createdAt: timestamp("created_at").defaultNow().notNull(),
+      updatedAt: timestamp("updated_at").defaultNow().notNull(),
+    });
+
+    // Type exports
+    export type User = typeof users.$inferSelect;
+    export type NewUser = typeof users.$inferInsert;
+    export type Post = typeof posts.$inferSelect;
+    export type NewPost = typeof posts.$inferInsert;
+
+  lib/db/index.ts: |
+    import { drizzle } from "drizzle-orm/neon-http";
+    import { neon } from "@neondatabase/serverless";
+    import * as schema from "./schema";
+
+    if (!process.env.DATABASE_URL) {
+      throw new Error("DATABASE_URL is not set");
+    }
+
+    const sql = neon(process.env.DATABASE_URL);
+
+    export const db = drizzle(sql, { schema });
+
+    export { schema };
+
+  lib/db/queries.ts: |
+    import { eq, desc } from "drizzle-orm";
+    import { db, schema } from "./index";
+
+    // User queries
+    export async function getUsers() {
+      return db.query.users.findMany({
+        orderBy: [desc(schema.users.createdAt)],
+      });
+    }
+
+    export async function getUserById(id: string) {
+      return db.query.users.findFirst({
+        where: eq(schema.users.id, id),
+      });
+    }
+
+    export async function getUserByEmail(email: string) {
+      return db.query.users.findFirst({
+        where: eq(schema.users.email, email),
+      });
+    }
+
+    export async function createUser(data: schema.NewUser) {
+      const [user] = await db.insert(schema.users).values(data).returning();
+      return user;
+    }
+
+    export async function updateUser(id: string, data: Partial<schema.NewUser>) {
+      const [user] = await db
+        .update(schema.users)
+        .set({ ...data, updatedAt: new Date() })
+        .where(eq(schema.users.id, id))
+        .returning();
+      return user;
+    }
+
+    export async function deleteUser(id: string) {
+      await db.delete(schema.users).where(eq(schema.users.id, id));
+    }
+
+    // Post queries with relations
+    export async function getPostsWithAuthor() {
+      return db.query.posts.findMany({
+        with: {
+          author: true,
+        },
+        orderBy: [desc(schema.posts.createdAt)],
+      });
+    }
+
+    export async function createPost(data: schema.NewPost) {
+      const [post] = await db.insert(schema.posts).values(data).returning();
+      return post;
+    }
+
+  app/api/users/route.ts: |
+    import { getUsers, createUser, getUserByEmail } from "@/lib/db/queries";
+    import { NextRequest, NextResponse } from "next/server";
+
+    export async function GET() {
+      try {
+        const users = await getUsers();
+        return NextResponse.json(users);
+      } catch (error) {
+        console.error("Error fetching users:", error);
+        return NextResponse.json(
+          { error: "Failed to fetch users" },
+          { status: 500 }
+        );
+      }
+    }
+
+    export async function POST(request: NextRequest) {
+      try {
+        const body = await request.json();
+        const { email, name } = body;
+
+        if (!email) {
+          return NextResponse.json(
+            { error: "Email is required" },
+            { status: 400 }
+          );
+        }
+
+        // Check if user exists
+        const existing = await getUserByEmail(email);
+        if (existing) {
+          return NextResponse.json(
+            { error: "A user with this email already exists" },
+            { status: 409 }
+          );
+        }
+
+        const user = await createUser({ email, name });
+        return NextResponse.json(user, { status: 201 });
+      } catch (error) {
+        console.error("Error creating user:", error);
+        return NextResponse.json(
+          { error: "Failed to create user" },
+          { status: 500 }
+        );
+      }
+    }
+
+edge_cases:
+  - id: neon-cold-start
+    symptom: "First query is slow (500ms+)"
+    cause: "Neon serverless cold start"
+    solution: |
+      This is normal for serverless databases. Options:
+      1. Enable "Always On" in Neon settings (paid feature)
+      2. Use connection pooling
+      3. For local dev, use a local PostgreSQL instead
+
+  - id: type-errors-after-schema-change
+    symptom: "TypeScript errors after modifying schema"
+    cause: "Types not regenerated"
+    solution: |
+      Drizzle types are inferred from schema automatically.
+      If you see stale types, restart your IDE/TypeScript server.
+
+  - id: migration-out-of-sync
+    symptom: "Database doesn't match schema"
+    cause: "Schema changed without pushing to database"
+    solution: |
+      For development: npx drizzle-kit push
+      For production: npx drizzle-kit generate && npx drizzle-kit migrate
+
+  - id: relation-not-working
+    symptom: "Relations return undefined"
+    cause: "Relations not defined in schema"
+    solution: |
+      Add relations to your schema:
+      import { relations } from "drizzle-orm";
+
+      export const usersRelations = relations(users, ({ many }) => ({
+        posts: many(posts),
+      }));
+
+      export const postsRelations = relations(posts, ({ one }) => ({
+        author: one(users, {
+          fields: [posts.authorId],
+          references: [users.id],
+        }),
+      }));
+
+validation:
+  manual_test:
+    - "Add DATABASE_URL to .env"
+    - "Run: npx drizzle-kit push"
+    - "Start dev server: npm run dev"
+    - "Test POST /api/users with { email, name }"
+    - "Test GET /api/users"
+    - "View database: npx drizzle-kit studio"
