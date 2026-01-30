@@ -24,7 +24,7 @@ stack:
       version: "^15.1.0"
       reason: "App Router with route handlers"
     - name: "stripe"
-      version: "^17.4.0"
+      version: "^20.0.0"
       reason: "Stripe Node.js SDK"
 
 requires:
@@ -61,11 +61,12 @@ files:
 
 code:
   app/api/billing/portal/route.ts: |
-    import { stripe } from "@/lib/stripe";
+    import { getStripe } from "@/lib/stripe";
     import { NextRequest, NextResponse } from "next/server";
 
     export async function POST(request: NextRequest) {
       try {
+        const stripe = getStripe();
         const body = await request.json();
         const { customerId } = body;
 

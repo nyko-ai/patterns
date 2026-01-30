@@ -24,7 +24,7 @@ stack:
       version: "^15.1.0"
       reason: "App Router with route handlers"
     - name: "stripe"
-      version: "^17.4.0"
+      version: "^20.0.0"
       reason: "Stripe Node.js SDK"
 
 requires:
@@ -75,7 +75,7 @@ files:
 
 code:
   app/api/webhooks/stripe/route.ts: |
-    import { stripe } from "@/lib/stripe";
+    import { getStripe } from "@/lib/stripe";
     import { headers } from "next/headers";
     import { NextResponse } from "next/server";
     import Stripe from "stripe";
@@ -105,6 +105,7 @@ code:
       let event: Stripe.Event;
 
       try {
+        const stripe = getStripe();
         event = stripe.webhooks.constructEvent(
           body,
           signature,
@@ -132,7 +133,7 @@ code:
 
   lib/stripe-webhooks.ts: |
     import Stripe from "stripe";
-    import { stripe } from "./stripe";
+    import { getStripe } from "./stripe";
 
     export async function handleWebhookEvent(event: Stripe.Event) {
       switch (event.type) {
@@ -196,6 +197,7 @@ code:
       const customerEmail = session.customer_details?.email;
 
       // Get line items for the session
+      const stripe = getStripe();
       const lineItems = await stripe.checkout.sessions.listLineItems(session.id);
 
       // TODO: Implement your business logic here
