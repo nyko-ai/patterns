@@ -1,0 +1,16 @@
+# Email Patterns
+id: email
+name: "Email"
+description: "Transactional email patterns"
+icon: "mail"
+
+patterns: []
+
+coming_soon:
+  - resend-basic-email
+  - resend-react-email-template
+  - resend-welcome-email
+
+notes: |
+  Email patterns coming soon.
+  Will use Resend as the primary provider for its React Email support.

@@ -1,0 +1,16 @@
+# Database Patterns
+id: database
+name: "Database"
+description: "Database patterns including RLS policies and migrations"
+icon: "database"
+
+patterns:
+  - supabase-rls-policies
+
+recommended_order:
+  - supabase-rls-policies
+
+notes: |
+  Row Level Security (RLS) is essential for Supabase security.
+  Always enable RLS on tables containing user data.
+  Test policies thoroughly before deploying to production.

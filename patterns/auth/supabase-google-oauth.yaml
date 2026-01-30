@@ -1,0 +1,283 @@
+id: supabase-google-oauth
+version: "1.0.0"
+updated_at: "2026-01-30"
+author: "nyko-team"
+status: stable
+
+name: "Supabase Google OAuth"
+description: "Complete Google OAuth authentication with Supabase Auth for Next.js App Router"
+
+category: auth
+tags:
+  - supabase
+  - google
+  - oauth
+  - nextjs
+  - authentication
+
+difficulty: intermediate
+time_estimate: "20-30 min"
+
+stack:
+  required:
+    - name: "next"
+      version: "^15.1.0"
+      reason: "App Router with server components"
+    - name: "@supabase/supabase-js"
+      version: "^2.49.0"
+      reason: "Supabase client library"
+    - name: "@supabase/ssr"
+      version: "^0.5.2"
+      reason: "SSR utilities for cookie-based auth"
+
+requires:
+  - supabase-client-nextjs
+
+enables:
+  - supabase-protected-routes
+  - supabase-signout
+
+env_vars:
+  required:
+    - key: NEXT_PUBLIC_SUPABASE_URL
+      description: "Supabase project URL"
+      format: "https://xxx.supabase.co"
+      where_to_find: "Supabase Dashboard > Project Settings > API"
+    - key: NEXT_PUBLIC_SUPABASE_ANON_KEY
+      description: "Supabase anonymous/public key"
+      format: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+      where_to_find: "Supabase Dashboard > Project Settings > API"
+
+external_setup:
+  - service: "Google Cloud Console"
+    url: "https://console.cloud.google.com/apis/credentials"
+    steps:
+      - "Create a new project or select existing"
+      - "Go to APIs & Services > Credentials"
+      - "Click 'Create Credentials' > 'OAuth client ID'"
+      - "Select 'Web application'"
+      - "Add authorized redirect URI: https://xxx.supabase.co/auth/v1/callback"
+      - "Copy Client ID and Client Secret"
+
+  - service: "Supabase"
+    url: "https://supabase.com/dashboard"
+    steps:
+      - "Go to Authentication > Providers"
+      - "Enable Google provider"
+      - "Paste Google Client ID and Client Secret"
+      - "Save changes"
+
+files:
+  - path: "middleware.ts"
+    action: create
+    description: "Root middleware for session refresh"
+    priority: 1
+
+  - path: "app/auth/callback/route.ts"
+    action: create
+    description: "OAuth callback handler"
+    priority: 2
+
+  - path: "app/login/page.tsx"
+    action: create
+    description: "Login page with Google button"
+    priority: 3
+
+  - path: "components/auth/google-sign-in-button.tsx"
+    action: create
+    description: "Reusable Google sign-in button"
+    priority: 4
+
+code:
+  middleware.ts: |
+    import { type NextRequest } from "next/server";
+    import { updateSession } from "@/lib/supabase/middleware";
+
+    export async function middleware(request: NextRequest) {
+      return (await updateSession(request)).supabaseResponse;
+    }
+
+    export const config = {
+      matcher: [
+        /*
+         * Match all request paths except for the ones starting with:
+         * - _next/static (static files)
+         * - _next/image (image optimization files)
+         * - favicon.ico (favicon file)
+         * - public folder
+         */
+        "/((?!_next/static|_next/image|favicon.ico|.*\\.(?:svg|png|jpg|jpeg|gif|webp)$).*)",
+      ],
+    };
+
+  app/auth/callback/route.ts: |
+    import { createClient } from "@/lib/supabase/server";
+    import { NextResponse } from "next/server";
+
+    export async function GET(request: Request) {
+      const { searchParams, origin } = new URL(request.url);
+      const code = searchParams.get("code");
+      // if "next" is in param, use it as the redirect URL
+      const next = searchParams.get("next") ?? "/";
+
+      if (code) {
+        const supabase = await createClient();
+        const { error } = await supabase.auth.exchangeCodeForSession(code);
+        if (!error) {
+          const forwardedHost = request.headers.get("x-forwarded-host"); // original origin before load balancer
+          const isLocalEnv = process.env.NODE_ENV === "development";
+          if (isLocalEnv) {
+            // we can be sure that there is no load balancer in between, so no need to watch for X-Forwarded-Host
+            return NextResponse.redirect(`${origin}${next}`);
+          } else if (forwardedHost) {
+            return NextResponse.redirect(`https://${forwardedHost}${next}`);
+          } else {
+            return NextResponse.redirect(`${origin}${next}`);
+          }
+        }
+      }
+
+      // return the user to an error page with instructions
+      return NextResponse.redirect(`${origin}/auth/auth-code-error`);
+    }
+
+  app/login/page.tsx: |
+    import { GoogleSignInButton } from "@/components/auth/google-sign-in-button";
+    import { createClient } from "@/lib/supabase/server";
+    import { redirect } from "next/navigation";
+
+    export default async function LoginPage() {
+      const supabase = await createClient();
+      const { data: { user } } = await supabase.auth.getUser();
+
+      // If already logged in, redirect to home
+      if (user) {
+        redirect("/");
+      }
+
+      return (
+        <div className="flex min-h-screen items-center justify-center">
+          <div className="w-full max-w-sm space-y-6 p-8">
+            <div className="text-center">
+              <h1 className="text-2xl font-bold">Welcome back</h1>
+              <p className="text-muted-foreground mt-2">
+                Sign in to your account to continue
+              </p>
+            </div>
+
+            <GoogleSignInButton />
+
+            <p className="text-center text-sm text-muted-foreground">
+              By continuing, you agree to our Terms of Service and Privacy Policy.
+            </p>
+          </div>
+        </div>
+      );
+    }
+
+  components/auth/google-sign-in-button.tsx: |
+    "use client";
+
+    import { createClient } from "@/lib/supabase/client";
+    import { useState } from "react";
+
+    export function GoogleSignInButton() {
+      const [isLoading, setIsLoading] = useState(false);
+
+      const handleSignIn = async () => {
+        setIsLoading(true);
+        const supabase = createClient();
+
+        const { error } = await supabase.auth.signInWithOAuth({
+          provider: "google",
+          options: {
+            redirectTo: `${window.location.origin}/auth/callback`,
+            queryParams: {
+              access_type: "offline",
+              prompt: "consent",
+            },
+          },
+        });
+
+        if (error) {
+          console.error("Error signing in with Google:", error.message);
+          setIsLoading(false);
+        }
+      };
+
+      return (
+        <button
+          onClick={handleSignIn}
+          disabled={isLoading}
+          className="flex w-full items-center justify-center gap-3 rounded-lg border border-gray-300 bg-white px-4 py-3 text-sm font-medium text-gray-700 shadow-sm transition-colors hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          <svg className="h-5 w-5" viewBox="0 0 24 24">
+            <path
+              fill="#4285F4"
+              d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"
+            />
+            <path
+              fill="#34A853"
+              d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"
+            />
+            <path
+              fill="#FBBC05"
+              d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z"
+            />
+            <path
+              fill="#EA4335"
+              d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"
+            />
+          </svg>
+          {isLoading ? "Signing in..." : "Continue with Google"}
+        </button>
+      );
+    }
+
+edge_cases:
+  - id: redirect-uri-mismatch
+    symptom: "Error: redirect_uri_mismatch after clicking Google sign-in"
+    cause: "Google OAuth redirect URI doesn't match Supabase callback URL"
+    solution: |
+      1. Go to Google Cloud Console > APIs & Services > Credentials
+      2. Edit your OAuth 2.0 Client ID
+      3. Add this exact URI to "Authorized redirect URIs":
+         https://YOUR_PROJECT_REF.supabase.co/auth/v1/callback
+      4. Save and wait a few minutes for changes to propagate
+
+  - id: popup-blocked
+    symptom: "OAuth popup is blocked by browser"
+    cause: "Browser blocking popups or signInWithOAuth called outside user interaction"
+    solution: |
+      Ensure signInWithOAuth is called directly from a button click handler,
+      not from an async function or useEffect. The code above handles this correctly.
+
+  - id: callback-error
+    symptom: "Redirected to /auth/auth-code-error after Google sign-in"
+    cause: "Code exchange failed - usually due to expired or invalid code"
+    solution: |
+      1. Create an error page at app/auth/auth-code-error/page.tsx
+      2. Common causes:
+         - Code expired (user took too long)
+         - Code already used (refresh during callback)
+         - Supabase configuration mismatch
+      3. Check Supabase logs for detailed error messages
+
+  - id: session-not-persisting
+    symptom: "User logged in but session lost on page refresh"
+    cause: "Middleware not configured or not matching routes"
+    solution: |
+      1. Ensure middleware.ts is in the root of your app (not in app/ or src/)
+      2. Check the matcher config includes your routes
+      3. Verify the updateSession function is imported correctly
+      4. Check browser cookies - should see sb-* cookies
+
+validation:
+  manual_test:
+    - "Start development server: npm run dev"
+    - "Navigate to /login"
+    - "Click 'Continue with Google'"
+    - "Complete Google sign-in flow"
+    - "Verify redirect to home page"
+    - "Refresh page - should remain logged in"
+    - "Check Supabase Dashboard > Authentication > Users for new user"

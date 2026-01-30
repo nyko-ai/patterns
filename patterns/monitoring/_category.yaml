@@ -1,0 +1,16 @@
+# Monitoring Patterns
+id: monitoring
+name: "Monitoring"
+description: "Error tracking and observability patterns"
+icon: "activity"
+
+patterns: []
+
+coming_soon:
+  - sentry-nextjs-setup
+  - posthog-analytics
+  - axiom-logging
+
+notes: |
+  Monitoring patterns coming soon.
+  Will include Sentry for errors, PostHog for analytics, and Axiom for logging.

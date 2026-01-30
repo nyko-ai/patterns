@@ -1,0 +1,211 @@
+id: stripe-customer-portal
+version: "1.0.0"
+updated_at: "2026-01-30"
+author: "nyko-team"
+status: stable
+
+name: "Stripe Customer Portal"
+description: "Redirect customers to Stripe's hosted billing portal for subscription management"
+
+category: payments
+tags:
+  - stripe
+  - billing
+  - subscriptions
+  - customer-portal
+  - nextjs
+
+difficulty: beginner
+time_estimate: "10-15 min"
+
+stack:
+  required:
+    - name: "next"
+      version: "^15.1.0"
+      reason: "App Router with route handlers"
+    - name: "stripe"
+      version: "^17.4.0"
+      reason: "Stripe Node.js SDK"
+
+requires:
+  - stripe-checkout-session
+
+enables: []
+
+env_vars:
+  required:
+    - key: STRIPE_SECRET_KEY
+      description: "Stripe secret API key"
+      format: "sk_test_... or sk_live_..."
+      where_to_find: "Stripe Dashboard > Developers > API keys"
+
+external_setup:
+  - service: "Stripe"
+    url: "https://dashboard.stripe.com/settings/billing/portal"
+    steps:
+      - "Go to Settings > Billing > Customer portal"
+      - "Configure allowed features (update payment method, cancel subscription, etc.)"
+      - "Add your return URL (where users go after leaving the portal)"
+      - "Save the configuration"
+
+files:
+  - path: "app/api/billing/portal/route.ts"
+    action: create
+    description: "API route to create portal session"
+    priority: 1
+
+  - path: "components/billing-portal-button.tsx"
+    action: create
+    description: "Button component to open billing portal"
+    priority: 2
+
+code:
+  app/api/billing/portal/route.ts: |
+    import { stripe } from "@/lib/stripe";
+    import { NextRequest, NextResponse } from "next/server";
+
+    export async function POST(request: NextRequest) {
+      try {
+        const body = await request.json();
+        const { customerId } = body;
+
+        if (!customerId) {
+          return NextResponse.json(
+            { error: "Customer ID is required" },
+            { status: 400 }
+          );
+        }
+
+        const origin = request.headers.get("origin") || "http://localhost:3000";
+
+        // Create a billing portal session
+        const session = await stripe.billingPortal.sessions.create({
+          customer: customerId,
+          return_url: `${origin}/account`,
+        });
+
+        return NextResponse.json({ url: session.url });
+      } catch (error) {
+        console.error("Error creating portal session:", error);
+
+        if (error instanceof Error && error.message.includes("No such customer")) {
+          return NextResponse.json(
+            { error: "Customer not found" },
+            { status: 404 }
+          );
+        }
+
+        return NextResponse.json(
+          { error: "Failed to create portal session" },
+          { status: 500 }
+        );
+      }
+    }
+
+  components/billing-portal-button.tsx: |
+    "use client";
+
+    import { useState } from "react";
+
+    interface BillingPortalButtonProps {
+      customerId: string;
+      children?: React.ReactNode;
+      className?: string;
+    }
+
+    export function BillingPortalButton({
+      customerId,
+      children = "Manage Billing",
+      className,
+    }: BillingPortalButtonProps) {
+      const [isLoading, setIsLoading] = useState(false);
+
+      const handleClick = async () => {
+        setIsLoading(true);
+
+        try {
+          const response = await fetch("/api/billing/portal", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({ customerId }),
+          });
+
+          const data = await response.json();
+
+          if (!response.ok) {
+            throw new Error(data.error || "Failed to open billing portal");
+          }
+
+          // Redirect to Stripe Customer Portal
+          if (data.url) {
+            window.location.href = data.url;
+          }
+        } catch (error) {
+          console.error("Billing portal error:", error);
+          alert("Failed to open billing portal. Please try again.");
+          setIsLoading(false);
+        }
+      };
+
+      return (
+        <button
+          onClick={handleClick}
+          disabled={isLoading}
+          className={
+            className ||
+            "rounded-lg border border-gray-300 px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
+          }
+        >
+          {isLoading ? "Loading..." : children}
+        </button>
+      );
+    }
+
+edge_cases:
+  - id: customer-not-found
+    symptom: "Error: No such customer: 'cus_xxx'"
+    cause: "Customer ID doesn't exist or using wrong Stripe mode"
+    solution: |
+      1. Verify the customer exists in Stripe Dashboard
+      2. Ensure you're using test keys with test customers
+      3. Store customer ID when user first purchases
+      4. Handle the error gracefully in the UI
+
+  - id: portal-not-configured
+    symptom: "Error: The customer portal has not been configured"
+    cause: "Customer portal settings not saved in Stripe"
+    solution: |
+      1. Go to Stripe Dashboard > Settings > Billing > Customer portal
+      2. Configure at least one feature (e.g., cancel subscription)
+      3. Save the configuration
+      4. Portal configuration is required even for test mode
+
+  - id: no-active-subscription
+    symptom: "Portal shows 'No subscriptions' even though customer paid"
+    cause: "Customer has one-time purchases but no subscriptions"
+    solution: |
+      The billing portal is primarily for subscriptions.
+      For one-time purchases, consider:
+      1. Showing invoice history from Stripe API
+      2. Building a custom billing page
+      3. Using portal only for customers with subscriptions
+
+  - id: return-url-mismatch
+    symptom: "Redirect fails after leaving the portal"
+    cause: "Return URL not configured or invalid"
+    solution: |
+      1. Ensure return_url uses the correct origin
+      2. Add the return URL to your Stripe Dashboard settings
+      3. For local dev, use localhost:3000
+      4. For production, use your actual domain
+
+validation:
+  manual_test:
+    - "Create a test subscription through checkout"
+    - "Get the customer ID from Stripe Dashboard"
+    - "Add the BillingPortalButton with the customer ID"
+    - "Click the button to open the portal"
+    - "Verify you can view/update subscription"
+    - "Click return link and verify redirect to your app"

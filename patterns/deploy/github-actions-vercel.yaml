@@ -1,0 +1,372 @@
+id: github-actions-vercel
+version: "1.0.0"
+updated_at: "2026-01-30"
+author: "nyko-team"
+status: stable
+
+name: "GitHub Actions CI/CD with Vercel"
+description: "Automated CI/CD pipeline with GitHub Actions deploying to Vercel"
+
+category: deploy
+tags:
+  - github-actions
+  - vercel
+  - ci-cd
+  - deployment
+  - nextjs
+
+difficulty: intermediate
+time_estimate: "15-20 min"
+
+stack:
+  required:
+    - name: "next"
+      version: "^15.1.0"
+      reason: "Vercel-optimized Next.js deployment"
+
+requires: []
+
+enables: []
+
+env_vars:
+  required:
+    - key: VERCEL_TOKEN
+      description: "Vercel API token for deployments"
+      format: "Token string"
+      where_to_find: "Vercel Dashboard > Account Settings > Tokens"
+    - key: VERCEL_ORG_ID
+      description: "Vercel organization/team ID"
+      format: "team_xxx or prj_xxx"
+      where_to_find: "Vercel Dashboard > Project Settings > General"
+    - key: VERCEL_PROJECT_ID
+      description: "Vercel project ID"
+      format: "prj_xxx"
+      where_to_find: "Vercel Dashboard > Project Settings > General"
+
+external_setup:
+  - service: "Vercel"
+    url: "https://vercel.com"
+    steps:
+      - "Link your GitHub repo to Vercel"
+      - "Go to Project Settings > General"
+      - "Copy the Project ID and Org ID"
+      - "Go to Account Settings > Tokens"
+      - "Create a new token for CI/CD"
+
+  - service: "GitHub"
+    url: "https://github.com"
+    steps:
+      - "Go to your repository Settings > Secrets and variables > Actions"
+      - "Add VERCEL_TOKEN, VERCEL_ORG_ID, VERCEL_PROJECT_ID as secrets"
+
+files:
+  - path: ".github/workflows/ci.yml"
+    action: create
+    description: "Main CI workflow for tests and linting"
+    priority: 1
+
+  - path: ".github/workflows/preview.yml"
+    action: create
+    description: "Preview deployment for pull requests"
+    priority: 2
+
+  - path: ".github/workflows/production.yml"
+    action: create
+    description: "Production deployment for main branch"
+    priority: 3
+
+code:
+  .github/workflows/ci.yml: |
+    name: CI
+
+    on:
+      push:
+        branches: [main, develop]
+      pull_request:
+        branches: [main, develop]
+
+    concurrency:
+      group: ${{ github.workflow }}-${{ github.ref }}
+      cancel-in-progress: true
+
+    jobs:
+      lint:
+        name: Lint
+        runs-on: ubuntu-latest
+        steps:
+          - name: Checkout
+            uses: actions/checkout@v4
+
+          - name: Setup Node.js
+            uses: actions/setup-node@v4
+            with:
+              node-version: "20"
+
+          - name: Setup pnpm
+            uses: pnpm/action-setup@v2
+            with:
+              version: 9
+
+          - name: Get pnpm store directory
+            shell: bash
+            run: |
+              echo "STORE_PATH=$(pnpm store path --silent)" >> $GITHUB_ENV
+
+          - name: Setup pnpm cache
+            uses: actions/cache@v4
+            with:
+              path: ${{ env.STORE_PATH }}
+              key: ${{ runner.os }}-pnpm-store-${{ hashFiles('**/pnpm-lock.yaml') }}
+              restore-keys: |
+                ${{ runner.os }}-pnpm-store-
+
+          - name: Install dependencies
+            run: pnpm install --frozen-lockfile
+
+          - name: Run ESLint
+            run: pnpm lint
+
+          - name: Run TypeScript check
+            run: pnpm type-check
+
+      test:
+        name: Test
+        runs-on: ubuntu-latest
+        steps:
+          - name: Checkout
+            uses: actions/checkout@v4
+
+          - name: Setup Node.js
+            uses: actions/setup-node@v4
+            with:
+              node-version: "20"
+
+          - name: Setup pnpm
+            uses: pnpm/action-setup@v2
+            with:
+              version: 9
+
+          - name: Get pnpm store directory
+            shell: bash
+            run: |
+              echo "STORE_PATH=$(pnpm store path --silent)" >> $GITHUB_ENV
+
+          - name: Setup pnpm cache
+            uses: actions/cache@v4
+            with:
+              path: ${{ env.STORE_PATH }}
+              key: ${{ runner.os }}-pnpm-store-${{ hashFiles('**/pnpm-lock.yaml') }}
+              restore-keys: |
+                ${{ runner.os }}-pnpm-store-
+
+          - name: Install dependencies
+            run: pnpm install --frozen-lockfile
+
+          - name: Run tests
+            run: pnpm test --passWithNoTests
+
+      build:
+        name: Build
+        runs-on: ubuntu-latest
+        needs: [lint, test]
+        steps:
+          - name: Checkout
+            uses: actions/checkout@v4
+
+          - name: Setup Node.js
+            uses: actions/setup-node@v4
+            with:
+              node-version: "20"
+
+          - name: Setup pnpm
+            uses: pnpm/action-setup@v2
+            with:
+              version: 9
+
+          - name: Get pnpm store directory
+            shell: bash
+            run: |
+              echo "STORE_PATH=$(pnpm store path --silent)" >> $GITHUB_ENV
+
+          - name: Setup pnpm cache
+            uses: actions/cache@v4
+            with:
+              path: ${{ env.STORE_PATH }}
+              key: ${{ runner.os }}-pnpm-store-${{ hashFiles('**/pnpm-lock.yaml') }}
+              restore-keys: |
+                ${{ runner.os }}-pnpm-store-
+
+          - name: Install dependencies
+            run: pnpm install --frozen-lockfile
+
+          - name: Build
+            run: pnpm build
+            env:
+              # Add any env vars needed for build
+              NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
+              NEXT_PUBLIC_SUPABASE_ANON_KEY: ${{ secrets.NEXT_PUBLIC_SUPABASE_ANON_KEY }}
+
+  .github/workflows/preview.yml: |
+    name: Preview Deployment
+
+    on:
+      pull_request:
+        branches: [main]
+
+    concurrency:
+      group: preview-${{ github.event.pull_request.number }}
+      cancel-in-progress: true
+
+    env:
+      VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+      VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+
+    jobs:
+      deploy:
+        name: Deploy Preview
+        runs-on: ubuntu-latest
+        environment:
+          name: Preview
+          url: ${{ steps.deploy.outputs.url }}
+        steps:
+          - name: Checkout
+            uses: actions/checkout@v4
+
+          - name: Setup Node.js
+            uses: actions/setup-node@v4
+            with:
+              node-version: "20"
+
+          - name: Install Vercel CLI
+            run: npm install -g vercel@latest
+
+          - name: Pull Vercel Environment Information
+            run: vercel pull --yes --environment=preview --token=${{ secrets.VERCEL_TOKEN }}
+
+          - name: Build Project Artifacts
+            run: vercel build --token=${{ secrets.VERCEL_TOKEN }}
+
+          - name: Deploy to Vercel
+            id: deploy
+            run: |
+              url=$(vercel deploy --prebuilt --token=${{ secrets.VERCEL_TOKEN }})
+              echo "url=$url" >> $GITHUB_OUTPUT
+
+          - name: Comment PR with Preview URL
+            uses: actions/github-script@v7
+            with:
+              script: |
+                github.rest.issues.createComment({
+                  issue_number: context.issue.number,
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  body: `🚀 Preview deployment ready!\n\n**URL:** ${{ steps.deploy.outputs.url }}`
+                })
+
+  .github/workflows/production.yml: |
+    name: Production Deployment
+
+    on:
+      push:
+        branches: [main]
+
+    concurrency:
+      group: production
+      cancel-in-progress: false
+
+    env:
+      VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+      VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+
+    jobs:
+      deploy:
+        name: Deploy Production
+        runs-on: ubuntu-latest
+        environment:
+          name: Production
+          url: ${{ steps.deploy.outputs.url }}
+        steps:
+          - name: Checkout
+            uses: actions/checkout@v4
+
+          - name: Setup Node.js
+            uses: actions/setup-node@v4
+            with:
+              node-version: "20"
+
+          - name: Install Vercel CLI
+            run: npm install -g vercel@latest
+
+          - name: Pull Vercel Environment Information
+            run: vercel pull --yes --environment=production --token=${{ secrets.VERCEL_TOKEN }}
+
+          - name: Build Project Artifacts
+            run: vercel build --prod --token=${{ secrets.VERCEL_TOKEN }}
+
+          - name: Deploy to Vercel
+            id: deploy
+            run: |
+              url=$(vercel deploy --prebuilt --prod --token=${{ secrets.VERCEL_TOKEN }})
+              echo "url=$url" >> $GITHUB_OUTPUT
+
+          - name: Create GitHub Deployment
+            uses: actions/github-script@v7
+            with:
+              script: |
+                github.rest.repos.createDeploymentStatus({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  deployment_id: context.payload.deployment?.id || 1,
+                  state: 'success',
+                  environment_url: '${{ steps.deploy.outputs.url }}',
+                  log_url: '${{ steps.deploy.outputs.url }}'
+                }).catch(() => {})
+
+edge_cases:
+  - id: missing-secrets
+    symptom: "Error: Resource not accessible by integration"
+    cause: "GitHub secrets not configured"
+    solution: |
+      1. Go to GitHub repo Settings > Secrets and variables > Actions
+      2. Add required secrets:
+         - VERCEL_TOKEN
+         - VERCEL_ORG_ID
+         - VERCEL_PROJECT_ID
+      3. Re-run the workflow
+
+  - id: vercel-project-not-linked
+    symptom: "Error: Could not find Project"
+    cause: "VERCEL_PROJECT_ID is incorrect or project not set up"
+    solution: |
+      1. Run locally: vercel link
+      2. This creates .vercel/project.json with correct IDs
+      3. Copy the projectId to GitHub secrets
+      4. Or find it in Vercel Dashboard > Project Settings
+
+  - id: build-fails-on-ci
+    symptom: "Build passes locally but fails in CI"
+    cause: "Missing environment variables in CI"
+    solution: |
+      1. Add all required env vars to GitHub secrets
+      2. Reference them in the workflow:
+         env:
+           NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
+      3. Check for case sensitivity in variable names
+
+  - id: pnpm-lockfile-mismatch
+    symptom: "Error: lockfile pnpm-lock.yaml does not match"
+    cause: "Dependencies changed without updating lockfile"
+    solution: |
+      1. Run: pnpm install
+      2. Commit the updated pnpm-lock.yaml
+      3. Or add --no-frozen-lockfile (not recommended for CI)
+
+validation:
+  manual_test:
+    - "Add GitHub secrets (VERCEL_TOKEN, VERCEL_ORG_ID, VERCEL_PROJECT_ID)"
+    - "Create a pull request to main branch"
+    - "Verify CI workflow runs (lint, test, build)"
+    - "Verify preview deployment creates a comment with URL"
+    - "Merge the PR to main"
+    - "Verify production deployment runs"
+    - "Check the deployed URL works"

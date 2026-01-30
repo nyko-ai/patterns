@@ -1,0 +1,20 @@
+# Payment Patterns
+id: payments
+name: "Payments"
+description: "Payment processing patterns with Stripe"
+icon: "credit-card"
+
+patterns:
+  - stripe-checkout-session
+  - stripe-webhook-handler
+  - stripe-customer-portal
+
+recommended_order:
+  - stripe-checkout-session  # Basic checkout first
+  - stripe-webhook-handler  # Handle events
+  - stripe-customer-portal  # Self-service management
+
+notes: |
+  All Stripe patterns use Stripe API version 2024-12-18.acacia.
+  Always verify webhook signatures in production.
+  Use test mode keys (sk_test_*) during development.

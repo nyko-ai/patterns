@@ -1,0 +1,16 @@
+# AI Patterns
+id: ai
+name: "AI"
+description: "AI and LLM integration patterns"
+icon: "cpu"
+
+patterns: []
+
+coming_soon:
+  - openai-chat-completion
+  - anthropic-claude-messages
+  - vercel-ai-sdk-streaming
+
+notes: |
+  AI patterns coming soon.
+  Will include OpenAI, Anthropic Claude, and Vercel AI SDK patterns.

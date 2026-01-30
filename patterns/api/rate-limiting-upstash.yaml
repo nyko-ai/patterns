@@ -1,0 +1,338 @@
+id: rate-limiting-upstash
+version: "1.0.0"
+updated_at: "2026-01-30"
+author: "nyko-team"
+status: stable
+
+name: "Rate Limiting with Upstash Redis"
+description: "Serverless rate limiting using Upstash Redis for API routes and edge functions"
+
+category: api
+tags:
+  - rate-limiting
+  - upstash
+  - redis
+  - api
+  - security
+
+difficulty: intermediate
+time_estimate: "15-20 min"
+
+stack:
+  required:
+    - name: "next"
+      version: "^15.1.0"
+      reason: "App Router with middleware support"
+    - name: "@upstash/ratelimit"
+      version: "^2.0.5"
+      reason: "Serverless rate limiting library"
+    - name: "@upstash/redis"
+      version: "^1.34.3"
+      reason: "Upstash Redis client"
+
+requires: []
+
+enables: []
+
+env_vars:
+  required:
+    - key: UPSTASH_REDIS_REST_URL
+      description: "Upstash Redis REST API URL"
+      format: "https://xxx.upstash.io"
+      where_to_find: "Upstash Console > Database > REST API"
+    - key: UPSTASH_REDIS_REST_TOKEN
+      description: "Upstash Redis REST API token"
+      format: "AXXXxxxxx..."
+      where_to_find: "Upstash Console > Database > REST API"
+
+external_setup:
+  - service: "Upstash"
+    url: "https://console.upstash.com"
+    steps:
+      - "Create account or log in"
+      - "Click 'Create Database'"
+      - "Select a region close to your deployment"
+      - "Copy the REST URL and Token from the database page"
+
+files:
+  - path: "lib/rate-limit.ts"
+    action: create
+    description: "Rate limiter configuration and utilities"
+    priority: 1
+
+  - path: "middleware.ts"
+    action: create
+    description: "Middleware with rate limiting"
+    priority: 2
+
+  - path: "app/api/example/route.ts"
+    action: create
+    description: "Example API route with rate limiting"
+    priority: 3
+
+code:
+  lib/rate-limit.ts: |
+    import { Ratelimit } from "@upstash/ratelimit";
+    import { Redis } from "@upstash/redis";
+
+    // Validate environment variables
+    if (!process.env.UPSTASH_REDIS_REST_URL) {
+      throw new Error("Missing UPSTASH_REDIS_REST_URL");
+    }
+    if (!process.env.UPSTASH_REDIS_REST_TOKEN) {
+      throw new Error("Missing UPSTASH_REDIS_REST_TOKEN");
+    }
+
+    // Create Redis client
+    export const redis = new Redis({
+      url: process.env.UPSTASH_REDIS_REST_URL,
+      token: process.env.UPSTASH_REDIS_REST_TOKEN,
+    });
+
+    /**
+     * Standard rate limiter for API routes
+     * 10 requests per 10 seconds using sliding window
+     */
+    export const ratelimit = new Ratelimit({
+      redis,
+      limiter: Ratelimit.slidingWindow(10, "10 s"),
+      analytics: true,
+      prefix: "@upstash/ratelimit",
+    });
+
+    /**
+     * Stricter rate limiter for sensitive endpoints (auth, payments)
+     * 5 requests per minute
+     */
+    export const strictRatelimit = new Ratelimit({
+      redis,
+      limiter: Ratelimit.slidingWindow(5, "1 m"),
+      analytics: true,
+      prefix: "@upstash/ratelimit/strict",
+    });
+
+    /**
+     * Lenient rate limiter for public endpoints
+     * 100 requests per minute
+     */
+    export const publicRatelimit = new Ratelimit({
+      redis,
+      limiter: Ratelimit.slidingWindow(100, "1 m"),
+      analytics: true,
+      prefix: "@upstash/ratelimit/public",
+    });
+
+    /**
+     * Get identifier for rate limiting
+     * Uses IP address as the default identifier
+     */
+    export function getIdentifier(request: Request): string {
+      // Try to get real IP from various headers
+      const forwardedFor = request.headers.get("x-forwarded-for");
+      if (forwardedFor) {
+        return forwardedFor.split(",")[0].trim();
+      }
+
+      const realIp = request.headers.get("x-real-ip");
+      if (realIp) {
+        return realIp;
+      }
+
+      // Fallback to a hash of user agent + some request info
+      const ua = request.headers.get("user-agent") || "unknown";
+      return `anonymous:${ua.slice(0, 50)}`;
+    }
+
+    /**
+     * Helper to handle rate limit in API routes
+     */
+    export async function checkRateLimit(
+      request: Request,
+      limiter: Ratelimit = ratelimit
+    ): Promise<{
+      success: boolean;
+      limit: number;
+      remaining: number;
+      reset: number;
+    }> {
+      const identifier = getIdentifier(request);
+      const result = await limiter.limit(identifier);
+
+      return {
+        success: result.success,
+        limit: result.limit,
+        remaining: result.remaining,
+        reset: result.reset,
+      };
+    }
+
+  middleware.ts: |
+    import { NextResponse, type NextRequest } from "next/server";
+    import { ratelimit, getIdentifier } from "@/lib/rate-limit";
+
+    // Routes to apply rate limiting
+    const rateLimitedPaths = ["/api/"];
+
+    // Routes to exclude from rate limiting
+    const excludedPaths = ["/api/webhooks/"];
+
+    export async function middleware(request: NextRequest) {
+      const { pathname } = request.nextUrl;
+
+      // Check if this path should be rate limited
+      const shouldRateLimit = rateLimitedPaths.some((path) =>
+        pathname.startsWith(path)
+      );
+      const isExcluded = excludedPaths.some((path) =>
+        pathname.startsWith(path)
+      );
+
+      if (shouldRateLimit && !isExcluded) {
+        try {
+          const identifier = getIdentifier(request);
+          const { success, limit, remaining, reset } = await ratelimit.limit(
+            identifier
+          );
+
+          // Add rate limit headers to response
+          const response = success
+            ? NextResponse.next()
+            : NextResponse.json(
+                {
+                  error: "Too many requests",
+                  message: "Rate limit exceeded. Please try again later.",
+                },
+                { status: 429 }
+              );
+
+          response.headers.set("X-RateLimit-Limit", limit.toString());
+          response.headers.set("X-RateLimit-Remaining", remaining.toString());
+          response.headers.set("X-RateLimit-Reset", reset.toString());
+
+          if (!success) {
+            response.headers.set(
+              "Retry-After",
+              Math.ceil((reset - Date.now()) / 1000).toString()
+            );
+          }
+
+          return response;
+        } catch (error) {
+          // If rate limiting fails, allow the request through
+          // Log the error for monitoring
+          console.error("Rate limiting error:", error);
+          return NextResponse.next();
+        }
+      }
+
+      return NextResponse.next();
+    }
+
+    export const config = {
+      matcher: ["/api/:path*"],
+    };
+
+  app/api/example/route.ts: |
+    import { checkRateLimit, strictRatelimit } from "@/lib/rate-limit";
+    import { NextRequest, NextResponse } from "next/server";
+
+    export async function GET(request: NextRequest) {
+      // Example: Apply stricter rate limiting to this specific endpoint
+      const { success, remaining, reset, limit } = await checkRateLimit(
+        request,
+        strictRatelimit
+      );
+
+      if (!success) {
+        return NextResponse.json(
+          {
+            error: "Rate limit exceeded",
+            message: "Please wait before making more requests",
+            retryAfter: Math.ceil((reset - Date.now()) / 1000),
+          },
+          {
+            status: 429,
+            headers: {
+              "X-RateLimit-Limit": limit.toString(),
+              "X-RateLimit-Remaining": "0",
+              "X-RateLimit-Reset": reset.toString(),
+              "Retry-After": Math.ceil((reset - Date.now()) / 1000).toString(),
+            },
+          }
+        );
+      }
+
+      // Your API logic here
+      return NextResponse.json(
+        {
+          message: "Success!",
+          data: { timestamp: new Date().toISOString() },
+        },
+        {
+          headers: {
+            "X-RateLimit-Limit": limit.toString(),
+            "X-RateLimit-Remaining": remaining.toString(),
+            "X-RateLimit-Reset": reset.toString(),
+          },
+        }
+      );
+    }
+
+    export async function POST(request: NextRequest) {
+      // Rate limiting is handled by middleware for this route
+      // Additional endpoint-specific logic can be added here
+
+      const body = await request.json();
+
+      return NextResponse.json({
+        message: "Created!",
+        data: body,
+      });
+    }
+
+edge_cases:
+  - id: redis-connection-failed
+    symptom: "Error: Failed to connect to Upstash Redis"
+    cause: "Invalid credentials or network issues"
+    solution: |
+      1. Verify UPSTASH_REDIS_REST_URL is correct (includes https://)
+      2. Verify UPSTASH_REDIS_REST_TOKEN is complete
+      3. Check if database is active in Upstash console
+      4. Try the connection in Upstash console "CLI" tab
+
+  - id: rate-limit-too-strict
+    symptom: "Users getting rate limited during normal use"
+    cause: "Rate limits set too low for your traffic pattern"
+    solution: |
+      Adjust the limits in lib/rate-limit.ts:
+      - Increase requests: slidingWindow(50, "10 s")
+      - Use longer windows: slidingWindow(100, "1 m")
+      - Consider different limits for authenticated users
+
+  - id: shared-ip-blocking
+    symptom: "Multiple users behind NAT getting blocked together"
+    cause: "Rate limiting by IP affects all users behind same IP"
+    solution: |
+      For authenticated users, use user ID instead of IP:
+      const identifier = user?.id || getIdentifier(request);
+
+      Or combine both: `${userId}:${ip}`
+
+  - id: middleware-blocking-webhooks
+    symptom: "Stripe/other webhooks failing with 429"
+    cause: "Webhooks getting rate limited"
+    solution: |
+      Exclude webhook endpoints from rate limiting:
+      const excludedPaths = ["/api/webhooks/"];
+
+      Or use a higher limit for known webhook IPs
+
+validation:
+  manual_test:
+    - "Create Upstash database and add credentials to .env.local"
+    - "Start the dev server: npm run dev"
+    - "Make 10+ rapid requests to /api/example"
+    - "Verify 429 response after limit exceeded"
+    - "Check X-RateLimit-* headers in response"
+    - "Wait for reset period, verify requests work again"
+    - "Check Upstash console for rate limit analytics"

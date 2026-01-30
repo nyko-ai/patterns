@@ -1,0 +1,117 @@
+# NYKO Pattern Template
+# Copy this file and fill in all fields to create a new pattern
+# Remove all comments before submitting
+
+# === METADATA ===
+id: your-pattern-id-kebab-case
+version: "1.0.0"
+updated_at: "2026-01-30"
+author: "your-name"
+status: stable  # stable | beta | deprecated
+
+# === DESCRIPTION ===
+name: "Human Readable Pattern Name"
+description: "One line description of what this pattern does"
+
+category: auth  # auth | payments | database | deploy | email | api | storage | monitoring | ai
+tags:
+  - tag1
+  - tag2
+  - tag3
+
+difficulty: intermediate  # beginner | intermediate | advanced
+time_estimate: "15-20 min"
+
+# === DEPENDENCIES ===
+stack:
+  required:
+    - name: "package-name"
+      version: "^x.x.x"
+      reason: "Why this package is needed"
+  optional:
+    - name: "optional-package"
+      version: "^x.x.x"
+      reason: "When you might want this"
+  incompatible:
+    - name: "old-package"
+      reason: "Why this is incompatible"
+
+# === PATTERN RELATIONSHIPS ===
+requires: []  # Pattern IDs that must be implemented first
+enables: []   # Pattern IDs this enables
+
+# === ENVIRONMENT ===
+env_vars:
+  required:
+    - key: ENV_VAR_NAME
+      description: "What this variable is for"
+      format: "Expected format (e.g., sk_test_xxx or URL)"
+      where_to_find: "Where to get this value"
+  optional:
+    - key: OPTIONAL_VAR
+      description: "What this optional variable does"
+      default: "default-value"
+
+# === EXTERNAL SETUP ===
+external_setup:
+  - service: "Service Name"
+    url: "https://dashboard.example.com"
+    steps:
+      - "Step 1: Navigate to..."
+      - "Step 2: Click on..."
+      - "Step 3: Copy the..."
+
+# === FILES TO CREATE ===
+files:
+  - path: "path/to/file.ts"
+    action: create  # create | modify | append
+    description: "What this file does"
+    priority: 1  # Order of creation (1 = first)
+
+  - path: "path/to/another.ts"
+    action: create
+    description: "Another file description"
+    priority: 2
+
+# === CODE ===
+code:
+  path/to/file.ts: |
+    // Complete, working code for this file
+    // No placeholders, no TODOs
+    // This should be copy-paste ready
+
+  path/to/another.ts: |
+    // More complete code
+
+# === EDGE CASES ===
+# Minimum 3 edge cases required
+edge_cases:
+  - id: edge-case-1
+    symptom: "What the user sees or experiences"
+    cause: "Technical reason why this happens"
+    solution: |
+      Step by step solution:
+      1. First do this
+      2. Then do this
+      3. Verify by doing this
+
+  - id: edge-case-2
+    symptom: "Another problem users might encounter"
+    cause: "Why it happens"
+    solution: "How to fix it"
+
+  - id: edge-case-3
+    symptom: "Third edge case"
+    cause: "Root cause"
+    solution: "Resolution steps"
+
+# === VALIDATION ===
+validation:
+  manual_test:
+    - "Step 1: Start the development server"
+    - "Step 2: Navigate to /login"
+    - "Step 3: Click the login button"
+    - "Step 4: Verify redirect to dashboard"
+  automated_test:
+    command: "npm test"
+    expected: "All tests pass"

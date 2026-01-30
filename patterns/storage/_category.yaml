@@ -1,0 +1,16 @@
+# Storage Patterns
+id: storage
+name: "Storage"
+description: "File storage and upload patterns"
+icon: "upload"
+
+patterns: []
+
+coming_soon:
+  - supabase-storage-upload
+  - supabase-storage-signed-urls
+  - s3-presigned-upload
+
+notes: |
+  Storage patterns coming soon.
+  Will include Supabase Storage and S3-compatible patterns.

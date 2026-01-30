@@ -1,0 +1,17 @@
+# Deployment Patterns
+id: deploy
+name: "Deployment"
+description: "CI/CD and deployment configuration patterns"
+icon: "rocket"
+
+patterns:
+  - docker-compose-dev
+  - github-actions-vercel
+
+recommended_order:
+  - docker-compose-dev  # Local development
+  - github-actions-vercel  # Production deployment
+
+notes: |
+  Docker Compose is optional but recommended for consistent local environments.
+  GitHub Actions + Vercel provides zero-config deployments with preview URLs.

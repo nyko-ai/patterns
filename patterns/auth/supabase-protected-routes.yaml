@@ -1,0 +1,262 @@
+id: supabase-protected-routes
+version: "1.0.0"
+updated_at: "2026-01-30"
+author: "nyko-team"
+status: stable
+
+name: "Supabase Protected Routes"
+description: "Route protection with middleware and helpers for authenticated-only pages"
+
+category: auth
+tags:
+  - supabase
+  - middleware
+  - protected-routes
+  - authorization
+  - nextjs
+
+difficulty: intermediate
+time_estimate: "15-20 min"
+
+stack:
+  required:
+    - name: "next"
+      version: "^15.1.0"
+      reason: "App Router with middleware support"
+    - name: "@supabase/supabase-js"
+      version: "^2.49.0"
+      reason: "Supabase client library"
+    - name: "@supabase/ssr"
+      version: "^0.5.2"
+      reason: "SSR utilities for cookie-based auth"
+
+requires:
+  - supabase-client-nextjs
+
+enables: []
+
+env_vars:
+  required:
+    - key: NEXT_PUBLIC_SUPABASE_URL
+      description: "Supabase project URL"
+      format: "https://xxx.supabase.co"
+      where_to_find: "Supabase Dashboard > Project Settings > API"
+    - key: NEXT_PUBLIC_SUPABASE_ANON_KEY
+      description: "Supabase anonymous/public key"
+      format: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+      where_to_find: "Supabase Dashboard > Project Settings > API"
+
+files:
+  - path: "middleware.ts"
+    action: create
+    description: "Middleware with route protection logic"
+    priority: 1
+
+  - path: "lib/auth/protect.ts"
+    action: create
+    description: "Server-side route protection helper"
+    priority: 2
+
+  - path: "app/(protected)/layout.tsx"
+    action: create
+    description: "Layout for protected routes group"
+    priority: 3
+
+  - path: "app/(protected)/dashboard/page.tsx"
+    action: create
+    description: "Example protected dashboard page"
+    priority: 4
+
+code:
+  middleware.ts: |
+    import { type NextRequest, NextResponse } from "next/server";
+    import { updateSession } from "@/lib/supabase/middleware";
+
+    // Define public routes that don't require authentication
+    const publicRoutes = ["/", "/login", "/signup", "/auth"];
+
+    // Define routes that should redirect to dashboard if already authenticated
+    const authRoutes = ["/login", "/signup"];
+
+    export async function middleware(request: NextRequest) {
+      const { supabaseResponse, user } = await updateSession(request);
+
+      const { pathname } = request.nextUrl;
+
+      // Check if it's a public route
+      const isPublicRoute = publicRoutes.some(
+        (route) => pathname === route || pathname.startsWith(`${route}/`)
+      );
+
+      // Check if it's an auth route (login/signup)
+      const isAuthRoute = authRoutes.some(
+        (route) => pathname === route || pathname.startsWith(`${route}/`)
+      );
+
+      // Redirect authenticated users away from auth routes
+      if (user && isAuthRoute) {
+        const url = request.nextUrl.clone();
+        url.pathname = "/dashboard";
+        return NextResponse.redirect(url);
+      }
+
+      // Redirect unauthenticated users to login for protected routes
+      if (!user && !isPublicRoute) {
+        const url = request.nextUrl.clone();
+        url.pathname = "/login";
+        url.searchParams.set("next", pathname);
+        return NextResponse.redirect(url);
+      }
+
+      return supabaseResponse;
+    }
+
+    export const config = {
+      matcher: [
+        "/((?!_next/static|_next/image|favicon.ico|.*\\.(?:svg|png|jpg|jpeg|gif|webp)$).*)",
+      ],
+    };
+
+  lib/auth/protect.ts: |
+    import { createClient } from "@/lib/supabase/server";
+    import { redirect } from "next/navigation";
+
+    /**
+     * Protect a server component or page by requiring authentication.
+     * Redirects to login if user is not authenticated.
+     *
+     * @example
+     * // In a Server Component:
+     * const user = await requireAuth();
+     * // user is guaranteed to be non-null here
+     */
+    export async function requireAuth() {
+      const supabase = await createClient();
+      const {
+        data: { user },
+        error,
+      } = await supabase.auth.getUser();
+
+      if (error || !user) {
+        redirect("/login");
+      }
+
+      return user;
+    }
+
+    /**
+     * Get the current user without redirecting.
+     * Returns null if not authenticated.
+     *
+     * @example
+     * const user = await getUser();
+     * if (user) {
+     *   // User is authenticated
+     * }
+     */
+    export async function getUser() {
+      const supabase = await createClient();
+      const {
+        data: { user },
+      } = await supabase.auth.getUser();
+
+      return user;
+    }
+
+    /**
+     * Check if the user has a specific role.
+     * Requires user metadata or a roles table.
+     *
+     * @example
+     * const isAdmin = await hasRole('admin');
+     */
+    export async function hasRole(role: string): Promise<boolean> {
+      const user = await getUser();
+      if (!user) return false;
+
+      // Check user metadata for role
+      const userRole = user.user_metadata?.role;
+      return userRole === role;
+    }
+
+  app/(protected)/layout.tsx: |
+    import { requireAuth } from "@/lib/auth/protect";
+
+    export default async function ProtectedLayout({
+      children,
+    }: {
+      children: React.ReactNode;
+    }) {
+      // This will redirect to /login if not authenticated
+      await requireAuth();
+
+      return <>{children}</>;
+    }
+
+  app/(protected)/dashboard/page.tsx: |
+    import { createClient } from "@/lib/supabase/server";
+
+    export default async function DashboardPage() {
+      const supabase = await createClient();
+      const {
+        data: { user },
+      } = await supabase.auth.getUser();
+
+      return (
+        <div className="p-8">
+          <h1 className="text-2xl font-bold">Dashboard</h1>
+          <p className="mt-4 text-gray-600">
+            Welcome back, {user?.email}!
+          </p>
+          <pre className="mt-4 rounded-lg bg-gray-100 p-4 text-sm">
+            {JSON.stringify(user, null, 2)}
+          </pre>
+        </div>
+      );
+    }
+
+edge_cases:
+  - id: infinite-redirect-loop
+    symptom: "Browser shows 'too many redirects' error"
+    cause: "Middleware redirecting on every request, including the login page"
+    solution: |
+      1. Ensure /login is in the publicRoutes array
+      2. Check that the middleware matcher excludes static files
+      3. Verify the redirect URL doesn't match a protected pattern
+
+  - id: middleware-not-running
+    symptom: "Protected pages accessible without authentication"
+    cause: "Middleware not placed in correct location or matcher misconfigured"
+    solution: |
+      1. middleware.ts must be in the root (not in app/ or src/app/)
+      2. For src/ projects, place it in src/middleware.ts
+      3. Check that the matcher pattern includes your protected routes
+      4. Clear Next.js cache: rm -rf .next && npm run dev
+
+  - id: session-expired-during-navigation
+    symptom: "User suddenly redirected to login mid-session"
+    cause: "Session expired or token refresh failed"
+    solution: |
+      1. Ensure updateSession is called in middleware
+      2. Check Supabase session settings (default 1 week)
+      3. Handle session refresh errors gracefully
+      4. Consider showing a re-authentication modal instead of hard redirect
+
+  - id: next-param-not-working
+    symptom: "After login, user not redirected to original page"
+    cause: "next parameter not being read or applied"
+    solution: |
+      1. Verify /login page reads searchParams.next
+      2. Pass next to OAuth redirect: /auth/callback?next=/original-page
+      3. In callback route, use the next parameter for final redirect
+
+validation:
+  manual_test:
+    - "Log out if logged in"
+    - "Try to navigate to /dashboard directly"
+    - "Verify redirect to /login with ?next=/dashboard"
+    - "Log in successfully"
+    - "Verify redirect to /dashboard after login"
+    - "Refresh the page - should stay on dashboard"
+    - "Open new incognito window, go to /dashboard"
+    - "Verify redirect to login (no session)"

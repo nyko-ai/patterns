@@ -1,0 +1,15 @@
+# API Patterns
+id: api
+name: "API"
+description: "API patterns including rate limiting and caching"
+icon: "zap"
+
+patterns:
+  - rate-limiting-upstash
+
+recommended_order:
+  - rate-limiting-upstash
+
+notes: |
+  Upstash provides serverless Redis perfect for edge functions.
+  Rate limiting is essential for public APIs.

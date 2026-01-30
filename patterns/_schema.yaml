@@ -1,0 +1,234 @@
+# NYKO Patterns - JSON Schema Definition
+# This schema validates all pattern YAML files
+
+$schema: "http://json-schema.org/draft-07/schema#"
+$id: "https://nyko.ai/patterns/schema/v1"
+title: "NYKO Pattern Schema"
+description: "Schema for validating NYKO implementation patterns"
+type: object
+
+required:
+  - id
+  - version
+  - updated_at
+  - author
+  - status
+  - name
+  - description
+  - category
+  - tags
+  - difficulty
+  - time_estimate
+  - stack
+  - files
+  - code
+  - edge_cases
+  - validation
+
+properties:
+  id:
+    type: string
+    pattern: "^[a-z0-9]+(-[a-z0-9]+)*$"
+    description: "Unique kebab-case identifier"
+    examples: ["supabase-google-oauth", "stripe-checkout-session"]
+
+  version:
+    type: string
+    pattern: "^\\d+\\.\\d+\\.\\d+$"
+    description: "Semantic version"
+    examples: ["1.0.0", "2.1.3"]
+
+  updated_at:
+    type: string
+    format: date
+    description: "Last update date (YYYY-MM-DD)"
+
+  author:
+    type: string
+    description: "Pattern author or team"
+
+  status:
+    type: string
+    enum: ["stable", "beta", "deprecated"]
+    description: "Pattern stability status"
+
+  name:
+    type: string
+    maxLength: 100
+    description: "Human-readable name"
+
+  description:
+    type: string
+    maxLength: 500
+    description: "One-line description"
+
+  category:
+    type: string
+    enum: ["auth", "payments", "database", "deploy", "email", "api", "storage", "monitoring", "ai"]
+    description: "Primary category"
+
+  tags:
+    type: array
+    items:
+      type: string
+    minItems: 2
+    description: "Searchable tags"
+
+  difficulty:
+    type: string
+    enum: ["beginner", "intermediate", "advanced"]
+
+  time_estimate:
+    type: string
+    pattern: "^\\d+-\\d+ min$"
+    description: "Estimated implementation time"
+    examples: ["10-15 min", "30-45 min"]
+
+  stack:
+    type: object
+    required: ["required"]
+    properties:
+      required:
+        type: array
+        items:
+          type: object
+          required: ["name", "version"]
+          properties:
+            name:
+              type: string
+            version:
+              type: string
+            reason:
+              type: string
+      optional:
+        type: array
+        items:
+          type: object
+          properties:
+            name:
+              type: string
+            version:
+              type: string
+            reason:
+              type: string
+      incompatible:
+        type: array
+        items:
+          type: object
+          properties:
+            name:
+              type: string
+            reason:
+              type: string
+
+  requires:
+    type: array
+    items:
+      type: string
+    description: "Pattern IDs that must be implemented first"
+
+  enables:
+    type: array
+    items:
+      type: string
+    description: "Pattern IDs this enables"
+
+  env_vars:
+    type: object
+    properties:
+      required:
+        type: array
+        items:
+          type: object
+          required: ["key", "description"]
+          properties:
+            key:
+              type: string
+              pattern: "^[A-Z][A-Z0-9_]*$"
+            description:
+              type: string
+            format:
+              type: string
+            where_to_find:
+              type: string
+      optional:
+        type: array
+        items:
+          type: object
+          properties:
+            key:
+              type: string
+            description:
+              type: string
+            default:
+              type: string
+
+  external_setup:
+    type: array
+    items:
+      type: object
+      properties:
+        service:
+          type: string
+        steps:
+          type: array
+          items:
+            type: string
+        url:
+          type: string
+
+  files:
+    type: array
+    items:
+      type: object
+      required: ["path", "action", "description"]
+      properties:
+        path:
+          type: string
+        action:
+          type: string
+          enum: ["create", "modify", "append"]
+        description:
+          type: string
+        priority:
+          type: integer
+          minimum: 1
+
+  code:
+    type: object
+    additionalProperties:
+      type: string
+    description: "Map of file paths to their complete code content"
+
+  edge_cases:
+    type: array
+    minItems: 3
+    items:
+      type: object
+      required: ["id", "symptom", "cause", "solution"]
+      properties:
+        id:
+          type: string
+        symptom:
+          type: string
+        cause:
+          type: string
+        solution:
+          type: string
+
+  validation:
+    type: object
+    required: ["manual_test"]
+    properties:
+      manual_test:
+        type: array
+        items:
+          type: string
+        minItems: 1
+      automated_test:
+        type: object
+        properties:
+          command:
+            type: string
+          expected:
+            type: string

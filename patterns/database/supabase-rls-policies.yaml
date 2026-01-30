@@ -1,0 +1,334 @@
+id: supabase-rls-policies
+version: "1.0.0"
+updated_at: "2026-01-30"
+author: "nyko-team"
+status: stable
+
+name: "Supabase Row Level Security Policies"
+description: "Common RLS policy patterns for securing Supabase database tables"
+
+category: database
+tags:
+  - supabase
+  - rls
+  - security
+  - postgresql
+  - database
+
+difficulty: intermediate
+time_estimate: "15-20 min"
+
+stack:
+  required:
+    - name: "@supabase/supabase-js"
+      version: "^2.49.0"
+      reason: "Supabase client for authentication context"
+
+requires:
+  - supabase-client-nextjs
+
+enables: []
+
+env_vars:
+  required:
+    - key: NEXT_PUBLIC_SUPABASE_URL
+      description: "Supabase project URL"
+      format: "https://xxx.supabase.co"
+      where_to_find: "Supabase Dashboard > Project Settings > API"
+    - key: NEXT_PUBLIC_SUPABASE_ANON_KEY
+      description: "Supabase anonymous/public key"
+      format: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+      where_to_find: "Supabase Dashboard > Project Settings > API"
+
+external_setup:
+  - service: "Supabase"
+    url: "https://supabase.com/dashboard"
+    steps:
+      - "Go to Table Editor or SQL Editor"
+      - "Create your tables"
+      - "Enable RLS on each table (Table Editor > ... > Enable RLS)"
+      - "Create policies using the SQL examples below"
+
+files:
+  - path: "supabase/migrations/001_create_tables.sql"
+    action: create
+    description: "Example tables with RLS enabled"
+    priority: 1
+
+  - path: "supabase/migrations/002_rls_policies.sql"
+    action: create
+    description: "RLS policies for common patterns"
+    priority: 2
+
+code:
+  supabase/migrations/001_create_tables.sql: |
+    -- Example: User profiles table
+    CREATE TABLE IF NOT EXISTS profiles (
+      id UUID PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE,
+      email TEXT,
+      full_name TEXT,
+      avatar_url TEXT,
+      created_at TIMESTAMPTZ DEFAULT NOW(),
+      updated_at TIMESTAMPTZ DEFAULT NOW()
+    );
+
+    -- Example: User-owned items table
+    CREATE TABLE IF NOT EXISTS items (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      user_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+      title TEXT NOT NULL,
+      content TEXT,
+      is_public BOOLEAN DEFAULT FALSE,
+      created_at TIMESTAMPTZ DEFAULT NOW(),
+      updated_at TIMESTAMPTZ DEFAULT NOW()
+    );
+
+    -- Example: Team/organization table
+    CREATE TABLE IF NOT EXISTS teams (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      name TEXT NOT NULL,
+      created_by UUID NOT NULL REFERENCES auth.users(id),
+      created_at TIMESTAMPTZ DEFAULT NOW()
+    );
+
+    -- Example: Team membership (many-to-many)
+    CREATE TABLE IF NOT EXISTS team_members (
+      team_id UUID NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+      user_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+      role TEXT NOT NULL DEFAULT 'member' CHECK (role IN ('owner', 'admin', 'member')),
+      joined_at TIMESTAMPTZ DEFAULT NOW(),
+      PRIMARY KEY (team_id, user_id)
+    );
+
+    -- Enable RLS on all tables
+    ALTER TABLE profiles ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE items ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE teams ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE team_members ENABLE ROW LEVEL SECURITY;
+
+  supabase/migrations/002_rls_policies.sql: |
+    -- ============================================
+    -- PROFILES TABLE POLICIES
+    -- ============================================
+
+    -- Users can view their own profile
+    CREATE POLICY "Users can view own profile"
+      ON profiles FOR SELECT
+      USING (auth.uid() = id);
+
+    -- Users can update their own profile
+    CREATE POLICY "Users can update own profile"
+      ON profiles FOR UPDATE
+      USING (auth.uid() = id)
+      WITH CHECK (auth.uid() = id);
+
+    -- Users can insert their own profile (usually done via trigger)
+    CREATE POLICY "Users can insert own profile"
+      ON profiles FOR INSERT
+      WITH CHECK (auth.uid() = id);
+
+    -- ============================================
+    -- ITEMS TABLE POLICIES
+    -- ============================================
+
+    -- Users can view their own items
+    CREATE POLICY "Users can view own items"
+      ON items FOR SELECT
+      USING (auth.uid() = user_id);
+
+    -- Anyone can view public items
+    CREATE POLICY "Anyone can view public items"
+      ON items FOR SELECT
+      USING (is_public = TRUE);
+
+    -- Users can create items for themselves
+    CREATE POLICY "Users can create own items"
+      ON items FOR INSERT
+      WITH CHECK (auth.uid() = user_id);
+
+    -- Users can update their own items
+    CREATE POLICY "Users can update own items"
+      ON items FOR UPDATE
+      USING (auth.uid() = user_id)
+      WITH CHECK (auth.uid() = user_id);
+
+    -- Users can delete their own items
+    CREATE POLICY "Users can delete own items"
+      ON items FOR DELETE
+      USING (auth.uid() = user_id);
+
+    -- ============================================
+    -- TEAMS TABLE POLICIES
+    -- ============================================
+
+    -- Team members can view their teams
+    CREATE POLICY "Team members can view teams"
+      ON teams FOR SELECT
+      USING (
+        EXISTS (
+          SELECT 1 FROM team_members
+          WHERE team_members.team_id = teams.id
+          AND team_members.user_id = auth.uid()
+        )
+      );
+
+    -- Authenticated users can create teams
+    CREATE POLICY "Authenticated users can create teams"
+      ON teams FOR INSERT
+      WITH CHECK (auth.uid() = created_by);
+
+    -- Team owners/admins can update team
+    CREATE POLICY "Team owners and admins can update team"
+      ON teams FOR UPDATE
+      USING (
+        EXISTS (
+          SELECT 1 FROM team_members
+          WHERE team_members.team_id = teams.id
+          AND team_members.user_id = auth.uid()
+          AND team_members.role IN ('owner', 'admin')
+        )
+      );
+
+    -- Only team owner can delete team
+    CREATE POLICY "Team owner can delete team"
+      ON teams FOR DELETE
+      USING (
+        EXISTS (
+          SELECT 1 FROM team_members
+          WHERE team_members.team_id = teams.id
+          AND team_members.user_id = auth.uid()
+          AND team_members.role = 'owner'
+        )
+      );
+
+    -- ============================================
+    -- TEAM_MEMBERS TABLE POLICIES
+    -- ============================================
+
+    -- Team members can view other members
+    CREATE POLICY "Team members can view team members"
+      ON team_members FOR SELECT
+      USING (
+        EXISTS (
+          SELECT 1 FROM team_members AS my_membership
+          WHERE my_membership.team_id = team_members.team_id
+          AND my_membership.user_id = auth.uid()
+        )
+      );
+
+    -- Team owners/admins can add members
+    CREATE POLICY "Team admins can add members"
+      ON team_members FOR INSERT
+      WITH CHECK (
+        EXISTS (
+          SELECT 1 FROM team_members AS admin_check
+          WHERE admin_check.team_id = team_members.team_id
+          AND admin_check.user_id = auth.uid()
+          AND admin_check.role IN ('owner', 'admin')
+        )
+      );
+
+    -- Team owners/admins can update member roles
+    CREATE POLICY "Team admins can update members"
+      ON team_members FOR UPDATE
+      USING (
+        EXISTS (
+          SELECT 1 FROM team_members AS admin_check
+          WHERE admin_check.team_id = team_members.team_id
+          AND admin_check.user_id = auth.uid()
+          AND admin_check.role IN ('owner', 'admin')
+        )
+      )
+      WITH CHECK (
+        -- Prevent changing owner role (except by owner themselves)
+        (team_members.role != 'owner' OR team_members.user_id = auth.uid())
+      );
+
+    -- Members can leave (delete their own membership)
+    -- Admins can remove non-owner members
+    CREATE POLICY "Members can leave or admins can remove"
+      ON team_members FOR DELETE
+      USING (
+        -- User can remove themselves
+        user_id = auth.uid()
+        OR
+        -- Or admin/owner can remove others (not owners)
+        (
+          EXISTS (
+            SELECT 1 FROM team_members AS admin_check
+            WHERE admin_check.team_id = team_members.team_id
+            AND admin_check.user_id = auth.uid()
+            AND admin_check.role IN ('owner', 'admin')
+          )
+          AND team_members.role != 'owner'
+        )
+      );
+
+    -- ============================================
+    -- HELPER: Create profile on user signup
+    -- ============================================
+
+    CREATE OR REPLACE FUNCTION handle_new_user()
+    RETURNS TRIGGER AS $$
+    BEGIN
+      INSERT INTO profiles (id, email, full_name, avatar_url)
+      VALUES (
+        NEW.id,
+        NEW.email,
+        NEW.raw_user_meta_data->>'full_name',
+        NEW.raw_user_meta_data->>'avatar_url'
+      );
+      RETURN NEW;
+    END;
+    $$ LANGUAGE plpgsql SECURITY DEFINER;
+
+    -- Trigger to create profile on signup
+    DROP TRIGGER IF EXISTS on_auth_user_created ON auth.users;
+    CREATE TRIGGER on_auth_user_created
+      AFTER INSERT ON auth.users
+      FOR EACH ROW EXECUTE FUNCTION handle_new_user();
+
+edge_cases:
+  - id: rls-not-enabled
+    symptom: "All rows visible to all users"
+    cause: "RLS not enabled on the table"
+    solution: |
+      Run: ALTER TABLE your_table ENABLE ROW LEVEL SECURITY;
+      Or use Table Editor > ... menu > Enable RLS
+
+  - id: no-policy-blocks-all
+    symptom: "No data visible even to authenticated users"
+    cause: "RLS enabled but no policies created"
+    solution: |
+      When RLS is enabled, no access is granted by default.
+      You must create at least one policy for each operation
+      (SELECT, INSERT, UPDATE, DELETE) that users need.
+
+  - id: service-role-bypass
+    symptom: "Admin operations fail with RLS errors"
+    cause: "Using anon key for admin operations"
+    solution: |
+      Use the service_role key for admin operations.
+      Service role bypasses RLS:
+      const adminSupabase = createClient(url, process.env.SUPABASE_SERVICE_ROLE_KEY);
+
+      WARNING: Never expose service_role key to the client!
+
+  - id: infinite-recursion
+    symptom: "Policy causes infinite loop or timeout"
+    cause: "Policy references itself or creates circular dependency"
+    solution: |
+      1. Avoid self-referencing policies
+      2. Use SECURITY DEFINER functions for complex checks
+      3. Test policies in SQL Editor before deploying
+      4. Check for circular references between tables
+
+validation:
+  manual_test:
+    - "Run the migration SQL in Supabase SQL Editor"
+    - "Create a test user via authentication"
+    - "Insert a row as that user"
+    - "Verify user can only see their own rows"
+    - "Try to update/delete another user's row (should fail)"
+    - "Test with is_public=true to verify public access"
+    - "Create a team and verify team member policies"

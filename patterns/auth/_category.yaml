@@ -1,0 +1,23 @@
+# Authentication Patterns
+id: auth
+name: "Authentication"
+description: "Authentication and authorization patterns for modern web applications"
+icon: "shield"
+
+patterns:
+  - supabase-client-nextjs
+  - supabase-google-oauth
+  - supabase-github-oauth
+  - supabase-magic-link
+  - supabase-protected-routes
+  - supabase-signout
+
+recommended_order:
+  - supabase-client-nextjs  # Always first - sets up the client
+  - supabase-protected-routes  # Then middleware
+  - supabase-google-oauth  # Or other auth method
+  - supabase-signout  # Finally signout
+
+notes: |
+  All Supabase auth patterns require the base client setup (supabase-client-nextjs).
+  As of January 2026, use @supabase/ssr instead of @supabase/auth-helpers-nextjs.

@@ -1,0 +1,219 @@
+id: supabase-github-oauth
+version: "1.0.0"
+updated_at: "2026-01-30"
+author: "nyko-team"
+status: stable
+
+name: "Supabase GitHub OAuth"
+description: "Complete GitHub OAuth authentication with Supabase Auth for Next.js App Router"
+
+category: auth
+tags:
+  - supabase
+  - github
+  - oauth
+  - nextjs
+  - authentication
+
+difficulty: intermediate
+time_estimate: "15-25 min"
+
+stack:
+  required:
+    - name: "next"
+      version: "^15.1.0"
+      reason: "App Router with server components"
+    - name: "@supabase/supabase-js"
+      version: "^2.49.0"
+      reason: "Supabase client library"
+    - name: "@supabase/ssr"
+      version: "^0.5.2"
+      reason: "SSR utilities for cookie-based auth"
+
+requires:
+  - supabase-client-nextjs
+
+enables:
+  - supabase-protected-routes
+  - supabase-signout
+
+env_vars:
+  required:
+    - key: NEXT_PUBLIC_SUPABASE_URL
+      description: "Supabase project URL"
+      format: "https://xxx.supabase.co"
+      where_to_find: "Supabase Dashboard > Project Settings > API"
+    - key: NEXT_PUBLIC_SUPABASE_ANON_KEY
+      description: "Supabase anonymous/public key"
+      format: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+      where_to_find: "Supabase Dashboard > Project Settings > API"
+
+external_setup:
+  - service: "GitHub"
+    url: "https://github.com/settings/developers"
+    steps:
+      - "Go to Settings > Developer settings > OAuth Apps"
+      - "Click 'New OAuth App'"
+      - "Fill in Application name"
+      - "Set Homepage URL to your app URL"
+      - "Set Authorization callback URL to: https://xxx.supabase.co/auth/v1/callback"
+      - "Click 'Register application'"
+      - "Copy Client ID"
+      - "Generate and copy Client Secret"
+
+  - service: "Supabase"
+    url: "https://supabase.com/dashboard"
+    steps:
+      - "Go to Authentication > Providers"
+      - "Enable GitHub provider"
+      - "Paste GitHub Client ID and Client Secret"
+      - "Save changes"
+
+files:
+  - path: "middleware.ts"
+    action: create
+    description: "Root middleware for session refresh (if not exists)"
+    priority: 1
+
+  - path: "app/auth/callback/route.ts"
+    action: create
+    description: "OAuth callback handler (if not exists)"
+    priority: 2
+
+  - path: "components/auth/github-sign-in-button.tsx"
+    action: create
+    description: "GitHub sign-in button component"
+    priority: 3
+
+code:
+  middleware.ts: |
+    import { type NextRequest } from "next/server";
+    import { updateSession } from "@/lib/supabase/middleware";
+
+    export async function middleware(request: NextRequest) {
+      return (await updateSession(request)).supabaseResponse;
+    }
+
+    export const config = {
+      matcher: [
+        "/((?!_next/static|_next/image|favicon.ico|.*\\.(?:svg|png|jpg|jpeg|gif|webp)$).*)",
+      ],
+    };
+
+  app/auth/callback/route.ts: |
+    import { createClient } from "@/lib/supabase/server";
+    import { NextResponse } from "next/server";
+
+    export async function GET(request: Request) {
+      const { searchParams, origin } = new URL(request.url);
+      const code = searchParams.get("code");
+      const next = searchParams.get("next") ?? "/";
+
+      if (code) {
+        const supabase = await createClient();
+        const { error } = await supabase.auth.exchangeCodeForSession(code);
+        if (!error) {
+          const forwardedHost = request.headers.get("x-forwarded-host");
+          const isLocalEnv = process.env.NODE_ENV === "development";
+          if (isLocalEnv) {
+            return NextResponse.redirect(`${origin}${next}`);
+          } else if (forwardedHost) {
+            return NextResponse.redirect(`https://${forwardedHost}${next}`);
+          } else {
+            return NextResponse.redirect(`${origin}${next}`);
+          }
+        }
+      }
+
+      return NextResponse.redirect(`${origin}/auth/auth-code-error`);
+    }
+
+  components/auth/github-sign-in-button.tsx: |
+    "use client";
+
+    import { createClient } from "@/lib/supabase/client";
+    import { useState } from "react";
+
+    export function GitHubSignInButton() {
+      const [isLoading, setIsLoading] = useState(false);
+
+      const handleSignIn = async () => {
+        setIsLoading(true);
+        const supabase = createClient();
+
+        const { error } = await supabase.auth.signInWithOAuth({
+          provider: "github",
+          options: {
+            redirectTo: `${window.location.origin}/auth/callback`,
+            scopes: "read:user user:email",
+          },
+        });
+
+        if (error) {
+          console.error("Error signing in with GitHub:", error.message);
+          setIsLoading(false);
+        }
+      };
+
+      return (
+        <button
+          onClick={handleSignIn}
+          disabled={isLoading}
+          className="flex w-full items-center justify-center gap-3 rounded-lg border border-gray-300 bg-gray-900 px-4 py-3 text-sm font-medium text-white shadow-sm transition-colors hover:bg-gray-800 focus:outline-none focus:ring-2 focus:ring-gray-500 focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          <svg className="h-5 w-5" fill="currentColor" viewBox="0 0 24 24">
+            <path
+              fillRule="evenodd"
+              d="M12 2C6.477 2 2 6.484 2 12.017c0 4.425 2.865 8.18 6.839 9.504.5.092.682-.217.682-.483 0-.237-.008-.868-.013-1.703-2.782.605-3.369-1.343-3.369-1.343-.454-1.158-1.11-1.466-1.11-1.466-.908-.62.069-.608.069-.608 1.003.07 1.531 1.032 1.531 1.032.892 1.53 2.341 1.088 2.91.832.092-.647.35-1.088.636-1.338-2.22-.253-4.555-1.113-4.555-4.951 0-1.093.39-1.988 1.029-2.688-.103-.253-.446-1.272.098-2.65 0 0 .84-.27 2.75 1.026A9.564 9.564 0 0112 6.844c.85.004 1.705.115 2.504.337 1.909-1.296 2.747-1.027 2.747-1.027.546 1.379.202 2.398.1 2.651.64.7 1.028 1.595 1.028 2.688 0 3.848-2.339 4.695-4.566 4.943.359.309.678.92.678 1.855 0 1.338-.012 2.419-.012 2.747 0 .268.18.58.688.482A10.019 10.019 0 0022 12.017C22 6.484 17.522 2 12 2z"
+              clipRule="evenodd"
+            />
+          </svg>
+          {isLoading ? "Signing in..." : "Continue with GitHub"}
+        </button>
+      );
+    }
+
+edge_cases:
+  - id: callback-url-mismatch
+    symptom: "Error: The redirect_uri does not match the registered callback URL"
+    cause: "GitHub OAuth App callback URL doesn't match Supabase"
+    solution: |
+      1. Go to GitHub > Settings > Developer settings > OAuth Apps
+      2. Edit your OAuth App
+      3. Update "Authorization callback URL" to:
+         https://YOUR_PROJECT_REF.supabase.co/auth/v1/callback
+      4. Save changes
+
+  - id: email-not-public
+    symptom: "User created but email is null in Supabase"
+    cause: "User's GitHub email is set to private"
+    solution: |
+      The scopes "read:user user:email" should get the email.
+      If still null, the user needs to either:
+      1. Make their email public on GitHub, or
+      2. You need to handle null emails in your app
+
+  - id: scope-denied
+    symptom: "OAuth flow fails with scope error"
+    cause: "Requested scopes not authorized by user or app"
+    solution: |
+      1. Verify the scopes in signInWithOAuth are valid
+      2. Check GitHub OAuth App settings for any scope restrictions
+      3. For organization access, you may need to request additional authorization
+
+  - id: rate-limiting
+    symptom: "GitHub API rate limit exceeded errors"
+    cause: "Too many OAuth requests in a short period"
+    solution: |
+      1. Wait for rate limit to reset (usually 1 hour)
+      2. For development, create a separate OAuth App
+      3. Consider caching user data to reduce API calls
+
+validation:
+  manual_test:
+    - "Start development server: npm run dev"
+    - "Navigate to /login"
+    - "Click 'Continue with GitHub'"
+    - "Authorize the application on GitHub"
+    - "Verify redirect back to your app"
+    - "Check that user is created in Supabase Dashboard"

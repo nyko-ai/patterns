@@ -1,0 +1,205 @@
+id: supabase-client-nextjs
+version: "1.0.0"
+updated_at: "2026-01-30"
+author: "nyko-team"
+status: stable
+
+name: "Supabase Client Setup for Next.js"
+description: "Base Supabase client configuration for Next.js 15+ App Router using @supabase/ssr"
+
+category: auth
+tags:
+  - supabase
+  - nextjs
+  - auth
+  - ssr
+
+difficulty: beginner
+time_estimate: "10-15 min"
+
+stack:
+  required:
+    - name: "next"
+      version: "^15.1.0"
+      reason: "App Router with server components"
+    - name: "@supabase/supabase-js"
+      version: "^2.49.0"
+      reason: "Supabase client library"
+    - name: "@supabase/ssr"
+      version: "^0.5.2"
+      reason: "SSR utilities for cookie-based auth (replaces auth-helpers)"
+  incompatible:
+    - name: "@supabase/auth-helpers-nextjs"
+      reason: "Deprecated - use @supabase/ssr instead"
+
+requires: []
+enables:
+  - supabase-google-oauth
+  - supabase-github-oauth
+  - supabase-magic-link
+  - supabase-protected-routes
+  - supabase-signout
+
+env_vars:
+  required:
+    - key: NEXT_PUBLIC_SUPABASE_URL
+      description: "Supabase project URL"
+      format: "https://xxx.supabase.co"
+      where_to_find: "Supabase Dashboard > Project Settings > API"
+    - key: NEXT_PUBLIC_SUPABASE_ANON_KEY
+      description: "Supabase anonymous/public key"
+      format: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+      where_to_find: "Supabase Dashboard > Project Settings > API"
+
+external_setup:
+  - service: "Supabase"
+    url: "https://supabase.com/dashboard"
+    steps:
+      - "Create a new project or select existing one"
+      - "Go to Project Settings > API"
+      - "Copy the Project URL and anon/public key"
+
+files:
+  - path: "lib/supabase/client.ts"
+    action: create
+    description: "Browser client for client components"
+    priority: 1
+
+  - path: "lib/supabase/server.ts"
+    action: create
+    description: "Server client for server components and route handlers"
+    priority: 2
+
+  - path: "lib/supabase/middleware.ts"
+    action: create
+    description: "Middleware client helper for session refresh"
+    priority: 3
+
+code:
+  lib/supabase/client.ts: |
+    import { createBrowserClient } from "@supabase/ssr";
+
+    export function createClient() {
+      return createBrowserClient(
+        process.env.NEXT_PUBLIC_SUPABASE_URL!,
+        process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
+      );
+    }
+
+  lib/supabase/server.ts: |
+    import { createServerClient } from "@supabase/ssr";
+    import { cookies } from "next/headers";
+
+    export async function createClient() {
+      const cookieStore = await cookies();
+
+      return createServerClient(
+        process.env.NEXT_PUBLIC_SUPABASE_URL!,
+        process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
+        {
+          cookies: {
+            getAll() {
+              return cookieStore.getAll();
+            },
+            setAll(cookiesToSet) {
+              try {
+                cookiesToSet.forEach(({ name, value, options }) =>
+                  cookieStore.set(name, value, options)
+                );
+              } catch {
+                // The `setAll` method was called from a Server Component.
+                // This can be ignored if you have middleware refreshing
+                // user sessions.
+              }
+            },
+          },
+        }
+      );
+    }
+
+  lib/supabase/middleware.ts: |
+    import { createServerClient } from "@supabase/ssr";
+    import { NextResponse, type NextRequest } from "next/server";
+
+    export async function updateSession(request: NextRequest) {
+      let supabaseResponse = NextResponse.next({
+        request,
+      });
+
+      const supabase = createServerClient(
+        process.env.NEXT_PUBLIC_SUPABASE_URL!,
+        process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
+        {
+          cookies: {
+            getAll() {
+              return request.cookies.getAll();
+            },
+            setAll(cookiesToSet) {
+              cookiesToSet.forEach(({ name, value }) =>
+                request.cookies.set(name, value)
+              );
+              supabaseResponse = NextResponse.next({
+                request,
+              });
+              cookiesToSet.forEach(({ name, value, options }) =>
+                supabaseResponse.cookies.set(name, value, options)
+              );
+            },
+          },
+        }
+      );
+
+      // IMPORTANT: Avoid writing any logic between createServerClient and
+      // supabase.auth.getUser(). A simple mistake could make your application
+      // vulnerable to security issues.
+
+      const {
+        data: { user },
+      } = await supabase.auth.getUser();
+
+      return { supabaseResponse, user };
+    }
+
+edge_cases:
+  - id: missing-env-vars
+    symptom: "Error: Missing NEXT_PUBLIC_SUPABASE_URL or NEXT_PUBLIC_SUPABASE_ANON_KEY"
+    cause: "Environment variables not set in .env.local"
+    solution: |
+      1. Create .env.local in project root
+      2. Add both variables:
+         NEXT_PUBLIC_SUPABASE_URL=https://xxx.supabase.co
+         NEXT_PUBLIC_SUPABASE_ANON_KEY=eyJ...
+      3. Restart the dev server (next dev)
+
+  - id: cookies-not-working
+    symptom: "User session not persisting between page navigations"
+    cause: "Server component calling createClient without proper cookie handling"
+    solution: |
+      Make sure you're using the correct client:
+      - Client Components: import from 'lib/supabase/client'
+      - Server Components/Route Handlers: import from 'lib/supabase/server'
+
+      Also ensure middleware.ts is set up to refresh sessions.
+
+  - id: auth-helpers-conflict
+    symptom: "Type errors or runtime errors with auth methods"
+    cause: "Old @supabase/auth-helpers-nextjs package still installed"
+    solution: |
+      1. Remove the old package: npm uninstall @supabase/auth-helpers-nextjs
+      2. Install the new package: npm install @supabase/ssr
+      3. Update all imports to use the new client setup
+
+  - id: server-component-cookie-error
+    symptom: "Error: Cookies can only be modified in a Server Action or Route Handler"
+    cause: "Trying to modify cookies in a Server Component"
+    solution: |
+      This is expected behavior. The try-catch in server.ts handles this gracefully.
+      Cookie modifications happen in middleware.ts during session refresh.
+      No action needed if you have the middleware set up correctly.
+
+validation:
+  manual_test:
+    - "Create .env.local with Supabase credentials"
+    - "Import createClient in a server component"
+    - "Call supabase.auth.getUser() and log the result"
+    - "Verify no errors in console and client is created successfully"

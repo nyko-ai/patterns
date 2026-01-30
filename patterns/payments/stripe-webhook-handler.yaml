@@ -1,0 +1,332 @@
+id: stripe-webhook-handler
+version: "1.0.0"
+updated_at: "2026-01-30"
+author: "nyko-team"
+status: stable
+
+name: "Stripe Webhook Handler"
+description: "Secure Stripe webhook handler with signature verification for payment events"
+
+category: payments
+tags:
+  - stripe
+  - webhooks
+  - payments
+  - events
+  - nextjs
+
+difficulty: intermediate
+time_estimate: "20-25 min"
+
+stack:
+  required:
+    - name: "next"
+      version: "^15.1.0"
+      reason: "App Router with route handlers"
+    - name: "stripe"
+      version: "^17.4.0"
+      reason: "Stripe Node.js SDK"
+
+requires:
+  - stripe-checkout-session
+
+enables: []
+
+env_vars:
+  required:
+    - key: STRIPE_SECRET_KEY
+      description: "Stripe secret API key"
+      format: "sk_test_... or sk_live_..."
+      where_to_find: "Stripe Dashboard > Developers > API keys"
+    - key: STRIPE_WEBHOOK_SECRET
+      description: "Webhook signing secret"
+      format: "whsec_..."
+      where_to_find: "Stripe Dashboard > Developers > Webhooks > Signing secret"
+
+external_setup:
+  - service: "Stripe"
+    url: "https://dashboard.stripe.com/webhooks"
+    steps:
+      - "Go to Developers > Webhooks"
+      - "Click 'Add endpoint'"
+      - "Enter your webhook URL: https://yourdomain.com/api/webhooks/stripe"
+      - "Select events to listen to (checkout.session.completed, etc.)"
+      - "Click 'Add endpoint'"
+      - "Copy the Signing secret (whsec_...)"
+
+  - service: "Stripe CLI (Local Development)"
+    url: "https://stripe.com/docs/stripe-cli"
+    steps:
+      - "Install Stripe CLI: brew install stripe/stripe-cli/stripe"
+      - "Login: stripe login"
+      - "Forward webhooks: stripe listen --forward-to localhost:3000/api/webhooks/stripe"
+      - "Copy the webhook signing secret from CLI output"
+
+files:
+  - path: "app/api/webhooks/stripe/route.ts"
+    action: create
+    description: "Webhook endpoint with signature verification"
+    priority: 1
+
+  - path: "lib/stripe-webhooks.ts"
+    action: create
+    description: "Webhook event handlers"
+    priority: 2
+
+code:
+  app/api/webhooks/stripe/route.ts: |
+    import { stripe } from "@/lib/stripe";
+    import { headers } from "next/headers";
+    import { NextResponse } from "next/server";
+    import Stripe from "stripe";
+    import { handleWebhookEvent } from "@/lib/stripe-webhooks";
+
+    export async function POST(request: Request) {
+      const body = await request.text();
+      const headersList = await headers();
+      const signature = headersList.get("stripe-signature");
+
+      if (!signature) {
+        console.error("Missing stripe-signature header");
+        return NextResponse.json(
+          { error: "Missing stripe-signature header" },
+          { status: 400 }
+        );
+      }
+
+      if (!process.env.STRIPE_WEBHOOK_SECRET) {
+        console.error("Missing STRIPE_WEBHOOK_SECRET");
+        return NextResponse.json(
+          { error: "Webhook secret not configured" },
+          { status: 500 }
+        );
+      }
+
+      let event: Stripe.Event;
+
+      try {
+        event = stripe.webhooks.constructEvent(
+          body,
+          signature,
+          process.env.STRIPE_WEBHOOK_SECRET
+        );
+      } catch (err) {
+        const message = err instanceof Error ? err.message : "Unknown error";
+        console.error("Webhook signature verification failed:", message);
+        return NextResponse.json(
+          { error: `Webhook Error: ${message}` },
+          { status: 400 }
+        );
+      }
+
+      try {
+        await handleWebhookEvent(event);
+      } catch (error) {
+        console.error("Error handling webhook event:", error);
+        // Return 200 to prevent retries for handler errors
+        // Stripe will retry on 4xx/5xx responses
+      }
+
+      return NextResponse.json({ received: true });
+    }
+
+  lib/stripe-webhooks.ts: |
+    import Stripe from "stripe";
+    import { stripe } from "./stripe";
+
+    export async function handleWebhookEvent(event: Stripe.Event) {
+      switch (event.type) {
+        case "checkout.session.completed": {
+          const session = event.data.object as Stripe.Checkout.Session;
+          await handleCheckoutCompleted(session);
+          break;
+        }
+
+        case "checkout.session.async_payment_succeeded": {
+          const session = event.data.object as Stripe.Checkout.Session;
+          await handleAsyncPaymentSucceeded(session);
+          break;
+        }
+
+        case "checkout.session.async_payment_failed": {
+          const session = event.data.object as Stripe.Checkout.Session;
+          await handleAsyncPaymentFailed(session);
+          break;
+        }
+
+        case "customer.subscription.created": {
+          const subscription = event.data.object as Stripe.Subscription;
+          await handleSubscriptionCreated(subscription);
+          break;
+        }
+
+        case "customer.subscription.updated": {
+          const subscription = event.data.object as Stripe.Subscription;
+          await handleSubscriptionUpdated(subscription);
+          break;
+        }
+
+        case "customer.subscription.deleted": {
+          const subscription = event.data.object as Stripe.Subscription;
+          await handleSubscriptionDeleted(subscription);
+          break;
+        }
+
+        case "invoice.payment_succeeded": {
+          const invoice = event.data.object as Stripe.Invoice;
+          await handleInvoicePaymentSucceeded(invoice);
+          break;
+        }
+
+        case "invoice.payment_failed": {
+          const invoice = event.data.object as Stripe.Invoice;
+          await handleInvoicePaymentFailed(invoice);
+          break;
+        }
+
+        default:
+          console.log(`Unhandled event type: ${event.type}`);
+      }
+    }
+
+    async function handleCheckoutCompleted(session: Stripe.Checkout.Session) {
+      console.log("Checkout completed:", session.id);
+
+      // Get customer email
+      const customerEmail = session.customer_details?.email;
+
+      // Get line items for the session
+      const lineItems = await stripe.checkout.sessions.listLineItems(session.id);
+
+      // TODO: Implement your business logic here
+      // Examples:
+      // - Create/update user in your database
+      // - Grant access to purchased product
+      // - Send confirmation email
+      // - Update subscription status
+
+      console.log("Customer:", customerEmail);
+      console.log("Line items:", lineItems.data);
+      console.log("Payment status:", session.payment_status);
+      console.log("Metadata:", session.metadata);
+    }
+
+    async function handleAsyncPaymentSucceeded(session: Stripe.Checkout.Session) {
+      console.log("Async payment succeeded:", session.id);
+      // Handle delayed payment methods (bank transfers, etc.)
+    }
+
+    async function handleAsyncPaymentFailed(session: Stripe.Checkout.Session) {
+      console.log("Async payment failed:", session.id);
+      // Handle failed async payments
+    }
+
+    async function handleSubscriptionCreated(subscription: Stripe.Subscription) {
+      console.log("Subscription created:", subscription.id);
+
+      // TODO: Implement your business logic
+      // - Store subscription in database
+      // - Grant access to subscription features
+      // - Send welcome email
+
+      const customerId = subscription.customer as string;
+      const status = subscription.status;
+      const priceId = subscription.items.data[0]?.price.id;
+
+      console.log("Customer:", customerId);
+      console.log("Status:", status);
+      console.log("Price ID:", priceId);
+    }
+
+    async function handleSubscriptionUpdated(subscription: Stripe.Subscription) {
+      console.log("Subscription updated:", subscription.id);
+
+      // TODO: Implement your business logic
+      // - Update subscription status in database
+      // - Handle plan changes
+      // - Handle cancellation scheduling
+
+      const status = subscription.status;
+      const cancelAtPeriodEnd = subscription.cancel_at_period_end;
+
+      console.log("Status:", status);
+      console.log("Will cancel at period end:", cancelAtPeriodEnd);
+    }
+
+    async function handleSubscriptionDeleted(subscription: Stripe.Subscription) {
+      console.log("Subscription deleted:", subscription.id);
+
+      // TODO: Implement your business logic
+      // - Revoke access to subscription features
+      // - Update user status in database
+      // - Send cancellation confirmation
+    }
+
+    async function handleInvoicePaymentSucceeded(invoice: Stripe.Invoice) {
+      console.log("Invoice payment succeeded:", invoice.id);
+
+      // TODO: Handle successful recurring payment
+      // - Send receipt email
+      // - Update billing records
+    }
+
+    async function handleInvoicePaymentFailed(invoice: Stripe.Invoice) {
+      console.log("Invoice payment failed:", invoice.id);
+
+      // TODO: Handle failed recurring payment
+      // - Send payment failed notification
+      // - Consider grace period before revoking access
+      // - Prompt user to update payment method
+    }
+
+edge_cases:
+  - id: signature-verification-failed
+    symptom: "Error: Webhook signature verification failed"
+    cause: "Wrong webhook secret or request body modified"
+    solution: |
+      1. Ensure STRIPE_WEBHOOK_SECRET matches the endpoint secret
+      2. Use request.text() not request.json() - body must be raw
+      3. For local dev, use the secret from 'stripe listen' command
+      4. Don't use Next.js body parser middleware on this route
+
+  - id: webhook-timeout
+    symptom: "Stripe shows webhook timeout errors"
+    cause: "Webhook handler takes too long (>30 seconds)"
+    solution: |
+      1. Return 200 response immediately
+      2. Process heavy tasks asynchronously (queue, background job)
+      3. Don't make external API calls synchronously in the handler
+      4. Use Stripe's event.data.object instead of fetching fresh data
+
+  - id: duplicate-events
+    symptom: "Same event processed multiple times"
+    cause: "Stripe retries webhooks on failures or network issues"
+    solution: |
+      Make your handlers idempotent:
+      1. Store processed event IDs in database
+      2. Check if event.id was already processed before handling
+      3. Use database transactions to prevent race conditions
+
+  - id: missing-events
+    symptom: "Some Stripe events not being received"
+    cause: "Events not selected in webhook configuration"
+    solution: |
+      1. Go to Stripe Dashboard > Webhooks > Edit endpoint
+      2. Add all required events:
+         - checkout.session.completed
+         - customer.subscription.created
+         - customer.subscription.updated
+         - customer.subscription.deleted
+         - invoice.payment_succeeded
+         - invoice.payment_failed
+      3. Save changes
+
+validation:
+  manual_test:
+    - "Install Stripe CLI: brew install stripe/stripe-cli/stripe"
+    - "Login: stripe login"
+    - "Forward webhooks: stripe listen --forward-to localhost:3000/api/webhooks/stripe"
+    - "Copy the webhook signing secret to .env.local"
+    - "Trigger a test event: stripe trigger checkout.session.completed"
+    - "Verify the event is received and logged in your console"
+    - "Complete a real checkout and verify webhook is processed"
