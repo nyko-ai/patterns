@@ -1,0 +1,470 @@
+id: s3-presigned-urls
+version: "1.0.0"
+updated_at: "2026-01-31"
+author: "nyko-team"
+status: beta
+
+name: "AWS S3 Presigned URLs"
+description: "Secure file uploads and downloads using AWS S3 presigned URLs"
+
+category: storage
+tags:
+  - aws
+  - s3
+  - upload
+  - presigned
+  - storage
+
+difficulty: intermediate
+time_estimate: "25-35 min"
+
+stack:
+  required:
+    - name: "@aws-sdk/client-s3"
+      version: "^3.980.0"
+      reason: "AWS S3 client"
+    - name: "@aws-sdk/s3-request-presigner"
+      version: "^3.980.0"
+      reason: "Generate presigned URLs"
+    - name: "next"
+      version: "^15.1.0"
+      reason: "App Router API routes"
+
+requires: []
+
+enables: []
+
+env_vars:
+  required:
+    - key: AWS_ACCESS_KEY_ID
+      description: "AWS access key"
+      format: "AKIA..."
+      where_to_find: "AWS IAM > Users > Security credentials"
+    - key: AWS_SECRET_ACCESS_KEY
+      description: "AWS secret key"
+      format: "Secret string"
+      where_to_find: "AWS IAM > Users > Security credentials"
+    - key: AWS_REGION
+      description: "AWS region"
+      format: "us-east-1"
+      where_to_find: "AWS Console region selector"
+    - key: S3_BUCKET_NAME
+      description: "S3 bucket name"
+      format: "my-bucket-name"
+      where_to_find: "AWS S3 Console"
+
+external_setup:
+  - service: "AWS S3"
+    url: "https://s3.console.aws.amazon.com"
+    steps:
+      - "Create S3 bucket"
+      - "Configure CORS for bucket"
+      - "Create IAM user with S3 permissions"
+      - "Generate access keys for IAM user"
+      - "Set bucket policy for public read if needed"
+
+files:
+  - path: "lib/s3.ts"
+    action: create
+    description: "S3 client and presigned URL utilities"
+    priority: 1
+
+  - path: "app/api/upload/presign/route.ts"
+    action: create
+    description: "Generate presigned upload URL"
+    priority: 2
+
+  - path: "app/api/files/[key]/route.ts"
+    action: create
+    description: "Get presigned download URL"
+    priority: 3
+
+  - path: "components/upload/s3-uploader.tsx"
+    action: create
+    description: "Client-side upload component"
+    priority: 4
+
+code:
+  lib/s3.ts: |
+    import {
+      S3Client,
+      PutObjectCommand,
+      GetObjectCommand,
+      DeleteObjectCommand,
+      HeadObjectCommand,
+    } from "@aws-sdk/client-s3";
+    import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
+
+    const s3Client = new S3Client({
+      region: process.env.AWS_REGION!,
+      credentials: {
+        accessKeyId: process.env.AWS_ACCESS_KEY_ID!,
+        secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY!,
+      },
+    });
+
+    const BUCKET_NAME = process.env.S3_BUCKET_NAME!;
+    const UPLOAD_EXPIRATION = 3600;
+    const DOWNLOAD_EXPIRATION = 3600;
+
+    const ALLOWED_TYPES = [
+      "image/jpeg",
+      "image/png",
+      "image/gif",
+      "image/webp",
+      "application/pdf",
+      "video/mp4",
+    ];
+
+    const MAX_FILE_SIZE = 100 * 1024 * 1024;
+
+    export async function generateUploadUrl(params: {
+      key: string;
+      contentType: string;
+      contentLength: number;
+      metadata?: Record<string, string>;
+    }): Promise<{ url: string; fields?: Record<string, string> }> {
+      if (!ALLOWED_TYPES.includes(params.contentType)) {
+        throw new Error(`File type ${params.contentType} not allowed`);
+      }
+
+      if (params.contentLength > MAX_FILE_SIZE) {
+        throw new Error(`File size exceeds ${MAX_FILE_SIZE / 1024 / 1024}MB limit`);
+      }
+
+      const command = new PutObjectCommand({
+        Bucket: BUCKET_NAME,
+        Key: params.key,
+        ContentType: params.contentType,
+        ContentLength: params.contentLength,
+        Metadata: params.metadata,
+      });
+
+      const url = await getSignedUrl(s3Client, command, {
+        expiresIn: UPLOAD_EXPIRATION,
+      });
+
+      return { url };
+    }
+
+    export async function generateDownloadUrl(key: string): Promise<string> {
+      const command = new GetObjectCommand({
+        Bucket: BUCKET_NAME,
+        Key: key,
+      });
+
+      return getSignedUrl(s3Client, command, {
+        expiresIn: DOWNLOAD_EXPIRATION,
+      });
+    }
+
+    export async function deleteFile(key: string): Promise<void> {
+      const command = new DeleteObjectCommand({
+        Bucket: BUCKET_NAME,
+        Key: key,
+      });
+
+      await s3Client.send(command);
+    }
+
+    export async function fileExists(key: string): Promise<boolean> {
+      try {
+        const command = new HeadObjectCommand({
+          Bucket: BUCKET_NAME,
+          Key: key,
+        });
+        await s3Client.send(command);
+        return true;
+      } catch {
+        return false;
+      }
+    }
+
+    export function generateKey(params: {
+      userId: string;
+      filename: string;
+      folder?: string;
+    }): string {
+      const timestamp = Date.now();
+      const random = Math.random().toString(36).slice(2, 8);
+      const sanitized = params.filename.replace(/[^a-zA-Z0-9.-]/g, "_");
+      const folder = params.folder || "uploads";
+
+      return `${folder}/${params.userId}/${timestamp}-${random}-${sanitized}`;
+    }
+
+    export function getPublicUrl(key: string): string {
+      return `https://${BUCKET_NAME}.s3.${process.env.AWS_REGION}.amazonaws.com/${key}`;
+    }
+
+  app/api/upload/presign/route.ts: |
+    import { auth } from "@/auth";
+    import { generateUploadUrl, generateKey } from "@/lib/s3";
+    import { NextRequest, NextResponse } from "next/server";
+
+    export async function POST(request: NextRequest) {
+      const session = await auth();
+      if (!session?.user?.id) {
+        return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+      }
+
+      try {
+        const { filename, contentType, contentLength, folder } = await request.json();
+
+        if (!filename || !contentType || !contentLength) {
+          return NextResponse.json(
+            { error: "Missing required fields" },
+            { status: 400 }
+          );
+        }
+
+        const key = generateKey({
+          userId: session.user.id,
+          filename,
+          folder,
+        });
+
+        const { url } = await generateUploadUrl({
+          key,
+          contentType,
+          contentLength,
+          metadata: {
+            userId: session.user.id,
+            originalName: filename,
+          },
+        });
+
+        return NextResponse.json({
+          url,
+          key,
+          expiresIn: 3600,
+        });
+      } catch (error) {
+        console.error("Presign error:", error);
+        return NextResponse.json(
+          { error: error instanceof Error ? error.message : "Failed to generate URL" },
+          { status: 400 }
+        );
+      }
+    }
+
+  app/api/files/[key]/route.ts: |
+    import { auth } from "@/auth";
+    import { generateDownloadUrl, deleteFile, fileExists } from "@/lib/s3";
+    import { NextRequest, NextResponse } from "next/server";
+
+    export async function GET(
+      request: NextRequest,
+      { params }: { params: Promise<{ key: string }> }
+    ) {
+      const session = await auth();
+      if (!session?.user?.id) {
+        return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+      }
+
+      const { key } = await params;
+      const decodedKey = decodeURIComponent(key);
+
+      if (!decodedKey.includes(session.user.id)) {
+        return NextResponse.json({ error: "Access denied" }, { status: 403 });
+      }
+
+      try {
+        const exists = await fileExists(decodedKey);
+        if (!exists) {
+          return NextResponse.json({ error: "File not found" }, { status: 404 });
+        }
+
+        const url = await generateDownloadUrl(decodedKey);
+        return NextResponse.json({ url, expiresIn: 3600 });
+      } catch (error) {
+        console.error("Download URL error:", error);
+        return NextResponse.json(
+          { error: "Failed to generate download URL" },
+          { status: 500 }
+        );
+      }
+    }
+
+    export async function DELETE(
+      request: NextRequest,
+      { params }: { params: Promise<{ key: string }> }
+    ) {
+      const session = await auth();
+      if (!session?.user?.id) {
+        return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+      }
+
+      const { key } = await params;
+      const decodedKey = decodeURIComponent(key);
+
+      if (!decodedKey.includes(session.user.id)) {
+        return NextResponse.json({ error: "Access denied" }, { status: 403 });
+      }
+
+      try {
+        await deleteFile(decodedKey);
+        return NextResponse.json({ success: true });
+      } catch (error) {
+        console.error("Delete error:", error);
+        return NextResponse.json(
+          { error: "Failed to delete file" },
+          { status: 500 }
+        );
+      }
+    }
+
+  components/upload/s3-uploader.tsx: |
+    "use client";
+
+    import { useState, useCallback } from "react";
+
+    interface UploadResult {
+      key: string;
+      url: string;
+    }
+
+    interface S3UploaderProps {
+      folder?: string;
+      maxSize?: number;
+      allowedTypes?: string[];
+      onUploadComplete?: (result: UploadResult) => void;
+      onError?: (error: Error) => void;
+    }
+
+    export function S3Uploader({
+      folder = "uploads",
+      maxSize = 10 * 1024 * 1024,
+      allowedTypes = ["image/jpeg", "image/png", "image/webp", "application/pdf"],
+      onUploadComplete,
+      onError,
+    }: S3UploaderProps) {
+      const [uploading, setUploading] = useState(false);
+      const [progress, setProgress] = useState(0);
+
+      const uploadFile = useCallback(
+        async (file: File) => {
+          if (!allowedTypes.includes(file.type)) {
+            onError?.(new Error(`File type ${file.type} not allowed`));
+            return;
+          }
+
+          if (file.size > maxSize) {
+            onError?.(new Error(`File size exceeds ${maxSize / 1024 / 1024}MB limit`));
+            return;
+          }
+
+          setUploading(true);
+          setProgress(0);
+
+          try {
+            const presignResponse = await fetch("/api/upload/presign", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                filename: file.name,
+                contentType: file.type,
+                contentLength: file.size,
+                folder,
+              }),
+            });
+
+            if (!presignResponse.ok) {
+              const error = await presignResponse.json();
+              throw new Error(error.error || "Failed to get upload URL");
+            }
+
+            const { url, key } = await presignResponse.json();
+
+            const xhr = new XMLHttpRequest();
+
+            xhr.upload.addEventListener("progress", (event) => {
+              if (event.lengthComputable) {
+                setProgress(Math.round((event.loaded / event.total) * 100));
+              }
+            });
+
+            await new Promise<void>((resolve, reject) => {
+              xhr.addEventListener("load", () => {
+                if (xhr.status >= 200 && xhr.status < 300) {
+                  resolve();
+                } else {
+                  reject(new Error(`Upload failed with status ${xhr.status}`));
+                }
+              });
+              xhr.addEventListener("error", () => reject(new Error("Upload failed")));
+              xhr.open("PUT", url);
+              xhr.setRequestHeader("Content-Type", file.type);
+              xhr.send(file);
+            });
+
+            const downloadResponse = await fetch(`/api/files/${encodeURIComponent(key)}`);
+            const { url: downloadUrl } = await downloadResponse.json();
+
+            onUploadComplete?.({ key, url: downloadUrl });
+          } catch (error) {
+            onError?.(error instanceof Error ? error : new Error("Upload failed"));
+          } finally {
+            setUploading(false);
+            setProgress(0);
+          }
+        },
+        [folder, maxSize, allowedTypes, onUploadComplete, onError]
+      );
+
+      return (
+        <div className="space-y-4">
+          <input
+            type="file"
+            accept={allowedTypes.join(",")}
+            onChange={(e) => {
+              const file = e.target.files?.[0];
+              if (file) uploadFile(file);
+            }}
+            disabled={uploading}
+            className="block w-full text-sm file:mr-4 file:py-2 file:px-4 file:rounded file:border-0 file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100"
+          />
+
+          {uploading && (
+            <div className="w-full bg-gray-200 rounded-full h-2">
+              <div
+                className="bg-blue-600 h-2 rounded-full transition-all"
+                style={{ width: `${progress}%` }}
+              />
+            </div>
+          )}
+        </div>
+      );
+    }
+
+edge_cases:
+  - id: cors-error
+    symptom: "CORS error when uploading directly to S3"
+    cause: "S3 bucket CORS not configured"
+    solution: |
+      Add CORS configuration to S3 bucket:
+      [{"AllowedHeaders":["*"],"AllowedMethods":["GET","PUT","POST"],"AllowedOrigins":["https://yourdomain.com"],"ExposeHeaders":[]}]
+
+  - id: url-expired
+    symptom: "Presigned URL returns 403 Forbidden"
+    cause: "URL expired or clock skew"
+    solution: "Generate URL with longer expiration, ensure server clock is synced"
+
+  - id: large-file-timeout
+    symptom: "Upload fails for large files"
+    cause: "Network timeout or Lambda limits"
+    solution: "Use multipart upload for files >100MB, increase timeout settings"
+
+  - id: access-denied
+    symptom: "AccessDenied error on upload"
+    cause: "IAM permissions insufficient"
+    solution: "Add s3:PutObject permission to IAM policy for the bucket"
+
+validation:
+  manual_test:
+    - "Configure AWS credentials"
+    - "Request presigned upload URL"
+    - "Upload file directly to S3"
+    - "Request presigned download URL"
+    - "Verify file accessible via download URL"
+    - "Delete file and verify removal"

@@ -1,0 +1,390 @@
+id: cloudflare-r2
+version: "1.0.0"
+updated_at: "2026-01-31"
+author: "nyko-team"
+status: beta
+
+name: "Cloudflare R2 Storage"
+description: "S3-compatible object storage with Cloudflare R2"
+
+category: storage
+tags:
+  - cloudflare
+  - r2
+  - s3-compatible
+  - storage
+  - upload
+
+difficulty: intermediate
+time_estimate: "20-30 min"
+
+stack:
+  required:
+    - name: "@aws-sdk/client-s3"
+      version: "^3.980.0"
+      reason: "S3-compatible client for R2"
+    - name: "@aws-sdk/s3-request-presigner"
+      version: "^3.980.0"
+      reason: "Generate presigned URLs"
+    - name: "next"
+      version: "^15.1.0"
+      reason: "App Router API routes"
+
+requires: []
+
+enables: []
+
+env_vars:
+  required:
+    - key: R2_ACCESS_KEY_ID
+      description: "R2 access key ID"
+      format: "Access key string"
+      where_to_find: "Cloudflare Dashboard > R2 > Manage R2 API Tokens"
+    - key: R2_SECRET_ACCESS_KEY
+      description: "R2 secret access key"
+      format: "Secret string"
+      where_to_find: "Cloudflare Dashboard > R2 > Manage R2 API Tokens"
+    - key: R2_ACCOUNT_ID
+      description: "Cloudflare account ID"
+      format: "32-character hex string"
+      where_to_find: "Cloudflare Dashboard > Overview > Account ID"
+    - key: R2_BUCKET_NAME
+      description: "R2 bucket name"
+      format: "my-bucket-name"
+      where_to_find: "Cloudflare Dashboard > R2"
+  optional:
+    - key: R2_PUBLIC_URL
+      description: "Public bucket URL for downloads"
+      format: "https://pub-xxx.r2.dev"
+      where_to_find: "Cloudflare Dashboard > R2 > Bucket > Settings"
+
+external_setup:
+  - service: "Cloudflare R2"
+    url: "https://dash.cloudflare.com"
+    steps:
+      - "Go to R2 in Cloudflare Dashboard"
+      - "Create a new bucket"
+      - "Go to Manage R2 API Tokens"
+      - "Create API token with read/write permissions"
+      - "Copy Account ID, Access Key ID, and Secret"
+      - "Optional: Enable public access for bucket"
+
+files:
+  - path: "lib/r2.ts"
+    action: create
+    description: "R2 client and utilities"
+    priority: 1
+
+  - path: "app/api/r2/upload/route.ts"
+    action: create
+    description: "Generate presigned upload URL"
+    priority: 2
+
+  - path: "app/api/r2/[...key]/route.ts"
+    action: create
+    description: "Download and delete operations"
+    priority: 3
+
+code:
+  lib/r2.ts: |
+    import {
+      S3Client,
+      PutObjectCommand,
+      GetObjectCommand,
+      DeleteObjectCommand,
+      ListObjectsV2Command,
+    } from "@aws-sdk/client-s3";
+    import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
+
+    const R2_ENDPOINT = `https://${process.env.R2_ACCOUNT_ID}.r2.cloudflarestorage.com`;
+
+    const r2Client = new S3Client({
+      region: "auto",
+      endpoint: R2_ENDPOINT,
+      credentials: {
+        accessKeyId: process.env.R2_ACCESS_KEY_ID!,
+        secretAccessKey: process.env.R2_SECRET_ACCESS_KEY!,
+      },
+    });
+
+    const BUCKET_NAME = process.env.R2_BUCKET_NAME!;
+    const PUBLIC_URL = process.env.R2_PUBLIC_URL;
+
+    export async function generateUploadUrl(params: {
+      key: string;
+      contentType: string;
+      expiresIn?: number;
+    }): Promise<string> {
+      const command = new PutObjectCommand({
+        Bucket: BUCKET_NAME,
+        Key: params.key,
+        ContentType: params.contentType,
+      });
+
+      return getSignedUrl(r2Client, command, {
+        expiresIn: params.expiresIn || 3600,
+      });
+    }
+
+    export async function generateDownloadUrl(
+      key: string,
+      expiresIn: number = 3600
+    ): Promise<string> {
+      if (PUBLIC_URL) {
+        return `${PUBLIC_URL}/${key}`;
+      }
+
+      const command = new GetObjectCommand({
+        Bucket: BUCKET_NAME,
+        Key: key,
+      });
+
+      return getSignedUrl(r2Client, command, { expiresIn });
+    }
+
+    export async function uploadFile(params: {
+      key: string;
+      body: Buffer | Uint8Array | string;
+      contentType: string;
+      metadata?: Record<string, string>;
+    }): Promise<void> {
+      const command = new PutObjectCommand({
+        Bucket: BUCKET_NAME,
+        Key: params.key,
+        Body: params.body,
+        ContentType: params.contentType,
+        Metadata: params.metadata,
+      });
+
+      await r2Client.send(command);
+    }
+
+    export async function downloadFile(key: string): Promise<{
+      body: ReadableStream | null;
+      contentType?: string;
+      contentLength?: number;
+    }> {
+      const command = new GetObjectCommand({
+        Bucket: BUCKET_NAME,
+        Key: key,
+      });
+
+      const response = await r2Client.send(command);
+
+      return {
+        body: response.Body?.transformToWebStream() || null,
+        contentType: response.ContentType,
+        contentLength: response.ContentLength,
+      };
+    }
+
+    export async function deleteFile(key: string): Promise<void> {
+      const command = new DeleteObjectCommand({
+        Bucket: BUCKET_NAME,
+        Key: key,
+      });
+
+      await r2Client.send(command);
+    }
+
+    export async function listFiles(prefix?: string): Promise<
+      Array<{ key: string; size: number; lastModified: Date }>
+    > {
+      const command = new ListObjectsV2Command({
+        Bucket: BUCKET_NAME,
+        Prefix: prefix,
+        MaxKeys: 1000,
+      });
+
+      const response = await r2Client.send(command);
+
+      return (
+        response.Contents?.map((item) => ({
+          key: item.Key!,
+          size: item.Size || 0,
+          lastModified: item.LastModified || new Date(),
+        })) || []
+      );
+    }
+
+    export function generateKey(params: {
+      userId: string;
+      filename: string;
+      folder?: string;
+    }): string {
+      const timestamp = Date.now();
+      const random = Math.random().toString(36).slice(2, 8);
+      const ext = params.filename.split(".").pop() || "";
+      const folder = params.folder || "uploads";
+
+      return `${folder}/${params.userId}/${timestamp}-${random}.${ext}`;
+    }
+
+  app/api/r2/upload/route.ts: |
+    import { auth } from "@/auth";
+    import { generateUploadUrl, generateKey } from "@/lib/r2";
+    import { NextRequest, NextResponse } from "next/server";
+
+    const ALLOWED_TYPES = [
+      "image/jpeg",
+      "image/png",
+      "image/gif",
+      "image/webp",
+      "application/pdf",
+      "video/mp4",
+    ];
+
+    export async function POST(request: NextRequest) {
+      const session = await auth();
+      if (!session?.user?.id) {
+        return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+      }
+
+      try {
+        const { filename, contentType, folder } = await request.json();
+
+        if (!filename || !contentType) {
+          return NextResponse.json(
+            { error: "Missing filename or contentType" },
+            { status: 400 }
+          );
+        }
+
+        if (!ALLOWED_TYPES.includes(contentType)) {
+          return NextResponse.json(
+            { error: `File type ${contentType} not allowed` },
+            { status: 400 }
+          );
+        }
+
+        const key = generateKey({
+          userId: session.user.id,
+          filename,
+          folder,
+        });
+
+        const url = await generateUploadUrl({
+          key,
+          contentType,
+        });
+
+        return NextResponse.json({
+          url,
+          key,
+          expiresIn: 3600,
+        });
+      } catch (error) {
+        console.error("R2 presign error:", error);
+        return NextResponse.json(
+          { error: "Failed to generate upload URL" },
+          { status: 500 }
+        );
+      }
+    }
+
+  app/api/r2/[...key]/route.ts: |
+    import { auth } from "@/auth";
+    import { generateDownloadUrl, deleteFile, downloadFile } from "@/lib/r2";
+    import { NextRequest, NextResponse } from "next/server";
+
+    export async function GET(
+      request: NextRequest,
+      { params }: { params: Promise<{ key: string[] }> }
+    ) {
+      const session = await auth();
+      if (!session?.user?.id) {
+        return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+      }
+
+      const { key: keyParts } = await params;
+      const key = keyParts.join("/");
+
+      if (!key.includes(session.user.id)) {
+        return NextResponse.json({ error: "Access denied" }, { status: 403 });
+      }
+
+      const download = request.nextUrl.searchParams.get("download") === "true";
+
+      try {
+        if (download) {
+          const file = await downloadFile(key);
+          if (!file.body) {
+            return NextResponse.json({ error: "File not found" }, { status: 404 });
+          }
+
+          return new NextResponse(file.body, {
+            headers: {
+              "Content-Type": file.contentType || "application/octet-stream",
+              "Content-Length": String(file.contentLength || 0),
+            },
+          });
+        }
+
+        const url = await generateDownloadUrl(key);
+        return NextResponse.json({ url, expiresIn: 3600 });
+      } catch (error) {
+        console.error("R2 download error:", error);
+        return NextResponse.json(
+          { error: "Failed to get file" },
+          { status: 500 }
+        );
+      }
+    }
+
+    export async function DELETE(
+      request: NextRequest,
+      { params }: { params: Promise<{ key: string[] }> }
+    ) {
+      const session = await auth();
+      if (!session?.user?.id) {
+        return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+      }
+
+      const { key: keyParts } = await params;
+      const key = keyParts.join("/");
+
+      if (!key.includes(session.user.id)) {
+        return NextResponse.json({ error: "Access denied" }, { status: 403 });
+      }
+
+      try {
+        await deleteFile(key);
+        return NextResponse.json({ success: true });
+      } catch (error) {
+        console.error("R2 delete error:", error);
+        return NextResponse.json(
+          { error: "Failed to delete file" },
+          { status: 500 }
+        );
+      }
+    }
+
+edge_cases:
+  - id: endpoint-format
+    symptom: "Invalid endpoint error"
+    cause: "Incorrect R2 endpoint format"
+    solution: "Use format: https://{account_id}.r2.cloudflarestorage.com"
+
+  - id: region-auto
+    symptom: "Region not found error"
+    cause: "Using specific AWS region instead of auto"
+    solution: "Always use region: 'auto' for R2"
+
+  - id: public-access
+    symptom: "Cannot access files publicly"
+    cause: "Public access not enabled on bucket"
+    solution: "Enable public access in R2 bucket settings, set R2_PUBLIC_URL"
+
+  - id: cors-issues
+    symptom: "CORS error on direct upload"
+    cause: "CORS not configured on bucket"
+    solution: "Configure CORS in R2 bucket settings via Cloudflare dashboard"
+
+validation:
+  manual_test:
+    - "Configure R2 credentials"
+    - "Generate presigned upload URL"
+    - "Upload file to R2"
+    - "Get download URL and verify file accessible"
+    - "Delete file and verify removal"
+    - "Test public URL if configured"

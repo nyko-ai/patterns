@@ -1,0 +1,384 @@
+id: image-optimization-sharp
+version: "1.0.0"
+updated_at: "2026-01-31"
+author: "nyko-team"
+status: beta
+
+name: "Image Optimization with Sharp"
+description: "Server-side image processing and optimization using Sharp"
+
+category: storage
+tags:
+  - sharp
+  - image
+  - optimization
+  - resize
+  - processing
+
+difficulty: intermediate
+time_estimate: "25-35 min"
+
+stack:
+  required:
+    - name: "sharp"
+      version: "^0.34.5"
+      reason: "High-performance image processing"
+    - name: "next"
+      version: "^15.1.0"
+      reason: "App Router API routes"
+
+requires: []
+
+enables:
+  - s3-presigned-urls
+  - cloudflare-r2
+
+env_vars:
+  optional:
+    - key: IMAGE_QUALITY
+      description: "Default JPEG/WebP quality"
+      default: "80"
+    - key: MAX_IMAGE_SIZE
+      description: "Maximum image dimension in pixels"
+      default: "4096"
+
+external_setup: []
+
+files:
+  - path: "lib/image-processor.ts"
+    action: create
+    description: "Sharp image processing utilities"
+    priority: 1
+
+  - path: "app/api/images/optimize/route.ts"
+    action: create
+    description: "Image optimization endpoint"
+    priority: 2
+
+  - path: "app/api/images/resize/route.ts"
+    action: create
+    description: "Image resize endpoint"
+    priority: 3
+
+code:
+  lib/image-processor.ts: |
+    import sharp from "sharp";
+
+    const DEFAULT_QUALITY = parseInt(process.env.IMAGE_QUALITY || "80");
+    const MAX_DIMENSION = parseInt(process.env.MAX_IMAGE_SIZE || "4096");
+
+    export type ImageFormat = "jpeg" | "png" | "webp" | "avif";
+
+    export interface ProcessOptions {
+      width?: number;
+      height?: number;
+      fit?: "cover" | "contain" | "fill" | "inside" | "outside";
+      quality?: number;
+      format?: ImageFormat;
+      blur?: number;
+      grayscale?: boolean;
+      rotate?: number;
+      flip?: boolean;
+      flop?: boolean;
+    }
+
+    export interface ImageMetadata {
+      width: number;
+      height: number;
+      format: string;
+      size: number;
+      hasAlpha: boolean;
+    }
+
+    export async function getMetadata(input: Buffer): Promise<ImageMetadata> {
+      const metadata = await sharp(input).metadata();
+
+      return {
+        width: metadata.width || 0,
+        height: metadata.height || 0,
+        format: metadata.format || "unknown",
+        size: input.length,
+        hasAlpha: metadata.hasAlpha || false,
+      };
+    }
+
+    export async function processImage(
+      input: Buffer,
+      options: ProcessOptions = {}
+    ): Promise<{ buffer: Buffer; metadata: ImageMetadata }> {
+      let pipeline = sharp(input);
+
+      if (options.rotate) {
+        pipeline = pipeline.rotate(options.rotate);
+      }
+
+      if (options.flip) {
+        pipeline = pipeline.flip();
+      }
+
+      if (options.flop) {
+        pipeline = pipeline.flop();
+      }
+
+      if (options.width || options.height) {
+        const width = Math.min(options.width || MAX_DIMENSION, MAX_DIMENSION);
+        const height = Math.min(options.height || MAX_DIMENSION, MAX_DIMENSION);
+
+        pipeline = pipeline.resize(width, height, {
+          fit: options.fit || "inside",
+          withoutEnlargement: true,
+        });
+      }
+
+      if (options.grayscale) {
+        pipeline = pipeline.grayscale();
+      }
+
+      if (options.blur && options.blur > 0) {
+        pipeline = pipeline.blur(Math.min(options.blur, 100));
+      }
+
+      const quality = options.quality || DEFAULT_QUALITY;
+      const format = options.format || "webp";
+
+      switch (format) {
+        case "jpeg":
+          pipeline = pipeline.jpeg({ quality, mozjpeg: true });
+          break;
+        case "png":
+          pipeline = pipeline.png({ quality, compressionLevel: 9 });
+          break;
+        case "webp":
+          pipeline = pipeline.webp({ quality });
+          break;
+        case "avif":
+          pipeline = pipeline.avif({ quality });
+          break;
+      }
+
+      const buffer = await pipeline.toBuffer();
+      const metadata = await getMetadata(buffer);
+
+      return { buffer, metadata };
+    }
+
+    export async function generateThumbnail(
+      input: Buffer,
+      size: number = 200
+    ): Promise<Buffer> {
+      return sharp(input)
+        .resize(size, size, { fit: "cover" })
+        .webp({ quality: 70 })
+        .toBuffer();
+    }
+
+    export async function generateResponsiveSet(
+      input: Buffer,
+      widths: number[] = [320, 640, 1024, 1920]
+    ): Promise<Array<{ width: number; buffer: Buffer; size: number }>> {
+      const results = await Promise.all(
+        widths.map(async (width) => {
+          const buffer = await sharp(input)
+            .resize(width, null, { withoutEnlargement: true })
+            .webp({ quality: DEFAULT_QUALITY })
+            .toBuffer();
+
+          return { width, buffer, size: buffer.length };
+        })
+      );
+
+      return results;
+    }
+
+    export async function extractDominantColor(input: Buffer): Promise<string> {
+      const { dominant } = await sharp(input).stats();
+
+      const toHex = (n: number) => Math.round(n).toString(16).padStart(2, "0");
+      return `#${toHex(dominant.r)}${toHex(dominant.g)}${toHex(dominant.b)}`;
+    }
+
+    export async function generateBlurPlaceholder(input: Buffer): Promise<string> {
+      const buffer = await sharp(input)
+        .resize(10, 10, { fit: "inside" })
+        .blur()
+        .toBuffer();
+
+      return `data:image/webp;base64,${buffer.toString("base64")}`;
+    }
+
+  app/api/images/optimize/route.ts: |
+    import { NextRequest, NextResponse } from "next/server";
+    import { processImage, getMetadata, type ProcessOptions } from "@/lib/image-processor";
+
+    const MAX_FILE_SIZE = 10 * 1024 * 1024;
+
+    export async function POST(request: NextRequest) {
+      try {
+        const formData = await request.formData();
+        const file = formData.get("file") as File | null;
+
+        if (!file) {
+          return NextResponse.json({ error: "No file provided" }, { status: 400 });
+        }
+
+        if (file.size > MAX_FILE_SIZE) {
+          return NextResponse.json(
+            { error: `File size exceeds ${MAX_FILE_SIZE / 1024 / 1024}MB limit` },
+            { status: 400 }
+          );
+        }
+
+        const buffer = Buffer.from(await file.arrayBuffer());
+        const originalMetadata = await getMetadata(buffer);
+
+        const options: ProcessOptions = {
+          width: parseInt(formData.get("width") as string) || undefined,
+          height: parseInt(formData.get("height") as string) || undefined,
+          quality: parseInt(formData.get("quality") as string) || 80,
+          format: (formData.get("format") as ProcessOptions["format"]) || "webp",
+          fit: (formData.get("fit") as ProcessOptions["fit"]) || "inside",
+        };
+
+        const { buffer: optimized, metadata } = await processImage(buffer, options);
+
+        const savings = Math.round((1 - optimized.length / buffer.length) * 100);
+
+        return new NextResponse(optimized, {
+          headers: {
+            "Content-Type": `image/${options.format || "webp"}`,
+            "Content-Length": String(optimized.length),
+            "X-Original-Size": String(buffer.length),
+            "X-Optimized-Size": String(optimized.length),
+            "X-Savings-Percent": String(savings),
+            "X-Dimensions": `${metadata.width}x${metadata.height}`,
+          },
+        });
+      } catch (error) {
+        console.error("Image optimization error:", error);
+        return NextResponse.json(
+          { error: "Failed to optimize image" },
+          { status: 500 }
+        );
+      }
+    }
+
+  app/api/images/resize/route.ts: |
+    import { NextRequest, NextResponse } from "next/server";
+    import {
+      processImage,
+      generateThumbnail,
+      generateResponsiveSet,
+      extractDominantColor,
+      generateBlurPlaceholder,
+    } from "@/lib/image-processor";
+
+    export async function POST(request: NextRequest) {
+      try {
+        const formData = await request.formData();
+        const file = formData.get("file") as File | null;
+        const mode = formData.get("mode") as string || "single";
+
+        if (!file) {
+          return NextResponse.json({ error: "No file provided" }, { status: 400 });
+        }
+
+        const buffer = Buffer.from(await file.arrayBuffer());
+
+        switch (mode) {
+          case "thumbnail": {
+            const size = parseInt(formData.get("size") as string) || 200;
+            const thumbnail = await generateThumbnail(buffer, size);
+
+            return new NextResponse(thumbnail, {
+              headers: {
+                "Content-Type": "image/webp",
+                "Content-Length": String(thumbnail.length),
+              },
+            });
+          }
+
+          case "responsive": {
+            const widths = formData.get("widths")
+              ? (formData.get("widths") as string).split(",").map(Number)
+              : [320, 640, 1024, 1920];
+
+            const set = await generateResponsiveSet(buffer, widths);
+
+            return NextResponse.json({
+              images: set.map((img) => ({
+                width: img.width,
+                size: img.size,
+                base64: img.buffer.toString("base64"),
+              })),
+            });
+          }
+
+          case "placeholder": {
+            const [dominantColor, blurDataUrl] = await Promise.all([
+              extractDominantColor(buffer),
+              generateBlurPlaceholder(buffer),
+            ]);
+
+            return NextResponse.json({
+              dominantColor,
+              blurDataUrl,
+            });
+          }
+
+          default: {
+            const width = parseInt(formData.get("width") as string) || undefined;
+            const height = parseInt(formData.get("height") as string) || undefined;
+
+            const { buffer: resized, metadata } = await processImage(buffer, {
+              width,
+              height,
+              format: "webp",
+            });
+
+            return new NextResponse(resized, {
+              headers: {
+                "Content-Type": "image/webp",
+                "Content-Length": String(resized.length),
+                "X-Dimensions": `${metadata.width}x${metadata.height}`,
+              },
+            });
+          }
+        }
+      } catch (error) {
+        console.error("Image resize error:", error);
+        return NextResponse.json(
+          { error: "Failed to process image" },
+          { status: 500 }
+        );
+      }
+    }
+
+edge_cases:
+  - id: sharp-install-error
+    symptom: "Sharp fails to install or load"
+    cause: "Native dependencies not available"
+    solution: "Install platform-specific sharp: npm install --platform=linux --arch=x64 sharp"
+
+  - id: memory-exhaustion
+    symptom: "Process crashes on large images"
+    cause: "Image too large for available memory"
+    solution: "Limit max dimensions, use streaming for very large files"
+
+  - id: format-not-supported
+    symptom: "Cannot process certain image format"
+    cause: "Format not supported by sharp"
+    solution: "Convert to supported format first, check sharp format support"
+
+  - id: color-profile-issues
+    symptom: "Colors look different after processing"
+    cause: "Color profile stripped or converted"
+    solution: "Use withMetadata() to preserve color profile, or convert to sRGB"
+
+validation:
+  manual_test:
+    - "Upload image and optimize"
+    - "Verify size reduction percentage"
+    - "Generate thumbnail and verify dimensions"
+    - "Create responsive image set"
+    - "Extract dominant color and blur placeholder"
+    - "Test with various image formats"

@@ -1,5 +1,5 @@
 {
-  "version": "1.1.0",
+  "version": "1.2.0",
   "updated_at": "2026-01-31",
   "patterns": [
     {
@@ -206,6 +206,87 @@
       "name": "Rate Limiting with Upstash",
       "description": "API rate limiting using Upstash Redis",
       "tags": ["upstash", "redis", "rate-limit", "api"],
+      "difficulty": "intermediate",
+      "status": "beta"
+    },
+    {
+      "id": "rate-limiting-express",
+      "category": "api",
+      "name": "Rate Limiting with Express",
+      "description": "API rate limiting using express-rate-limit for Express and Next.js",
+      "tags": ["express", "rate-limit", "api", "security"],
+      "difficulty": "beginner",
+      "status": "beta"
+    },
+    {
+      "id": "api-key-auth",
+      "category": "api",
+      "name": "API Key Authentication",
+      "description": "Custom API key validation for securing API endpoints",
+      "tags": ["api-key", "authentication", "security", "middleware"],
+      "difficulty": "intermediate",
+      "status": "beta"
+    },
+    {
+      "id": "webhook-sender-retry",
+      "category": "api",
+      "name": "Webhook Sender with Retry",
+      "description": "Outbound webhook delivery with exponential backoff retry logic",
+      "tags": ["webhook", "retry", "queue", "reliability"],
+      "difficulty": "intermediate",
+      "status": "beta"
+    },
+    {
+      "id": "request-validation-zod",
+      "category": "api",
+      "name": "Request Validation with Zod",
+      "description": "Type-safe request validation middleware using Zod schemas",
+      "tags": ["zod", "validation", "typescript", "middleware"],
+      "difficulty": "beginner",
+      "status": "beta"
+    },
+    {
+      "id": "error-handling-middleware",
+      "category": "api",
+      "name": "Error Handling Middleware",
+      "description": "Standardized error handling and formatting for API responses",
+      "tags": ["error-handling", "middleware", "api", "logging"],
+      "difficulty": "beginner",
+      "status": "beta"
+    },
+    {
+      "id": "cors-configuration",
+      "category": "api",
+      "name": "CORS Configuration",
+      "description": "Cross-Origin Resource Sharing configuration for Next.js and Express",
+      "tags": ["cors", "security", "headers", "middleware"],
+      "difficulty": "beginner",
+      "status": "beta"
+    },
+    {
+      "id": "s3-presigned-urls",
+      "category": "storage",
+      "name": "AWS S3 Presigned URLs",
+      "description": "Secure file uploads and downloads using AWS S3 presigned URLs",
+      "tags": ["aws", "s3", "upload", "presigned", "storage"],
+      "difficulty": "intermediate",
+      "status": "beta"
+    },
+    {
+      "id": "cloudflare-r2",
+      "category": "storage",
+      "name": "Cloudflare R2 Storage",
+      "description": "S3-compatible object storage with Cloudflare R2",
+      "tags": ["cloudflare", "r2", "s3-compatible", "storage"],
+      "difficulty": "intermediate",
+      "status": "beta"
+    },
+    {
+      "id": "image-optimization-sharp",
+      "category": "storage",
+      "name": "Image Optimization with Sharp",
+      "description": "Server-side image processing and optimization using Sharp",
+      "tags": ["sharp", "image", "optimization", "processing"],
       "difficulty": "intermediate",
       "status": "beta"
     }
