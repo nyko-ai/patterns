@@ -88,21 +88,31 @@ code:
   lib/stripe.ts: |
     import Stripe from "stripe";
 
-    if (!process.env.STRIPE_SECRET_KEY) {
-      throw new Error("Missing STRIPE_SECRET_KEY environment variable");
+    let stripeInstance: Stripe | null = null;
+
+    export function getStripe(): Stripe {
+      if (!process.env.STRIPE_SECRET_KEY) {
+        throw new Error("Missing STRIPE_SECRET_KEY environment variable");
+      }
+
+      if (!stripeInstance) {
+        stripeInstance = new Stripe(process.env.STRIPE_SECRET_KEY, {
+          apiVersion: "2025-01-28.clover",
+          typescript: true,
+        });
+      }
+
+      return stripeInstance;
     }
 
-    export const stripe = new Stripe(process.env.STRIPE_SECRET_KEY, {
-      apiVersion: "2024-12-18.acacia",
-      typescript: true,
-    });
-
   app/api/checkout/route.ts: |
-    import { stripe } from "@/lib/stripe";
+    import { getStripe } from "@/lib/stripe";
     import { NextRequest, NextResponse } from "next/server";
+    import Stripe from "stripe";
 
     export async function POST(request: NextRequest) {
       try {
+        const stripe = getStripe();
         const body = await request.json();
         const { priceId, mode = "payment", customerId, metadata } = body;
 
@@ -243,7 +253,7 @@ code:
     }
 
   app/checkout/success/page.tsx: |
-    import { stripe } from "@/lib/stripe";
+    import { getStripe } from "@/lib/stripe";
     import Link from "next/link";
 
     interface SuccessPageProps {
@@ -269,6 +279,7 @@ code:
       }
 
       // Retrieve session details
+      const stripe = getStripe();
       const session = await stripe.checkout.sessions.retrieve(session_id, {
         expand: ["line_items", "customer"],
       });
