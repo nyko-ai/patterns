@@ -1,0 +1,530 @@
+id: stripe-subscription-lifecycle
+version: "1.0.0"
+updated_at: "2026-01-31"
+author: "nyko-team"
+status: beta
+
+name: "Stripe Subscription Lifecycle"
+description: "Complete subscription management with database sync via webhooks"
+
+category: payments
+tags:
+  - stripe
+  - subscriptions
+  - webhooks
+  - database
+  - lifecycle
+
+difficulty: advanced
+time_estimate: "45-60 min"
+
+stack:
+  required:
+    - name: "next"
+      version: "^15.1.0"
+      reason: "App Router with server components"
+    - name: "stripe"
+      version: "^17.4.0"
+      reason: "Stripe SDK"
+    - name: "@prisma/client"
+      version: "^7.3.0"
+      reason: "Database ORM for subscription storage"
+
+requires:
+  - stripe-webhook-handler
+
+enables:
+  - stripe-customer-portal
+  - stripe-usage-billing
+
+env_vars:
+  required:
+    - key: STRIPE_SECRET_KEY
+      description: "Stripe secret API key"
+      format: "sk_test_xxx or sk_live_xxx"
+      where_to_find: "Stripe Dashboard > Developers > API keys"
+    - key: STRIPE_WEBHOOK_SECRET
+      description: "Webhook endpoint signing secret"
+      format: "whsec_xxx"
+      where_to_find: "Stripe Dashboard > Developers > Webhooks > Signing secret"
+    - key: DATABASE_URL
+      description: "PostgreSQL connection string"
+      format: "postgresql://user:password@host:5432/database"
+      where_to_find: "Your database provider dashboard"
+
+external_setup:
+  - service: "Stripe Dashboard"
+    url: "https://dashboard.stripe.com"
+    steps:
+      - "Go to Products > Create product"
+      - "Add pricing (recurring for subscriptions)"
+      - "Copy Price ID (price_xxx)"
+      - "Go to Developers > Webhooks"
+      - "Add endpoint: https://yourdomain.com/api/webhooks/stripe"
+      - "Select events: customer.subscription.*, invoice.*"
+      - "Copy Signing secret"
+
+files:
+  - path: "prisma/schema.prisma"
+    action: modify
+    description: "Add subscription model to schema"
+    priority: 1
+
+  - path: "lib/stripe.ts"
+    action: create
+    description: "Stripe client configuration"
+    priority: 2
+
+  - path: "lib/subscription.ts"
+    action: create
+    description: "Subscription management utilities"
+    priority: 3
+
+  - path: "app/api/webhooks/stripe/route.ts"
+    action: create
+    description: "Webhook handler for subscription events"
+    priority: 4
+
+  - path: "app/api/subscriptions/create/route.ts"
+    action: create
+    description: "Create subscription checkout"
+    priority: 5
+
+  - path: "app/api/subscriptions/cancel/route.ts"
+    action: create
+    description: "Cancel subscription"
+    priority: 6
+
+  - path: "components/pricing/subscription-button.tsx"
+    action: create
+    description: "Subscribe button component"
+    priority: 7
+
+code:
+  prisma/schema.prisma: |
+    // Add to existing schema.prisma
+
+    model Subscription {
+      id                   String   @id @default(cuid())
+      userId               String   @unique
+      stripeCustomerId     String   @unique
+      stripeSubscriptionId String?  @unique
+      stripePriceId        String?
+      stripeCurrentPeriodEnd DateTime?
+      status               SubscriptionStatus @default(INACTIVE)
+      cancelAtPeriodEnd    Boolean  @default(false)
+      createdAt            DateTime @default(now())
+      updatedAt            DateTime @updatedAt
+
+      user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+    }
+
+    enum SubscriptionStatus {
+      ACTIVE
+      CANCELED
+      INCOMPLETE
+      INCOMPLETE_EXPIRED
+      PAST_DUE
+      PAUSED
+      TRIALING
+      UNPAID
+      INACTIVE
+    }
+
+  lib/stripe.ts: |
+    import Stripe from "stripe";
+
+    if (!process.env.STRIPE_SECRET_KEY) {
+      throw new Error("Missing STRIPE_SECRET_KEY");
+    }
+
+    export const stripe = new Stripe(process.env.STRIPE_SECRET_KEY, {
+      apiVersion: "2024-12-18.acacia",
+      typescript: true,
+    });
+
+    // Price IDs - update with your actual prices
+    export const PRICES = {
+      MONTHLY: process.env.STRIPE_MONTHLY_PRICE_ID!,
+      YEARLY: process.env.STRIPE_YEARLY_PRICE_ID!,
+    } as const;
+
+  lib/subscription.ts: |
+    import { prisma } from "@/lib/prisma";
+    import { stripe } from "@/lib/stripe";
+    import type { SubscriptionStatus } from "@prisma/client";
+
+    export async function getOrCreateStripeCustomer(userId: string, email: string) {
+      // Check if user already has a subscription record
+      const existingSub = await prisma.subscription.findUnique({
+        where: { userId },
+      });
+
+      if (existingSub?.stripeCustomerId) {
+        return existingSub.stripeCustomerId;
+      }
+
+      // Create new Stripe customer
+      const customer = await stripe.customers.create({
+        email,
+        metadata: { userId },
+      });
+
+      // Create subscription record
+      await prisma.subscription.create({
+        data: {
+          userId,
+          stripeCustomerId: customer.id,
+          status: "INACTIVE",
+        },
+      });
+
+      return customer.id;
+    }
+
+    export async function getUserSubscription(userId: string) {
+      return prisma.subscription.findUnique({
+        where: { userId },
+      });
+    }
+
+    export async function updateSubscriptionStatus(
+      stripeSubscriptionId: string,
+      status: SubscriptionStatus,
+      data?: {
+        stripePriceId?: string;
+        stripeCurrentPeriodEnd?: Date;
+        cancelAtPeriodEnd?: boolean;
+      }
+    ) {
+      return prisma.subscription.update({
+        where: { stripeSubscriptionId },
+        data: {
+          status,
+          ...data,
+        },
+      });
+    }
+
+    export async function syncSubscriptionWithStripe(
+      stripeCustomerId: string,
+      subscription: {
+        id: string;
+        status: string;
+        current_period_end: number;
+        cancel_at_period_end: boolean;
+        items: { data: Array<{ price: { id: string } }> };
+      }
+    ) {
+      const statusMap: Record<string, SubscriptionStatus> = {
+        active: "ACTIVE",
+        canceled: "CANCELED",
+        incomplete: "INCOMPLETE",
+        incomplete_expired: "INCOMPLETE_EXPIRED",
+        past_due: "PAST_DUE",
+        paused: "PAUSED",
+        trialing: "TRIALING",
+        unpaid: "UNPAID",
+      };
+
+      return prisma.subscription.update({
+        where: { stripeCustomerId },
+        data: {
+          stripeSubscriptionId: subscription.id,
+          stripePriceId: subscription.items.data[0]?.price.id,
+          stripeCurrentPeriodEnd: new Date(subscription.current_period_end * 1000),
+          cancelAtPeriodEnd: subscription.cancel_at_period_end,
+          status: statusMap[subscription.status] || "INACTIVE",
+        },
+      });
+    }
+
+    export function isSubscriptionActive(status: SubscriptionStatus): boolean {
+      return ["ACTIVE", "TRIALING"].includes(status);
+    }
+
+  app/api/webhooks/stripe/route.ts: |
+    import { headers } from "next/headers";
+    import { NextResponse } from "next/server";
+    import { stripe } from "@/lib/stripe";
+    import { syncSubscriptionWithStripe } from "@/lib/subscription";
+    import { prisma } from "@/lib/prisma";
+    import type Stripe from "stripe";
+
+    export async function POST(request: Request) {
+      const body = await request.text();
+      const headersList = await headers();
+      const signature = headersList.get("stripe-signature");
+
+      if (!signature) {
+        return NextResponse.json({ error: "Missing signature" }, { status: 400 });
+      }
+
+      let event: Stripe.Event;
+
+      try {
+        event = stripe.webhooks.constructEvent(
+          body,
+          signature,
+          process.env.STRIPE_WEBHOOK_SECRET!
+        );
+      } catch (error: any) {
+        console.error("Webhook signature verification failed:", error.message);
+        return NextResponse.json({ error: "Invalid signature" }, { status: 400 });
+      }
+
+      try {
+        switch (event.type) {
+          case "customer.subscription.created":
+          case "customer.subscription.updated": {
+            const subscription = event.data.object as Stripe.Subscription;
+            await syncSubscriptionWithStripe(
+              subscription.customer as string,
+              {
+                id: subscription.id,
+                status: subscription.status,
+                current_period_end: subscription.current_period_end,
+                cancel_at_period_end: subscription.cancel_at_period_end,
+                items: subscription.items,
+              }
+            );
+            break;
+          }
+
+          case "customer.subscription.deleted": {
+            const subscription = event.data.object as Stripe.Subscription;
+            await prisma.subscription.update({
+              where: { stripeSubscriptionId: subscription.id },
+              data: {
+                status: "CANCELED",
+                stripeSubscriptionId: null,
+              },
+            });
+            break;
+          }
+
+          case "invoice.payment_succeeded": {
+            const invoice = event.data.object as Stripe.Invoice;
+            if (invoice.subscription) {
+              const subscription = await stripe.subscriptions.retrieve(
+                invoice.subscription as string
+              );
+              await syncSubscriptionWithStripe(
+                invoice.customer as string,
+                {
+                  id: subscription.id,
+                  status: subscription.status,
+                  current_period_end: subscription.current_period_end,
+                  cancel_at_period_end: subscription.cancel_at_period_end,
+                  items: subscription.items,
+                }
+              );
+            }
+            break;
+          }
+
+          case "invoice.payment_failed": {
+            const invoice = event.data.object as Stripe.Invoice;
+            console.error("Payment failed for customer:", invoice.customer);
+            // Optionally send notification email
+            break;
+          }
+        }
+
+        return NextResponse.json({ received: true });
+      } catch (error) {
+        console.error("Webhook handler error:", error);
+        return NextResponse.json(
+          { error: "Webhook handler failed" },
+          { status: 500 }
+        );
+      }
+    }
+
+  app/api/subscriptions/create/route.ts: |
+    import { auth } from "@/auth";
+    import { stripe, PRICES } from "@/lib/stripe";
+    import { getOrCreateStripeCustomer } from "@/lib/subscription";
+    import { NextResponse } from "next/server";
+
+    export async function POST(request: Request) {
+      try {
+        const session = await auth();
+        if (!session?.user?.id || !session.user.email) {
+          return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+        }
+
+        const { priceId, successUrl, cancelUrl } = await request.json();
+
+        // Validate price ID
+        if (!Object.values(PRICES).includes(priceId)) {
+          return NextResponse.json({ error: "Invalid price" }, { status: 400 });
+        }
+
+        const customerId = await getOrCreateStripeCustomer(
+          session.user.id,
+          session.user.email
+        );
+
+        const checkoutSession = await stripe.checkout.sessions.create({
+          customer: customerId,
+          mode: "subscription",
+          payment_method_types: ["card"],
+          line_items: [
+            {
+              price: priceId,
+              quantity: 1,
+            },
+          ],
+          success_url: successUrl || `${process.env.NEXT_PUBLIC_APP_URL}/dashboard?success=true`,
+          cancel_url: cancelUrl || `${process.env.NEXT_PUBLIC_APP_URL}/pricing?canceled=true`,
+          metadata: {
+            userId: session.user.id,
+          },
+        });
+
+        return NextResponse.json({ url: checkoutSession.url });
+      } catch (error) {
+        console.error("Create subscription error:", error);
+        return NextResponse.json(
+          { error: "Failed to create subscription" },
+          { status: 500 }
+        );
+      }
+    }
+
+  app/api/subscriptions/cancel/route.ts: |
+    import { auth } from "@/auth";
+    import { stripe } from "@/lib/stripe";
+    import { getUserSubscription } from "@/lib/subscription";
+    import { NextResponse } from "next/server";
+
+    export async function POST() {
+      try {
+        const session = await auth();
+        if (!session?.user?.id) {
+          return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+        }
+
+        const subscription = await getUserSubscription(session.user.id);
+
+        if (!subscription?.stripeSubscriptionId) {
+          return NextResponse.json(
+            { error: "No active subscription" },
+            { status: 400 }
+          );
+        }
+
+        // Cancel at period end (user keeps access until subscription expires)
+        await stripe.subscriptions.update(subscription.stripeSubscriptionId, {
+          cancel_at_period_end: true,
+        });
+
+        return NextResponse.json({ success: true });
+      } catch (error) {
+        console.error("Cancel subscription error:", error);
+        return NextResponse.json(
+          { error: "Failed to cancel subscription" },
+          { status: 500 }
+        );
+      }
+    }
+
+  components/pricing/subscription-button.tsx: |
+    "use client";
+
+    import { useState } from "react";
+
+    interface SubscriptionButtonProps {
+      priceId: string;
+      children: React.ReactNode;
+      className?: string;
+    }
+
+    export function SubscriptionButton({
+      priceId,
+      children,
+      className,
+    }: SubscriptionButtonProps) {
+      const [loading, setLoading] = useState(false);
+
+      const handleSubscribe = async () => {
+        setLoading(true);
+
+        try {
+          const response = await fetch("/api/subscriptions/create", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ priceId }),
+          });
+
+          const data = await response.json();
+
+          if (data.url) {
+            window.location.href = data.url;
+          } else {
+            throw new Error(data.error || "Failed to create checkout");
+          }
+        } catch (error) {
+          console.error("Subscription error:", error);
+          alert("Something went wrong. Please try again.");
+        } finally {
+          setLoading(false);
+        }
+      };
+
+      return (
+        <button
+          onClick={handleSubscribe}
+          disabled={loading}
+          className={className}
+        >
+          {loading ? "Loading..." : children}
+        </button>
+      );
+    }
+
+edge_cases:
+  - id: webhook-not-received
+    symptom: "Subscription created but database not updated"
+    cause: "Webhook not configured or signature mismatch"
+    solution: |
+      1. Verify webhook endpoint in Stripe Dashboard
+      2. Check STRIPE_WEBHOOK_SECRET is correct
+      3. Use Stripe CLI for local testing: stripe listen --forward-to localhost:3000/api/webhooks/stripe
+      4. Check webhook logs in Stripe Dashboard
+
+  - id: duplicate-customer
+    symptom: "User has multiple Stripe customers"
+    cause: "Customer creation without checking existing"
+    solution: |
+      The getOrCreateStripeCustomer function prevents this.
+      For existing duplicates:
+      1. Merge customers in Stripe Dashboard
+      2. Update database with correct customer ID
+
+  - id: subscription-sync-delay
+    symptom: "UI shows wrong subscription status"
+    cause: "Webhook processing delay"
+    solution: |
+      1. Add loading states after checkout return
+      2. Poll subscription status for 10 seconds
+      3. Or use Stripe's real-time features
+
+  - id: failed-payment-handling
+    symptom: "User loses access without notice"
+    cause: "invoice.payment_failed not handled"
+    solution: |
+      1. Implement email notifications on failed payment
+      2. Show banner to user about payment issue
+      3. Consider grace period before access removal
+
+validation:
+  manual_test:
+    - "Run Prisma migration: npx prisma db push"
+    - "Start Stripe CLI: stripe listen --forward-to localhost:3000/api/webhooks/stripe"
+    - "Click subscribe button"
+    - "Complete checkout with test card 4242424242424242"
+    - "Verify redirect to success page"
+    - "Check database for subscription record"
+    - "Cancel subscription and verify status update"

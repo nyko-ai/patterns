@@ -1,0 +1,311 @@
+id: lemonsqueezy-checkout
+version: "1.0.0"
+updated_at: "2026-01-31"
+author: "nyko-team"
+status: beta
+
+name: "LemonSqueezy Checkout"
+description: "Alternative to Stripe with LemonSqueezy for one-time and subscription payments"
+
+category: payments
+tags:
+  - lemonsqueezy
+  - checkout
+  - payments
+  - subscriptions
+  - alternative
+
+difficulty: intermediate
+time_estimate: "25-35 min"
+
+stack:
+  required:
+    - name: "next"
+      version: "^15.1.0"
+      reason: "App Router with server components"
+    - name: "@lemonsqueezy/lemonsqueezy.js"
+      version: "^4.0.0"
+      reason: "LemonSqueezy SDK"
+
+requires: []
+
+enables: []
+
+env_vars:
+  required:
+    - key: LEMONSQUEEZY_API_KEY
+      description: "LemonSqueezy API key"
+      format: "eyJ..."
+      where_to_find: "LemonSqueezy Dashboard > Settings > API"
+    - key: LEMONSQUEEZY_STORE_ID
+      description: "Your store ID"
+      format: "12345"
+      where_to_find: "LemonSqueezy Dashboard > Settings > Stores"
+    - key: LEMONSQUEEZY_WEBHOOK_SECRET
+      description: "Webhook signing secret"
+      format: "whsec_..."
+      where_to_find: "LemonSqueezy Dashboard > Settings > Webhooks"
+
+external_setup:
+  - service: "LemonSqueezy"
+    url: "https://app.lemonsqueezy.com"
+    steps:
+      - "Create account at lemonsqueezy.com"
+      - "Go to Settings > API and create API key"
+      - "Create a Product with variants (pricing)"
+      - "Copy Variant ID for checkout"
+      - "Go to Settings > Webhooks"
+      - "Add endpoint: https://yourdomain.com/api/webhooks/lemonsqueezy"
+      - "Select events: order_created, subscription_created, subscription_updated"
+
+files:
+  - path: "lib/lemonsqueezy.ts"
+    action: create
+    description: "LemonSqueezy client configuration"
+    priority: 1
+
+  - path: "app/api/checkout/lemonsqueezy/route.ts"
+    action: create
+    description: "Create checkout session"
+    priority: 2
+
+  - path: "app/api/webhooks/lemonsqueezy/route.ts"
+    action: create
+    description: "Webhook handler"
+    priority: 3
+
+  - path: "components/payments/lemonsqueezy-button.tsx"
+    action: create
+    description: "Checkout button component"
+    priority: 4
+
+code:
+  lib/lemonsqueezy.ts: |
+    import { lemonSqueezySetup, createCheckout, getSubscription } from "@lemonsqueezy/lemonsqueezy.js";
+
+    lemonSqueezySetup({
+      apiKey: process.env.LEMONSQUEEZY_API_KEY!,
+      onError: (error) => console.error("LemonSqueezy error:", error),
+    });
+
+    export { createCheckout, getSubscription };
+
+    export const STORE_ID = process.env.LEMONSQUEEZY_STORE_ID!;
+
+    export const VARIANTS = {
+      MONTHLY: process.env.LEMONSQUEEZY_MONTHLY_VARIANT_ID!,
+      YEARLY: process.env.LEMONSQUEEZY_YEARLY_VARIANT_ID!,
+    };
+
+    export async function createCheckoutSession(params: {
+      variantId: string;
+      email: string;
+      userId: string;
+      successUrl: string;
+      cancelUrl?: string;
+    }) {
+      const checkout = await createCheckout(STORE_ID, params.variantId, {
+        checkoutData: {
+          email: params.email,
+          custom: {
+            user_id: params.userId,
+          },
+        },
+        productOptions: {
+          redirectUrl: params.successUrl,
+        },
+      });
+
+      return checkout.data?.data.attributes.url;
+    }
+
+  app/api/checkout/lemonsqueezy/route.ts: |
+    import { auth } from "@/auth";
+    import { createCheckoutSession, VARIANTS } from "@/lib/lemonsqueezy";
+    import { NextResponse } from "next/server";
+
+    export async function POST(request: Request) {
+      try {
+        const session = await auth();
+        if (!session?.user?.id || !session.user.email) {
+          return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+        }
+
+        const { variantId, plan } = await request.json();
+        const variant = variantId || (plan === "yearly" ? VARIANTS.YEARLY : VARIANTS.MONTHLY);
+
+        const checkoutUrl = await createCheckoutSession({
+          variantId: variant,
+          email: session.user.email,
+          userId: session.user.id,
+          successUrl: process.env.NEXT_PUBLIC_APP_URL + "/dashboard?success=true",
+        });
+
+        if (!checkoutUrl) {
+          throw new Error("Failed to create checkout");
+        }
+
+        return NextResponse.json({ url: checkoutUrl });
+      } catch (error: any) {
+        console.error("LemonSqueezy checkout error:", error);
+        return NextResponse.json({ error: error.message }, { status: 500 });
+      }
+    }
+
+  app/api/webhooks/lemonsqueezy/route.ts: |
+    import { headers } from "next/headers";
+    import { NextResponse } from "next/server";
+    import crypto from "crypto";
+    import { prisma } from "@/lib/prisma";
+
+    export async function POST(request: Request) {
+      const body = await request.text();
+      const headersList = await headers();
+      const signature = headersList.get("x-signature");
+
+      if (!signature) {
+        return NextResponse.json({ error: "Missing signature" }, { status: 400 });
+      }
+
+      // Verify webhook signature
+      const secret = process.env.LEMONSQUEEZY_WEBHOOK_SECRET!;
+      const hmac = crypto.createHmac("sha256", secret);
+      const digest = hmac.update(body).digest("hex");
+
+      if (signature !== digest) {
+        return NextResponse.json({ error: "Invalid signature" }, { status: 400 });
+      }
+
+      const event = JSON.parse(body);
+      const eventName = event.meta.event_name;
+      const data = event.data;
+
+      try {
+        switch (eventName) {
+          case "order_created": {
+            const userId = data.attributes.custom_data?.user_id;
+            const customerId = data.attributes.customer_id;
+            
+            if (userId) {
+              await prisma.subscription.upsert({
+                where: { userId },
+                create: {
+                  userId,
+                  lemonCustomerId: String(customerId),
+                  status: "ACTIVE",
+                },
+                update: {
+                  lemonCustomerId: String(customerId),
+                  status: "ACTIVE",
+                },
+              });
+            }
+            break;
+          }
+
+          case "subscription_created":
+          case "subscription_updated": {
+            const customerId = data.attributes.customer_id;
+            const status = data.attributes.status;
+
+            await prisma.subscription.updateMany({
+              where: { lemonCustomerId: String(customerId) },
+              data: {
+                lemonSubscriptionId: String(data.id),
+                status: status === "active" ? "ACTIVE" : "CANCELED",
+                lemonCurrentPeriodEnd: new Date(data.attributes.renews_at),
+              },
+            });
+            break;
+          }
+
+          case "subscription_cancelled": {
+            const customerId = data.attributes.customer_id;
+            await prisma.subscription.updateMany({
+              where: { lemonCustomerId: String(customerId) },
+              data: { status: "CANCELED" },
+            });
+            break;
+          }
+        }
+
+        return NextResponse.json({ received: true });
+      } catch (error) {
+        console.error("Webhook error:", error);
+        return NextResponse.json({ error: "Webhook failed" }, { status: 500 });
+      }
+    }
+
+  components/payments/lemonsqueezy-button.tsx: |
+    "use client";
+    import { useState } from "react";
+
+    interface LemonSqueezyButtonProps {
+      variantId?: string;
+      plan?: "monthly" | "yearly";
+      children: React.ReactNode;
+      className?: string;
+    }
+
+    export function LemonSqueezyButton({
+      variantId,
+      plan = "monthly",
+      children,
+      className,
+    }: LemonSqueezyButtonProps) {
+      const [loading, setLoading] = useState(false);
+
+      const handleCheckout = async () => {
+        setLoading(true);
+        try {
+          const response = await fetch("/api/checkout/lemonsqueezy", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ variantId, plan }),
+          });
+
+          const data = await response.json();
+          if (data.url) {
+            window.location.href = data.url;
+          } else {
+            throw new Error(data.error || "Checkout failed");
+          }
+        } catch (error) {
+          console.error("Checkout error:", error);
+          alert("Something went wrong. Please try again.");
+        } finally {
+          setLoading(false);
+        }
+      };
+
+      return (
+        <button onClick={handleCheckout} disabled={loading} className={className}>
+          {loading ? "Loading..." : children}
+        </button>
+      );
+    }
+
+edge_cases:
+  - id: webhook-signature-invalid
+    symptom: "Webhooks return 400 Invalid signature"
+    cause: "Wrong webhook secret or body modified"
+    solution: "Verify LEMONSQUEEZY_WEBHOOK_SECRET matches dashboard, use raw body for signature"
+
+  - id: customer-not-linked
+    symptom: "Payment succeeded but user not updated"
+    cause: "user_id not passed in custom_data"
+    solution: "Ensure userId is passed in checkoutData.custom.user_id"
+
+  - id: variant-not-found
+    symptom: "Error creating checkout - variant not found"
+    cause: "Wrong variant ID or variant archived"
+    solution: "Check variant ID in LemonSqueezy dashboard, ensure variant is active"
+
+validation:
+  manual_test:
+    - "Configure environment variables"
+    - "Click checkout button"
+    - "Complete payment with test card"
+    - "Verify webhook received"
+    - "Check database for subscription record"
+    - "Verify access granted to user"

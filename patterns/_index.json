@@ -1,6 +1,6 @@
 {
-  "version": "1.0.0",
-  "updated_at": "2026-01-30",
+  "version": "1.1.0",
+  "updated_at": "2026-01-31",
   "patterns": [
     {
       "id": "supabase-client-nextjs",
@@ -57,6 +57,60 @@
       "status": "beta"
     },
     {
+      "id": "supabase-email-password",
+      "category": "auth",
+      "name": "Supabase Email/Password Auth",
+      "description": "Email and password authentication with Supabase including email verification",
+      "tags": ["supabase", "email", "password", "verification"],
+      "difficulty": "intermediate",
+      "status": "beta"
+    },
+    {
+      "id": "nextauth-google",
+      "category": "auth",
+      "name": "NextAuth.js Google OAuth",
+      "description": "Google OAuth authentication with NextAuth.js v5 for Next.js App Router",
+      "tags": ["nextauth", "google", "oauth", "nextjs"],
+      "difficulty": "intermediate",
+      "status": "beta"
+    },
+    {
+      "id": "nextauth-credentials",
+      "category": "auth",
+      "name": "NextAuth.js Credentials",
+      "description": "Email/password authentication with NextAuth.js and Prisma",
+      "tags": ["nextauth", "credentials", "prisma", "password"],
+      "difficulty": "intermediate",
+      "status": "beta"
+    },
+    {
+      "id": "lucia-session",
+      "category": "auth",
+      "name": "Lucia Auth Session Management",
+      "description": "Session-based authentication with Lucia v3 and Drizzle ORM",
+      "tags": ["lucia", "session", "drizzle", "authentication"],
+      "difficulty": "advanced",
+      "status": "beta"
+    },
+    {
+      "id": "middleware-auth-check",
+      "category": "auth",
+      "name": "Next.js Auth Middleware",
+      "description": "Flexible middleware for protecting routes with authentication checks",
+      "tags": ["middleware", "nextjs", "protected-routes", "authorization"],
+      "difficulty": "beginner",
+      "status": "beta"
+    },
+    {
+      "id": "rbac-supabase",
+      "category": "auth",
+      "name": "Role-Based Access Control with Supabase",
+      "description": "Implement RBAC with custom claims, RLS policies, and React components",
+      "tags": ["supabase", "rbac", "roles", "permissions", "rls"],
+      "difficulty": "advanced",
+      "status": "beta"
+    },
+    {
       "id": "stripe-checkout-session",
       "category": "payments",
       "name": "Stripe Checkout Session",
@@ -81,6 +135,42 @@
       "description": "Redirect users to Stripe Customer Portal for subscription management",
       "tags": ["stripe", "portal", "subscriptions", "billing"],
       "difficulty": "beginner",
+      "status": "beta"
+    },
+    {
+      "id": "stripe-subscription-lifecycle",
+      "category": "payments",
+      "name": "Stripe Subscription Lifecycle",
+      "description": "Complete subscription management with database sync via webhooks",
+      "tags": ["stripe", "subscriptions", "webhooks", "database", "lifecycle"],
+      "difficulty": "advanced",
+      "status": "beta"
+    },
+    {
+      "id": "stripe-usage-billing",
+      "category": "payments",
+      "name": "Stripe Usage-Based Billing",
+      "description": "Metered billing with usage records for API calls, tokens, or resources",
+      "tags": ["stripe", "usage-billing", "metered", "api"],
+      "difficulty": "advanced",
+      "status": "beta"
+    },
+    {
+      "id": "stripe-trial-period",
+      "category": "payments",
+      "name": "Stripe Trial Periods",
+      "description": "Implement free trials with Stripe subscriptions including trial-to-paid conversion",
+      "tags": ["stripe", "trial", "free-trial", "subscriptions"],
+      "difficulty": "intermediate",
+      "status": "beta"
+    },
+    {
+      "id": "lemonsqueezy-checkout",
+      "category": "payments",
+      "name": "LemonSqueezy Checkout",
+      "description": "Alternative to Stripe with LemonSqueezy for one-time and subscription payments",
+      "tags": ["lemonsqueezy", "checkout", "payments", "alternative"],
+      "difficulty": "intermediate",
       "status": "beta"
     },
     {

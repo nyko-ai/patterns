@@ -1,0 +1,207 @@
+id: stripe-trial-period
+version: "1.0.0"
+updated_at: "2026-01-31"
+author: "nyko-team"
+status: beta
+
+name: "Stripe Trial Periods"
+description: "Implement free trials with Stripe subscriptions including trial-to-paid conversion"
+
+category: payments
+tags:
+  - stripe
+  - trial
+  - free-trial
+  - subscriptions
+  - conversion
+
+difficulty: intermediate
+time_estimate: "25-35 min"
+
+stack:
+  required:
+    - name: "next"
+      version: "^15.1.0"
+      reason: "App Router with server components"
+    - name: "stripe"
+      version: "^17.4.0"
+      reason: "Stripe SDK"
+
+requires:
+  - stripe-subscription-lifecycle
+
+enables: []
+
+env_vars:
+  required:
+    - key: STRIPE_SECRET_KEY
+      description: "Stripe secret API key"
+      format: "sk_test_xxx or sk_live_xxx"
+      where_to_find: "Stripe Dashboard > Developers > API keys"
+  optional:
+    - key: TRIAL_DAYS
+      description: "Number of trial days"
+      default: "14"
+
+external_setup:
+  - service: "Stripe Dashboard"
+    url: "https://dashboard.stripe.com"
+    steps:
+      - "Go to Products > Your subscription product"
+      - "Click on pricing"
+      - "Under Free trial, set trial period OR leave empty to control via API"
+      - "Note: API trial_period_days overrides product setting"
+
+files:
+  - path: "lib/trial.ts"
+    action: create
+    description: "Trial management utilities"
+    priority: 1
+
+  - path: "app/api/trial/start/route.ts"
+    action: create
+    description: "Start trial endpoint"
+    priority: 2
+
+  - path: "components/trial/trial-banner.tsx"
+    action: create
+    description: "Trial status banner"
+    priority: 3
+
+code:
+  lib/trial.ts: |
+    import { stripe } from "@/lib/stripe";
+    import { prisma } from "@/lib/prisma";
+    import { getOrCreateStripeCustomer } from "@/lib/subscription";
+
+    const TRIAL_DAYS = parseInt(process.env.TRIAL_DAYS || "14");
+
+    export interface TrialStatus {
+      isTrialing: boolean;
+      trialEndsAt: Date | null;
+      daysRemaining: number;
+      hasPaymentMethod: boolean;
+    }
+
+    export async function startTrial(userId: string, email: string, priceId: string) {
+      const customerId = await getOrCreateStripeCustomer(userId, email);
+
+      const subscription = await stripe.subscriptions.create({
+        customer: customerId,
+        items: [{ price: priceId }],
+        trial_period_days: TRIAL_DAYS,
+        payment_behavior: "default_incomplete",
+        trial_settings: { end_behavior: { missing_payment_method: "pause" } },
+      });
+
+      await prisma.subscription.update({
+        where: { stripeCustomerId: customerId },
+        data: {
+          stripeSubscriptionId: subscription.id,
+          stripePriceId: priceId,
+          status: "TRIALING",
+          stripeCurrentPeriodEnd: new Date(subscription.trial_end! * 1000),
+        },
+      });
+
+      return subscription;
+    }
+
+    export async function getTrialStatus(userId: string): Promise<TrialStatus> {
+      const subscription = await prisma.subscription.findUnique({ where: { userId } });
+
+      if (!subscription?.stripeSubscriptionId) {
+        return { isTrialing: false, trialEndsAt: null, daysRemaining: 0, hasPaymentMethod: false };
+      }
+
+      const stripeSub = await stripe.subscriptions.retrieve(subscription.stripeSubscriptionId);
+      const isTrialing = stripeSub.status === "trialing";
+      const trialEndsAt = stripeSub.trial_end ? new Date(stripeSub.trial_end * 1000) : null;
+      const daysRemaining = trialEndsAt
+        ? Math.max(0, Math.ceil((trialEndsAt.getTime() - Date.now()) / 86400000))
+        : 0;
+
+      const paymentMethods = await stripe.paymentMethods.list({
+        customer: subscription.stripeCustomerId, type: "card"
+      });
+
+      return { isTrialing, trialEndsAt, daysRemaining, hasPaymentMethod: paymentMethods.data.length > 0 };
+    }
+
+  app/api/trial/start/route.ts: |
+    import { auth } from "@/auth";
+    import { startTrial } from "@/lib/trial";
+    import { PRICES } from "@/lib/stripe";
+    import { NextResponse } from "next/server";
+
+    export async function POST(request: Request) {
+      const session = await auth();
+      if (!session?.user?.id || !session.user.email) {
+        return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+      }
+
+      try {
+        const { priceId } = await request.json();
+        const subscription = await startTrial(
+          session.user.id,
+          session.user.email,
+          priceId || PRICES.MONTHLY
+        );
+        return NextResponse.json({
+          success: true,
+          trialEndsAt: subscription.trial_end ? new Date(subscription.trial_end * 1000) : null,
+        });
+      } catch (error: any) {
+        return NextResponse.json({ error: error.message }, { status: 500 });
+      }
+    }
+
+  components/trial/trial-banner.tsx: |
+    "use client";
+    import { useEffect, useState } from "react";
+    import type { TrialStatus } from "@/lib/trial";
+
+    export function TrialBanner() {
+      const [status, setStatus] = useState<TrialStatus | null>(null);
+
+      useEffect(() => {
+        fetch("/api/trial/status")
+          .then(res => res.json())
+          .then(setStatus)
+          .catch(console.error);
+      }, []);
+
+      if (!status?.isTrialing) return null;
+
+      const urgent = status.daysRemaining <= 3;
+      return (
+        <div className={urgent ? "bg-amber-100 text-amber-800" : "bg-blue-100 text-blue-800"}>
+          <span>{status.daysRemaining} days left in trial</span>
+          {!status.hasPaymentMethod && <a href="/billing">Add payment</a>}
+        </div>
+      );
+    }
+
+edge_cases:
+  - id: trial-expired-no-card
+    symptom: "Trial ended but user has no payment method"
+    cause: "trial_settings.end_behavior was set to pause/cancel"
+    solution: "Use pause to keep subscription, send reminder emails before expiry"
+
+  - id: duplicate-trials
+    symptom: "User can start multiple trials"
+    cause: "No check for existing subscription"
+    solution: "Check if user has subscription before starting trial"
+
+  - id: trial-abuse
+    symptom: "Users creating new accounts for trials"
+    cause: "Trial not limited per email"
+    solution: "Track trials by email in separate table"
+
+validation:
+  manual_test:
+    - "Start trial without card"
+    - "Verify subscription status is trialing"
+    - "Check trial banner shows correct days"
+    - "Add payment method"
+    - "Verify conversion after trial ends"

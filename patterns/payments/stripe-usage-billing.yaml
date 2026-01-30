@@ -1,0 +1,444 @@
+id: stripe-usage-billing
+version: "1.0.0"
+updated_at: "2026-01-31"
+author: "nyko-team"
+status: beta
+
+name: "Stripe Usage-Based Billing"
+description: "Metered billing with usage records for API calls, tokens, or resources"
+
+category: payments
+tags:
+  - stripe
+  - usage-billing
+  - metered
+  - api
+  - tokens
+
+difficulty: advanced
+time_estimate: "40-50 min"
+
+stack:
+  required:
+    - name: "next"
+      version: "^15.1.0"
+      reason: "App Router with server components"
+    - name: "stripe"
+      version: "^17.4.0"
+      reason: "Stripe SDK"
+    - name: "@prisma/client"
+      version: "^7.3.0"
+      reason: "Usage tracking storage"
+
+requires:
+  - stripe-subscription-lifecycle
+
+enables: []
+
+env_vars:
+  required:
+    - key: STRIPE_SECRET_KEY
+      description: "Stripe secret API key"
+      format: "sk_test_xxx or sk_live_xxx"
+      where_to_find: "Stripe Dashboard > Developers > API keys"
+    - key: STRIPE_METERED_PRICE_ID
+      description: "Metered price ID"
+      format: "price_xxx"
+      where_to_find: "Stripe Dashboard > Products > Your metered price"
+
+external_setup:
+  - service: "Stripe Dashboard"
+    url: "https://dashboard.stripe.com"
+    steps:
+      - "Go to Products > Create product"
+      - "Add pricing > Choose 'Usage-based'"
+      - "Set pricing model: Graduated, Package, or Per unit"
+      - "Set usage aggregation: Sum, Max, or Last during period"
+      - "Copy the Price ID"
+
+files:
+  - path: "lib/usage.ts"
+    action: create
+    description: "Usage tracking and reporting utilities"
+    priority: 1
+
+  - path: "prisma/schema.prisma"
+    action: modify
+    description: "Add usage tracking model"
+    priority: 2
+
+  - path: "app/api/usage/report/route.ts"
+    action: create
+    description: "Report usage to Stripe"
+    priority: 3
+
+  - path: "lib/middleware/usage-tracker.ts"
+    action: create
+    description: "Middleware to track API usage"
+    priority: 4
+
+  - path: "components/usage/usage-dashboard.tsx"
+    action: create
+    description: "Usage display component"
+    priority: 5
+
+code:
+  lib/usage.ts: |
+    import { stripe } from "@/lib/stripe";
+    import { prisma } from "@/lib/prisma";
+
+    interface UsageRecord {
+      userId: string;
+      quantity: number;
+      action: string;
+      metadata?: Record<string, string>;
+    }
+
+    // Report usage to Stripe
+    export async function reportUsage(record: UsageRecord) {
+      const subscription = await prisma.subscription.findUnique({
+        where: { userId: record.userId },
+      });
+
+      if (!subscription?.stripeSubscriptionId) {
+        throw new Error("No active subscription found");
+      }
+
+      // Get the subscription item for metered billing
+      const stripeSubscription = await stripe.subscriptions.retrieve(
+        subscription.stripeSubscriptionId
+      );
+
+      const meteredItem = stripeSubscription.items.data.find(
+        (item) => item.price.recurring?.usage_type === "metered"
+      );
+
+      if (!meteredItem) {
+        throw new Error("No metered subscription item found");
+      }
+
+      // Report usage to Stripe
+      const usageRecord = await stripe.subscriptionItems.createUsageRecord(
+        meteredItem.id,
+        {
+          quantity: record.quantity,
+          timestamp: Math.floor(Date.now() / 1000),
+          action: "increment",
+        }
+      );
+
+      // Store locally for analytics
+      await prisma.usageRecord.create({
+        data: {
+          userId: record.userId,
+          subscriptionId: subscription.id,
+          quantity: record.quantity,
+          action: record.action,
+          stripeUsageRecordId: usageRecord.id,
+          metadata: record.metadata || {},
+        },
+      });
+
+      return usageRecord;
+    }
+
+    // Get usage for current billing period
+    export async function getCurrentPeriodUsage(userId: string) {
+      const subscription = await prisma.subscription.findUnique({
+        where: { userId },
+      });
+
+      if (!subscription?.stripeSubscriptionId) {
+        return { total: 0, records: [] };
+      }
+
+      const stripeSubscription = await stripe.subscriptions.retrieve(
+        subscription.stripeSubscriptionId
+      );
+
+      const periodStart = new Date(stripeSubscription.current_period_start * 1000);
+
+      const records = await prisma.usageRecord.findMany({
+        where: {
+          userId,
+          createdAt: { gte: periodStart },
+        },
+        orderBy: { createdAt: "desc" },
+      });
+
+      const total = records.reduce((sum, record) => sum + record.quantity, 0);
+
+      return { total, records, periodStart };
+    }
+
+    // Get usage summary from Stripe
+    export async function getStripeUsageSummary(subscriptionItemId: string) {
+      const summary = await stripe.subscriptionItems.listUsageRecordSummaries(
+        subscriptionItemId,
+        { limit: 1 }
+      );
+
+      return summary.data[0];
+    }
+
+    // Batch report usage (for efficiency)
+    export async function batchReportUsage(records: UsageRecord[]) {
+      const results = await Promise.allSettled(
+        records.map((record) => reportUsage(record))
+      );
+
+      const successful = results.filter((r) => r.status === "fulfilled").length;
+      const failed = results.filter((r) => r.status === "rejected").length;
+
+      return { successful, failed, total: records.length };
+    }
+
+  prisma/schema.prisma: |
+    // Add to existing schema.prisma
+
+    model UsageRecord {
+      id                  String   @id @default(cuid())
+      userId              String
+      subscriptionId      String
+      quantity            Int
+      action              String
+      stripeUsageRecordId String?
+      metadata            Json     @default("{}")
+      createdAt           DateTime @default(now())
+
+      subscription Subscription @relation(fields: [subscriptionId], references: [id])
+
+      @@index([userId, createdAt])
+    }
+
+    // Update Subscription model to include relation
+    // model Subscription {
+    //   ...existing fields...
+    //   usageRecords UsageRecord[]
+    // }
+
+  app/api/usage/report/route.ts: |
+    import { auth } from "@/auth";
+    import { reportUsage } from "@/lib/usage";
+    import { NextResponse } from "next/server";
+
+    export async function POST(request: Request) {
+      try {
+        const session = await auth();
+        if (!session?.user?.id) {
+          return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+        }
+
+        const { quantity, action, metadata } = await request.json();
+
+        if (!quantity || quantity < 1) {
+          return NextResponse.json(
+            { error: "Invalid quantity" },
+            { status: 400 }
+          );
+        }
+
+        const record = await reportUsage({
+          userId: session.user.id,
+          quantity,
+          action: action || "api_call",
+          metadata,
+        });
+
+        return NextResponse.json({ success: true, record });
+      } catch (error: any) {
+        console.error("Usage report error:", error);
+        return NextResponse.json(
+          { error: error.message || "Failed to report usage" },
+          { status: 500 }
+        );
+      }
+    }
+
+  lib/middleware/usage-tracker.ts: |
+    import { NextRequest, NextResponse } from "next/server";
+    import { reportUsage } from "@/lib/usage";
+
+    // In-memory buffer for batching (use Redis in production)
+    const usageBuffer: Map<string, { quantity: number; lastFlush: number }> = new Map();
+    const FLUSH_INTERVAL = 60000; // 1 minute
+    const BATCH_THRESHOLD = 10; // Flush after 10 requests
+
+    export async function trackUsage(
+      request: NextRequest,
+      userId: string,
+      action: string = "api_call"
+    ) {
+      const key = `${userId}:${action}`;
+      const now = Date.now();
+
+      const current = usageBuffer.get(key) || { quantity: 0, lastFlush: now };
+      current.quantity += 1;
+
+      // Flush if threshold reached or interval passed
+      if (
+        current.quantity >= BATCH_THRESHOLD ||
+        now - current.lastFlush >= FLUSH_INTERVAL
+      ) {
+        try {
+          await reportUsage({
+            userId,
+            quantity: current.quantity,
+            action,
+            metadata: {
+              endpoint: request.nextUrl.pathname,
+              method: request.method,
+            },
+          });
+          usageBuffer.delete(key);
+        } catch (error) {
+          console.error("Failed to flush usage:", error);
+          // Keep in buffer for retry
+          usageBuffer.set(key, current);
+        }
+      } else {
+        usageBuffer.set(key, current);
+      }
+    }
+
+    // Flush all pending usage (call on shutdown or periodically)
+    export async function flushAllUsage() {
+      const entries = Array.from(usageBuffer.entries());
+
+      for (const [key, { quantity }] of entries) {
+        const [userId, action] = key.split(":");
+        try {
+          await reportUsage({
+            userId,
+            quantity,
+            action,
+          });
+          usageBuffer.delete(key);
+        } catch (error) {
+          console.error(`Failed to flush usage for ${key}:`, error);
+        }
+      }
+    }
+
+  components/usage/usage-dashboard.tsx: |
+    "use client";
+
+    import { useEffect, useState } from "react";
+
+    interface UsageData {
+      total: number;
+      records: Array<{
+        id: string;
+        quantity: number;
+        action: string;
+        createdAt: string;
+      }>;
+      periodStart: string;
+    }
+
+    export function UsageDashboard() {
+      const [usage, setUsage] = useState<UsageData | null>(null);
+      const [loading, setLoading] = useState(true);
+
+      useEffect(() => {
+        async function fetchUsage() {
+          try {
+            const response = await fetch("/api/usage");
+            const data = await response.json();
+            setUsage(data);
+          } catch (error) {
+            console.error("Failed to fetch usage:", error);
+          } finally {
+            setLoading(false);
+          }
+        }
+
+        fetchUsage();
+      }, []);
+
+      if (loading) {
+        return <div className="animate-pulse">Loading usage...</div>;
+      }
+
+      if (!usage) {
+        return <div>No usage data available</div>;
+      }
+
+      return (
+        <div className="space-y-6">
+          <div className="rounded-lg border p-6">
+            <h3 className="text-lg font-semibold">Current Period Usage</h3>
+            <p className="text-sm text-gray-500">
+              Since {new Date(usage.periodStart).toLocaleDateString()}
+            </p>
+            <div className="mt-4">
+              <span className="text-4xl font-bold">{usage.total.toLocaleString()}</span>
+              <span className="ml-2 text-gray-500">units</span>
+            </div>
+          </div>
+
+          <div className="rounded-lg border p-6">
+            <h3 className="text-lg font-semibold mb-4">Recent Activity</h3>
+            <div className="space-y-2">
+              {usage.records.slice(0, 10).map((record) => (
+                <div
+                  key={record.id}
+                  className="flex items-center justify-between py-2 border-b last:border-0"
+                >
+                  <div>
+                    <span className="font-medium">{record.action}</span>
+                    <span className="ml-2 text-sm text-gray-500">
+                      {new Date(record.createdAt).toLocaleString()}
+                    </span>
+                  </div>
+                  <span className="font-mono">+{record.quantity}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+edge_cases:
+  - id: usage-not-appearing
+    symptom: "Usage reported but not showing in Stripe invoice"
+    cause: "Usage reported to wrong subscription item"
+    solution: |
+      1. Verify subscription has metered price attached
+      2. Check subscription items for usage_type: "metered"
+      3. Ensure using correct subscription item ID
+      4. Check Stripe Dashboard > Subscriptions > Usage tab
+
+  - id: duplicate-usage-records
+    symptom: "Usage double-counted"
+    cause: "Retry logic creating duplicates"
+    solution: |
+      1. Use idempotency keys for Stripe API calls
+      2. Check if record exists before creating
+      3. Use database transactions
+
+  - id: high-volume-throttling
+    symptom: "Stripe rate limit errors"
+    cause: "Too many usage records per second"
+    solution: |
+      1. Implement batching (shown in middleware)
+      2. Use Redis for production buffering
+      3. Report aggregated usage instead of per-request
+
+  - id: missing-metered-item
+    symptom: "Error: No metered subscription item found"
+    cause: "Subscription doesn't include metered price"
+    solution: |
+      1. Create metered price in Stripe Dashboard
+      2. Add metered price to subscription checkout
+      3. Or add as subscription item after checkout
+
+validation:
+  manual_test:
+    - "Create subscription with metered pricing"
+    - "Call API that tracks usage"
+    - "Check local database for usage records"
+    - "Wait for Stripe to process (or force invoice)"
+    - "Check invoice includes usage charges"
+    - "Verify UsageDashboard shows correct totals"
