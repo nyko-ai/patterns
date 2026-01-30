@@ -1,0 +1,609 @@
+id: rbac-supabase
+version: "1.0.0"
+updated_at: "2026-01-31"
+author: "nyko-team"
+status: beta
+
+name: "Role-Based Access Control with Supabase"
+description: "Implement RBAC with custom claims, RLS policies, and React components for Supabase"
+
+category: auth
+tags:
+  - supabase
+  - rbac
+  - roles
+  - permissions
+  - rls
+  - authorization
+
+difficulty: advanced
+time_estimate: "30-45 min"
+
+stack:
+  required:
+    - name: "next"
+      version: "^15.1.0"
+      reason: "App Router with server components"
+    - name: "@supabase/supabase-js"
+      version: "^2.49.0"
+      reason: "Supabase client library"
+    - name: "@supabase/ssr"
+      version: "^0.5.2"
+      reason: "SSR utilities"
+
+requires:
+  - supabase-client-nextjs
+
+enables: []
+
+env_vars:
+  required:
+    - key: NEXT_PUBLIC_SUPABASE_URL
+      description: "Supabase project URL"
+      format: "https://xxx.supabase.co"
+      where_to_find: "Supabase Dashboard > Project Settings > API"
+    - key: NEXT_PUBLIC_SUPABASE_ANON_KEY
+      description: "Supabase anonymous/public key"
+      format: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+      where_to_find: "Supabase Dashboard > Project Settings > API"
+    - key: SUPABASE_SERVICE_ROLE_KEY
+      description: "Supabase service role key (server-side only)"
+      format: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+      where_to_find: "Supabase Dashboard > Project Settings > API"
+
+external_setup:
+  - service: "Supabase"
+    url: "https://supabase.com/dashboard"
+    steps:
+      - "Go to SQL Editor"
+      - "Run the user_roles table migration"
+      - "Run the set_user_role function"
+      - "Run the RLS policies"
+      - "Go to Authentication > Hooks"
+      - "Enable custom access token hook (optional for JWT claims)"
+
+files:
+  - path: "supabase/migrations/001_rbac_setup.sql"
+    action: create
+    description: "SQL migration for RBAC tables and functions"
+    priority: 1
+
+  - path: "lib/rbac/types.ts"
+    action: create
+    description: "TypeScript types for roles and permissions"
+    priority: 2
+
+  - path: "lib/rbac/permissions.ts"
+    action: create
+    description: "Permission checking utilities"
+    priority: 3
+
+  - path: "lib/rbac/server.ts"
+    action: create
+    description: "Server-side role management"
+    priority: 4
+
+  - path: "components/auth/role-gate.tsx"
+    action: create
+    description: "Client component for role-based UI"
+    priority: 5
+
+  - path: "app/api/admin/users/[userId]/role/route.ts"
+    action: create
+    description: "API route to update user roles"
+    priority: 6
+
+code:
+  supabase/migrations/001_rbac_setup.sql: |
+    -- Create enum for roles
+    CREATE TYPE user_role AS ENUM ('user', 'moderator', 'admin', 'super_admin');
+
+    -- Create user_roles table
+    CREATE TABLE IF NOT EXISTS public.user_roles (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      user_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+      role user_role NOT NULL DEFAULT 'user',
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      UNIQUE(user_id)
+    );
+
+    -- Enable RLS
+    ALTER TABLE public.user_roles ENABLE ROW LEVEL SECURITY;
+
+    -- Policy: Users can read their own role
+    CREATE POLICY "Users can read own role"
+      ON public.user_roles
+      FOR SELECT
+      USING (auth.uid() = user_id);
+
+    -- Policy: Only admins can read all roles
+    CREATE POLICY "Admins can read all roles"
+      ON public.user_roles
+      FOR SELECT
+      USING (
+        EXISTS (
+          SELECT 1 FROM public.user_roles
+          WHERE user_id = auth.uid()
+          AND role IN ('admin', 'super_admin')
+        )
+      );
+
+    -- Policy: Only super_admins can update roles
+    CREATE POLICY "Super admins can update roles"
+      ON public.user_roles
+      FOR UPDATE
+      USING (
+        EXISTS (
+          SELECT 1 FROM public.user_roles
+          WHERE user_id = auth.uid()
+          AND role = 'super_admin'
+        )
+      );
+
+    -- Function to get user role
+    CREATE OR REPLACE FUNCTION public.get_user_role(uid UUID)
+    RETURNS user_role
+    LANGUAGE plpgsql
+    SECURITY DEFINER
+    AS $$
+    DECLARE
+      user_role_value user_role;
+    BEGIN
+      SELECT role INTO user_role_value
+      FROM public.user_roles
+      WHERE user_id = uid;
+      
+      RETURN COALESCE(user_role_value, 'user');
+    END;
+    $$;
+
+    -- Function to set user role (called from server with service_role)
+    CREATE OR REPLACE FUNCTION public.set_user_role(uid UUID, new_role user_role)
+    RETURNS void
+    LANGUAGE plpgsql
+    SECURITY DEFINER
+    AS $$
+    BEGIN
+      INSERT INTO public.user_roles (user_id, role)
+      VALUES (uid, new_role)
+      ON CONFLICT (user_id)
+      DO UPDATE SET role = new_role, updated_at = NOW();
+    END;
+    $$;
+
+    -- Trigger to auto-create user role on signup
+    CREATE OR REPLACE FUNCTION public.handle_new_user()
+    RETURNS TRIGGER
+    LANGUAGE plpgsql
+    SECURITY DEFINER
+    AS $$
+    BEGIN
+      INSERT INTO public.user_roles (user_id, role)
+      VALUES (NEW.id, 'user');
+      RETURN NEW;
+    END;
+    $$;
+
+    CREATE OR REPLACE TRIGGER on_auth_user_created
+      AFTER INSERT ON auth.users
+      FOR EACH ROW
+      EXECUTE FUNCTION public.handle_new_user();
+
+    -- Example RLS policy for a protected table
+    -- CREATE POLICY "Admins can manage all posts"
+    --   ON public.posts
+    --   FOR ALL
+    --   USING (
+    --     public.get_user_role(auth.uid()) IN ('admin', 'super_admin')
+    --   );
+
+  lib/rbac/types.ts: |
+    export const ROLES = {
+      USER: "user",
+      MODERATOR: "moderator",
+      ADMIN: "admin",
+      SUPER_ADMIN: "super_admin",
+    } as const;
+
+    export type Role = (typeof ROLES)[keyof typeof ROLES];
+
+    export const PERMISSIONS = {
+      // Content permissions
+      READ_CONTENT: "read:content",
+      CREATE_CONTENT: "create:content",
+      UPDATE_CONTENT: "update:content",
+      DELETE_CONTENT: "delete:content",
+      
+      // User management
+      READ_USERS: "read:users",
+      UPDATE_USERS: "update:users",
+      DELETE_USERS: "delete:users",
+      
+      // Admin actions
+      MANAGE_ROLES: "manage:roles",
+      ACCESS_ADMIN: "access:admin",
+      VIEW_ANALYTICS: "view:analytics",
+    } as const;
+
+    export type Permission = (typeof PERMISSIONS)[keyof typeof PERMISSIONS];
+
+    // Role to permissions mapping
+    export const ROLE_PERMISSIONS: Record<Role, Permission[]> = {
+      user: [
+        PERMISSIONS.READ_CONTENT,
+        PERMISSIONS.CREATE_CONTENT,
+      ],
+      moderator: [
+        PERMISSIONS.READ_CONTENT,
+        PERMISSIONS.CREATE_CONTENT,
+        PERMISSIONS.UPDATE_CONTENT,
+        PERMISSIONS.DELETE_CONTENT,
+        PERMISSIONS.READ_USERS,
+      ],
+      admin: [
+        PERMISSIONS.READ_CONTENT,
+        PERMISSIONS.CREATE_CONTENT,
+        PERMISSIONS.UPDATE_CONTENT,
+        PERMISSIONS.DELETE_CONTENT,
+        PERMISSIONS.READ_USERS,
+        PERMISSIONS.UPDATE_USERS,
+        PERMISSIONS.ACCESS_ADMIN,
+        PERMISSIONS.VIEW_ANALYTICS,
+      ],
+      super_admin: [
+        PERMISSIONS.READ_CONTENT,
+        PERMISSIONS.CREATE_CONTENT,
+        PERMISSIONS.UPDATE_CONTENT,
+        PERMISSIONS.DELETE_CONTENT,
+        PERMISSIONS.READ_USERS,
+        PERMISSIONS.UPDATE_USERS,
+        PERMISSIONS.DELETE_USERS,
+        PERMISSIONS.MANAGE_ROLES,
+        PERMISSIONS.ACCESS_ADMIN,
+        PERMISSIONS.VIEW_ANALYTICS,
+      ],
+    };
+
+  lib/rbac/permissions.ts: |
+    import { Role, Permission, ROLE_PERMISSIONS, ROLES } from "./types";
+
+    export function hasPermission(role: Role, permission: Permission): boolean {
+      const permissions = ROLE_PERMISSIONS[role] || [];
+      return permissions.includes(permission);
+    }
+
+    export function hasRole(userRole: Role, requiredRole: Role): boolean {
+      const roleHierarchy: Role[] = [
+        ROLES.USER,
+        ROLES.MODERATOR,
+        ROLES.ADMIN,
+        ROLES.SUPER_ADMIN,
+      ];
+
+      const userRoleIndex = roleHierarchy.indexOf(userRole);
+      const requiredRoleIndex = roleHierarchy.indexOf(requiredRole);
+
+      return userRoleIndex >= requiredRoleIndex;
+    }
+
+    export function hasAnyRole(userRole: Role, roles: Role[]): boolean {
+      return roles.some((role) => hasRole(userRole, role));
+    }
+
+    export function getPermissions(role: Role): Permission[] {
+      return ROLE_PERMISSIONS[role] || [];
+    }
+
+  lib/rbac/server.ts: |
+    import { createClient } from "@/lib/supabase/server";
+    import { createClient as createServiceClient } from "@supabase/supabase-js";
+    import { Role, ROLES } from "./types";
+
+    // Get current user's role
+    export async function getCurrentUserRole(): Promise<Role> {
+      const supabase = await createClient();
+      const { data: { user } } = await supabase.auth.getUser();
+
+      if (!user) return ROLES.USER;
+
+      const { data } = await supabase
+        .from("user_roles")
+        .select("role")
+        .eq("user_id", user.id)
+        .single();
+
+      return (data?.role as Role) || ROLES.USER;
+    }
+
+    // Get any user's role (admin only)
+    export async function getUserRole(userId: string): Promise<Role | null> {
+      const supabase = await createClient();
+
+      const { data } = await supabase
+        .from("user_roles")
+        .select("role")
+        .eq("user_id", userId)
+        .single();
+
+      return data?.role as Role | null;
+    }
+
+    // Update user role (requires service role key)
+    export async function setUserRole(
+      userId: string,
+      role: Role
+    ): Promise<{ success: boolean; error?: string }> {
+      // Use service role client for admin operations
+      const supabase = createServiceClient(
+        process.env.NEXT_PUBLIC_SUPABASE_URL!,
+        process.env.SUPABASE_SERVICE_ROLE_KEY!
+      );
+
+      const { error } = await supabase.rpc("set_user_role", {
+        uid: userId,
+        new_role: role,
+      });
+
+      if (error) {
+        return { success: false, error: error.message };
+      }
+
+      return { success: true };
+    }
+
+    // Check if current user has required role
+    export async function requireRole(requiredRole: Role): Promise<void> {
+      const userRole = await getCurrentUserRole();
+      
+      const roleHierarchy: Role[] = [
+        ROLES.USER,
+        ROLES.MODERATOR,
+        ROLES.ADMIN,
+        ROLES.SUPER_ADMIN,
+      ];
+
+      const userRoleIndex = roleHierarchy.indexOf(userRole);
+      const requiredRoleIndex = roleHierarchy.indexOf(requiredRole);
+
+      if (userRoleIndex < requiredRoleIndex) {
+        throw new Error("Insufficient permissions");
+      }
+    }
+
+  components/auth/role-gate.tsx: |
+    "use client";
+
+    import { createClient } from "@/lib/supabase/client";
+    import { useEffect, useState } from "react";
+    import { Role, Permission, ROLES } from "@/lib/rbac/types";
+    import { hasPermission, hasRole } from "@/lib/rbac/permissions";
+
+    interface RoleGateProps {
+      children: React.ReactNode;
+      allowedRoles?: Role[];
+      requiredPermission?: Permission;
+      fallback?: React.ReactNode;
+    }
+
+    export function RoleGate({
+      children,
+      allowedRoles,
+      requiredPermission,
+      fallback = null,
+    }: RoleGateProps) {
+      const [userRole, setUserRole] = useState<Role | null>(null);
+      const [loading, setLoading] = useState(true);
+
+      useEffect(() => {
+        async function fetchRole() {
+          const supabase = createClient();
+          const { data: { user } } = await supabase.auth.getUser();
+
+          if (!user) {
+            setUserRole(null);
+            setLoading(false);
+            return;
+          }
+
+          const { data } = await supabase
+            .from("user_roles")
+            .select("role")
+            .eq("user_id", user.id)
+            .single();
+
+          setUserRole((data?.role as Role) || ROLES.USER);
+          setLoading(false);
+        }
+
+        fetchRole();
+      }, []);
+
+      if (loading) {
+        return null; // Or a loading spinner
+      }
+
+      if (!userRole) {
+        return <>{fallback}</>;
+      }
+
+      // Check roles
+      if (allowedRoles && allowedRoles.length > 0) {
+        const hasRequiredRole = allowedRoles.some((role) =>
+          hasRole(userRole, role)
+        );
+        if (!hasRequiredRole) {
+          return <>{fallback}</>;
+        }
+      }
+
+      // Check permission
+      if (requiredPermission) {
+        if (!hasPermission(userRole, requiredPermission)) {
+          return <>{fallback}</>;
+        }
+      }
+
+      return <>{children}</>;
+    }
+
+    // Hook for role checking
+    export function useRole() {
+      const [role, setRole] = useState<Role | null>(null);
+      const [loading, setLoading] = useState(true);
+
+      useEffect(() => {
+        async function fetchRole() {
+          const supabase = createClient();
+          const { data: { user } } = await supabase.auth.getUser();
+
+          if (!user) {
+            setRole(null);
+            setLoading(false);
+            return;
+          }
+
+          const { data } = await supabase
+            .from("user_roles")
+            .select("role")
+            .eq("user_id", user.id)
+            .single();
+
+          setRole((data?.role as Role) || ROLES.USER);
+          setLoading(false);
+        }
+
+        fetchRole();
+      }, []);
+
+      return {
+        role,
+        loading,
+        isAdmin: role ? hasRole(role, ROLES.ADMIN) : false,
+        isModerator: role ? hasRole(role, ROLES.MODERATOR) : false,
+        hasPermission: (permission: Permission) =>
+          role ? hasPermission(role, permission) : false,
+      };
+    }
+
+  app/api/admin/users/[userId]/role/route.ts: |
+    import { createClient } from "@/lib/supabase/server";
+    import { setUserRole, getCurrentUserRole } from "@/lib/rbac/server";
+    import { Role, ROLES } from "@/lib/rbac/types";
+    import { hasRole } from "@/lib/rbac/permissions";
+    import { NextResponse } from "next/server";
+
+    export async function PATCH(
+      request: Request,
+      { params }: { params: Promise<{ userId: string }> }
+    ) {
+      try {
+        const { userId } = await params;
+        const { role } = await request.json();
+
+        // Validate role
+        const validRoles = Object.values(ROLES);
+        if (!validRoles.includes(role)) {
+          return NextResponse.json(
+            { error: "Invalid role" },
+            { status: 400 }
+          );
+        }
+
+        // Check if current user is super_admin
+        const currentUserRole = await getCurrentUserRole();
+        if (!hasRole(currentUserRole, ROLES.SUPER_ADMIN)) {
+          return NextResponse.json(
+            { error: "Only super admins can change roles" },
+            { status: 403 }
+          );
+        }
+
+        // Prevent removing last super_admin
+        if (role !== ROLES.SUPER_ADMIN) {
+          const supabase = await createClient();
+          const { count } = await supabase
+            .from("user_roles")
+            .select("*", { count: "exact", head: true })
+            .eq("role", "super_admin");
+
+          if (count === 1) {
+            const { data: targetUser } = await supabase
+              .from("user_roles")
+              .select("role")
+              .eq("user_id", userId)
+              .single();
+
+            if (targetUser?.role === "super_admin") {
+              return NextResponse.json(
+                { error: "Cannot remove the last super admin" },
+                { status: 400 }
+              );
+            }
+          }
+        }
+
+        const result = await setUserRole(userId, role as Role);
+
+        if (!result.success) {
+          return NextResponse.json(
+            { error: result.error },
+            { status: 500 }
+          );
+        }
+
+        return NextResponse.json({ success: true });
+      } catch (error) {
+        console.error("Error updating role:", error);
+        return NextResponse.json(
+          { error: "Internal server error" },
+          { status: 500 }
+        );
+      }
+    }
+
+edge_cases:
+  - id: missing-role-entry
+    symptom: "New users have no role in user_roles table"
+    cause: "Trigger not created or not firing"
+    solution: |
+      1. Check trigger exists: SELECT * FROM pg_trigger WHERE tgname = 'on_auth_user_created'
+      2. Manually create missing entries:
+         INSERT INTO user_roles (user_id, role)
+         SELECT id, 'user' FROM auth.users
+         WHERE id NOT IN (SELECT user_id FROM user_roles)
+
+  - id: rls-blocking-admin
+    symptom: "Admin cannot see other users' roles"
+    cause: "RLS policy not checking admin role correctly"
+    solution: |
+      Verify the admin check policy:
+      1. Test with service role key first
+      2. Check get_user_role function returns correct value
+      3. Ensure admin's role is set in user_roles table
+
+  - id: jwt-claims-outdated
+    symptom: "Role change not reflected immediately"
+    cause: "JWT token still has old role until refresh"
+    solution: |
+      1. Force token refresh after role change
+      2. Or use database check instead of JWT claims
+      3. Consider shorter token expiry for admin features
+
+  - id: last-admin-removal
+    symptom: "Accidentally removed all super_admins"
+    cause: "No protection against removing last super_admin"
+    solution: |
+      The API includes protection. For recovery:
+      1. Use Supabase Dashboard > SQL Editor
+      2. Run: UPDATE user_roles SET role = 'super_admin' WHERE user_id = 'your-uuid'
+
+validation:
+  manual_test:
+    - "Run migration in Supabase SQL Editor"
+    - "Sign up a new user - verify role is 'user'"
+    - "Using SQL, set a user as super_admin"
+    - "Log in as super_admin"
+    - "Access admin UI protected by RoleGate"
+    - "Try changing another user's role via API"
+    - "Verify RLS policies block unauthorized access"

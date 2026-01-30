@@ -1,0 +1,439 @@
+id: lucia-session
+version: "1.0.0"
+updated_at: "2026-01-31"
+author: "nyko-team"
+status: beta
+
+name: "Lucia Auth Session Management"
+description: "Session-based authentication with Lucia v3 and Drizzle ORM for Next.js"
+
+category: auth
+tags:
+  - lucia
+  - session
+  - drizzle
+  - nextjs
+  - authentication
+
+difficulty: advanced
+time_estimate: "30-45 min"
+
+stack:
+  required:
+    - name: "next"
+      version: "^15.1.0"
+      reason: "App Router with server components"
+    - name: "lucia"
+      version: "^3.2.2"
+      reason: "Session management library"
+    - name: "@lucia-auth/adapter-drizzle"
+      version: "^1.1.0"
+      reason: "Drizzle adapter for Lucia"
+    - name: "drizzle-orm"
+      version: "^0.38.0"
+      reason: "Database ORM"
+    - name: "@node-rs/argon2"
+      version: "^2.0.0"
+      reason: "Password hashing"
+  optional:
+    - name: "arctic"
+      version: "^3.0.0"
+      reason: "OAuth providers helper"
+
+requires: []
+
+enables:
+  - middleware-auth-check
+
+env_vars:
+  required:
+    - key: DATABASE_URL
+      description: "PostgreSQL connection string"
+      format: "postgresql://user:password@host:5432/database"
+      where_to_find: "Your database provider dashboard"
+
+external_setup:
+  - service: "Database"
+    url: "https://neon.tech or https://supabase.com"
+    steps:
+      - "Create a new PostgreSQL database"
+      - "Copy the connection string"
+      - "Add to .env.local as DATABASE_URL"
+      - "Run migrations: npm run db:push"
+
+files:
+  - path: "lib/db/schema.ts"
+    action: create
+    description: "Database schema with user and session tables"
+    priority: 1
+
+  - path: "lib/auth/lucia.ts"
+    action: create
+    description: "Lucia configuration"
+    priority: 2
+
+  - path: "lib/auth/session.ts"
+    action: create
+    description: "Session validation helpers"
+    priority: 3
+
+  - path: "app/api/auth/signup/route.ts"
+    action: create
+    description: "Sign up API route"
+    priority: 4
+
+  - path: "app/api/auth/login/route.ts"
+    action: create
+    description: "Login API route"
+    priority: 5
+
+  - path: "app/api/auth/logout/route.ts"
+    action: create
+    description: "Logout API route"
+    priority: 6
+
+  - path: "middleware.ts"
+    action: create
+    description: "Session validation middleware"
+    priority: 7
+
+code:
+  lib/db/schema.ts: |
+    import { pgTable, text, timestamp } from "drizzle-orm/pg-core";
+
+    export const userTable = pgTable("user", {
+      id: text("id").primaryKey(),
+      email: text("email").notNull().unique(),
+      hashedPassword: text("hashed_password").notNull(),
+      createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+      updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+    });
+
+    export const sessionTable = pgTable("session", {
+      id: text("id").primaryKey(),
+      userId: text("user_id")
+        .notNull()
+        .references(() => userTable.id, { onDelete: "cascade" }),
+      expiresAt: timestamp("expires_at", {
+        withTimezone: true,
+        mode: "date",
+      }).notNull(),
+    });
+
+    export type User = typeof userTable.$inferSelect;
+    export type Session = typeof sessionTable.$inferSelect;
+
+  lib/auth/lucia.ts: |
+    import { Lucia } from "lucia";
+    import { DrizzlePostgreSQLAdapter } from "@lucia-auth/adapter-drizzle";
+    import { db } from "@/lib/db";
+    import { sessionTable, userTable } from "@/lib/db/schema";
+
+    const adapter = new DrizzlePostgreSQLAdapter(db, sessionTable, userTable);
+
+    export const lucia = new Lucia(adapter, {
+      sessionCookie: {
+        expires: false,
+        attributes: {
+          secure: process.env.NODE_ENV === "production",
+        },
+      },
+      getUserAttributes: (attributes) => {
+        return {
+          email: attributes.email,
+        };
+      },
+    });
+
+    declare module "lucia" {
+      interface Register {
+        Lucia: typeof lucia;
+        DatabaseUserAttributes: {
+          email: string;
+        };
+      }
+    }
+
+  lib/auth/session.ts: |
+    import { cookies } from "next/headers";
+    import { cache } from "react";
+    import { lucia } from "./lucia";
+    import type { User, Session } from "lucia";
+
+    export const validateSession = cache(async (): Promise<{
+      user: User;
+      session: Session;
+    } | { user: null; session: null }> => {
+      const sessionId = (await cookies()).get(lucia.sessionCookieName)?.value ?? null;
+
+      if (!sessionId) {
+        return { user: null, session: null };
+      }
+
+      const result = await lucia.validateSession(sessionId);
+
+      try {
+        if (result.session && result.session.fresh) {
+          const sessionCookie = lucia.createSessionCookie(result.session.id);
+          (await cookies()).set(
+            sessionCookie.name,
+            sessionCookie.value,
+            sessionCookie.attributes
+          );
+        }
+        if (!result.session) {
+          const sessionCookie = lucia.createBlankSessionCookie();
+          (await cookies()).set(
+            sessionCookie.name,
+            sessionCookie.value,
+            sessionCookie.attributes
+          );
+        }
+      } catch {
+        // Next.js throws when headers are already sent
+      }
+
+      return result;
+    });
+
+    export async function requireAuth() {
+      const { user, session } = await validateSession();
+      if (!user || !session) {
+        throw new Error("Unauthorized");
+      }
+      return { user, session };
+    }
+
+  app/api/auth/signup/route.ts: |
+    import { lucia } from "@/lib/auth/lucia";
+    import { db } from "@/lib/db";
+    import { userTable } from "@/lib/db/schema";
+    import { hash } from "@node-rs/argon2";
+    import { generateIdFromEntropySize } from "lucia";
+    import { cookies } from "next/headers";
+    import { NextResponse } from "next/server";
+
+    export async function POST(request: Request) {
+      try {
+        const { email, password } = await request.json();
+
+        if (!email || !password) {
+          return NextResponse.json(
+            { error: "Email and password are required" },
+            { status: 400 }
+          );
+        }
+
+        if (password.length < 8) {
+          return NextResponse.json(
+            { error: "Password must be at least 8 characters" },
+            { status: 400 }
+          );
+        }
+
+        const hashedPassword = await hash(password, {
+          memoryCost: 19456,
+          timeCost: 2,
+          outputLen: 32,
+          parallelism: 1,
+        });
+
+        const userId = generateIdFromEntropySize(10);
+
+        await db.insert(userTable).values({
+          id: userId,
+          email: email.toLowerCase(),
+          hashedPassword,
+        });
+
+        const session = await lucia.createSession(userId, {});
+        const sessionCookie = lucia.createSessionCookie(session.id);
+        (await cookies()).set(
+          sessionCookie.name,
+          sessionCookie.value,
+          sessionCookie.attributes
+        );
+
+        return NextResponse.json({ success: true });
+      } catch (error: any) {
+        if (error.code === "23505") {
+          return NextResponse.json(
+            { error: "Email already exists" },
+            { status: 400 }
+          );
+        }
+        console.error("Signup error:", error);
+        return NextResponse.json(
+          { error: "Something went wrong" },
+          { status: 500 }
+        );
+      }
+    }
+
+  app/api/auth/login/route.ts: |
+    import { lucia } from "@/lib/auth/lucia";
+    import { db } from "@/lib/db";
+    import { userTable } from "@/lib/db/schema";
+    import { verify } from "@node-rs/argon2";
+    import { eq } from "drizzle-orm";
+    import { cookies } from "next/headers";
+    import { NextResponse } from "next/server";
+
+    export async function POST(request: Request) {
+      try {
+        const { email, password } = await request.json();
+
+        if (!email || !password) {
+          return NextResponse.json(
+            { error: "Email and password are required" },
+            { status: 400 }
+          );
+        }
+
+        const [user] = await db
+          .select()
+          .from(userTable)
+          .where(eq(userTable.email, email.toLowerCase()));
+
+        if (!user) {
+          return NextResponse.json(
+            { error: "Invalid email or password" },
+            { status: 401 }
+          );
+        }
+
+        const validPassword = await verify(user.hashedPassword, password, {
+          memoryCost: 19456,
+          timeCost: 2,
+          outputLen: 32,
+          parallelism: 1,
+        });
+
+        if (!validPassword) {
+          return NextResponse.json(
+            { error: "Invalid email or password" },
+            { status: 401 }
+          );
+        }
+
+        const session = await lucia.createSession(user.id, {});
+        const sessionCookie = lucia.createSessionCookie(session.id);
+        (await cookies()).set(
+          sessionCookie.name,
+          sessionCookie.value,
+          sessionCookie.attributes
+        );
+
+        return NextResponse.json({ success: true });
+      } catch (error) {
+        console.error("Login error:", error);
+        return NextResponse.json(
+          { error: "Something went wrong" },
+          { status: 500 }
+        );
+      }
+    }
+
+  app/api/auth/logout/route.ts: |
+    import { lucia } from "@/lib/auth/lucia";
+    import { validateSession } from "@/lib/auth/session";
+    import { cookies } from "next/headers";
+    import { NextResponse } from "next/server";
+
+    export async function POST() {
+      const { session } = await validateSession();
+
+      if (!session) {
+        return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+      }
+
+      await lucia.invalidateSession(session.id);
+
+      const sessionCookie = lucia.createBlankSessionCookie();
+      (await cookies()).set(
+        sessionCookie.name,
+        sessionCookie.value,
+        sessionCookie.attributes
+      );
+
+      return NextResponse.json({ success: true });
+    }
+
+  middleware.ts: |
+    import { NextResponse } from "next/server";
+    import type { NextRequest } from "next/server";
+
+    const protectedRoutes = ["/dashboard", "/settings", "/profile"];
+    const authRoutes = ["/login", "/signup"];
+
+    export function middleware(request: NextRequest) {
+      const sessionCookie = request.cookies.get("auth_session");
+      const { pathname } = request.nextUrl;
+
+      // Check if accessing protected route without session
+      const isProtectedRoute = protectedRoutes.some((route) =>
+        pathname.startsWith(route)
+      );
+
+      if (isProtectedRoute && !sessionCookie) {
+        return NextResponse.redirect(new URL("/login", request.url));
+      }
+
+      // Redirect to dashboard if accessing auth routes with session
+      const isAuthRoute = authRoutes.some((route) => pathname.startsWith(route));
+
+      if (isAuthRoute && sessionCookie) {
+        return NextResponse.redirect(new URL("/dashboard", request.url));
+      }
+
+      return NextResponse.next();
+    }
+
+    export const config = {
+      matcher: ["/((?!api|_next/static|_next/image|favicon.ico).*)"],
+    };
+
+edge_cases:
+  - id: session-expired
+    symptom: "User suddenly logged out without warning"
+    cause: "Session expired on the server"
+    solution: |
+      1. Lucia automatically extends fresh sessions
+      2. Check session.expiresAt for custom expiry warnings
+      3. Implement refresh token pattern for long-lived sessions
+
+  - id: argon2-native-error
+    symptom: "Error: Cannot find module '@node-rs/argon2'"
+    cause: "Native module not compiled for platform"
+    solution: |
+      1. Run: npm rebuild @node-rs/argon2
+      2. If on Apple Silicon: ensure using Node 18+
+      3. Alternative: use bcrypt instead of argon2
+
+  - id: cookie-not-set
+    symptom: "Session not persisting after login"
+    cause: "Cookie attributes mismatch with environment"
+    solution: |
+      1. Check secure: false for local development
+      2. Verify domain and path settings
+      3. Check browser DevTools > Application > Cookies
+
+  - id: csrf-protection
+    symptom: "POST requests failing with 403"
+    cause: "Missing CSRF token validation"
+    solution: |
+      Lucia v3 doesn't include built-in CSRF. For forms:
+      1. Use Server Actions (built-in protection)
+      2. Or add custom CSRF token middleware
+      3. Or use fetch with credentials: "same-origin"
+
+validation:
+  manual_test:
+    - "Run database migrations: npm run db:push"
+    - "Start dev server: npm run dev"
+    - "Navigate to /signup"
+    - "Create account with email and password"
+    - "Verify redirect to /dashboard"
+    - "Refresh page - should remain logged in"
+    - "Click logout - verify redirect to /login"
+    - "Try accessing /dashboard - should redirect to /login"

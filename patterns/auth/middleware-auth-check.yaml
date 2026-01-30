@@ -1,0 +1,301 @@
+id: middleware-auth-check
+version: "1.0.0"
+updated_at: "2026-01-31"
+author: "nyko-team"
+status: beta
+
+name: "Next.js Auth Middleware"
+description: "Flexible middleware for protecting routes with authentication checks in Next.js App Router"
+
+category: auth
+tags:
+  - middleware
+  - nextjs
+  - protected-routes
+  - authentication
+  - authorization
+
+difficulty: beginner
+time_estimate: "10-15 min"
+
+stack:
+  required:
+    - name: "next"
+      version: "^15.1.0"
+      reason: "App Router with middleware support"
+
+requires: []
+
+enables: []
+
+env_vars:
+  required: []
+  optional: []
+
+external_setup: []
+
+files:
+  - path: "middleware.ts"
+    action: create
+    description: "Root middleware with route matching"
+    priority: 1
+
+  - path: "lib/auth/middleware.ts"
+    action: create
+    description: "Auth check utilities for middleware"
+    priority: 2
+
+  - path: "config/routes.ts"
+    action: create
+    description: "Route configuration"
+    priority: 3
+
+code:
+  middleware.ts: |
+    import { NextResponse } from "next/server";
+    import type { NextRequest } from "next/server";
+    import { 
+      isProtectedRoute, 
+      isAuthRoute, 
+      isApiRoute,
+      isPublicRoute 
+    } from "@/config/routes";
+
+    export async function middleware(request: NextRequest) {
+      const { pathname } = request.nextUrl;
+
+      // Get session token from cookie
+      // Adjust cookie name based on your auth provider:
+      // - Supabase: sb-<project-ref>-auth-token
+      // - NextAuth: next-auth.session-token or __Secure-next-auth.session-token
+      // - Lucia: auth_session
+      const sessionCookie = request.cookies.get("auth_session")?.value;
+      const isAuthenticated = !!sessionCookie;
+
+      // Public routes - allow everyone
+      if (isPublicRoute(pathname)) {
+        return NextResponse.next();
+      }
+
+      // API routes - handle separately
+      if (isApiRoute(pathname)) {
+        // Let API routes handle their own auth
+        return NextResponse.next();
+      }
+
+      // Protected routes - require authentication
+      if (isProtectedRoute(pathname)) {
+        if (!isAuthenticated) {
+          const loginUrl = new URL("/login", request.url);
+          loginUrl.searchParams.set("callbackUrl", pathname);
+          return NextResponse.redirect(loginUrl);
+        }
+        return NextResponse.next();
+      }
+
+      // Auth routes - redirect to dashboard if already authenticated
+      if (isAuthRoute(pathname)) {
+        if (isAuthenticated) {
+          return NextResponse.redirect(new URL("/dashboard", request.url));
+        }
+        return NextResponse.next();
+      }
+
+      return NextResponse.next();
+    }
+
+    export const config = {
+      matcher: [
+        /*
+         * Match all request paths except:
+         * - _next/static (static files)
+         * - _next/image (image optimization files)
+         * - favicon.ico (favicon file)
+         * - public folder
+         */
+        "/((?!_next/static|_next/image|favicon.ico|.*\\.(?:svg|png|jpg|jpeg|gif|webp|ico)$).*)",
+      ],
+    };
+
+  lib/auth/middleware.ts: |
+    import { NextRequest, NextResponse } from "next/server";
+
+    export type MiddlewareConfig = {
+      publicRoutes?: string[];
+      protectedRoutes?: string[];
+      authRoutes?: string[];
+      defaultRedirect?: string;
+      loginPath?: string;
+    };
+
+    const defaultConfig: MiddlewareConfig = {
+      publicRoutes: ["/", "/about", "/pricing"],
+      protectedRoutes: ["/dashboard", "/settings", "/profile", "/billing"],
+      authRoutes: ["/login", "/signup", "/forgot-password", "/reset-password"],
+      defaultRedirect: "/dashboard",
+      loginPath: "/login",
+    };
+
+    export function createAuthMiddleware(config: MiddlewareConfig = {}) {
+      const mergedConfig = { ...defaultConfig, ...config };
+
+      return async function authMiddleware(request: NextRequest) {
+        const { pathname } = request.nextUrl;
+        
+        // Get session - adjust based on your auth provider
+        const sessionCookie = request.cookies.get("auth_session")?.value;
+        const isAuthenticated = !!sessionCookie;
+
+        // Check route type
+        const isPublic = mergedConfig.publicRoutes?.some(
+          (route) => pathname === route || pathname.startsWith(`${route}/`)
+        );
+
+        const isProtected = mergedConfig.protectedRoutes?.some(
+          (route) => pathname === route || pathname.startsWith(`${route}/`)
+        );
+
+        const isAuth = mergedConfig.authRoutes?.some(
+          (route) => pathname === route || pathname.startsWith(`${route}/`)
+        );
+
+        // Handle protected routes
+        if (isProtected && !isAuthenticated) {
+          const url = new URL(mergedConfig.loginPath!, request.url);
+          url.searchParams.set("callbackUrl", pathname);
+          return NextResponse.redirect(url);
+        }
+
+        // Handle auth routes when already authenticated
+        if (isAuth && isAuthenticated) {
+          return NextResponse.redirect(
+            new URL(mergedConfig.defaultRedirect!, request.url)
+          );
+        }
+
+        return NextResponse.next();
+      };
+    }
+
+    // Helper to check roles from JWT or session
+    export async function checkRole(
+      request: NextRequest,
+      allowedRoles: string[]
+    ): Promise<boolean> {
+      // This is a placeholder - implement based on your auth provider
+      // For JWT: decode token and check role claim
+      // For database sessions: fetch user role from session
+      const sessionCookie = request.cookies.get("auth_session")?.value;
+      
+      if (!sessionCookie) return false;
+      
+      // Example: decode JWT and check role
+      // const payload = await decodeJwt(sessionCookie);
+      // return allowedRoles.includes(payload.role);
+      
+      return true; // Replace with actual implementation
+    }
+
+  config/routes.ts: |
+    // Route patterns for middleware matching
+
+    // Routes that don't require authentication
+    export const publicRoutes = [
+      "/",
+      "/about",
+      "/pricing",
+      "/blog",
+      "/contact",
+      "/terms",
+      "/privacy",
+    ];
+
+    // Routes that require authentication
+    export const protectedRoutes = [
+      "/dashboard",
+      "/settings",
+      "/profile",
+      "/billing",
+      "/account",
+      "/projects",
+    ];
+
+    // Auth-related routes (redirect to dashboard if authenticated)
+    export const authRoutes = [
+      "/login",
+      "/signup",
+      "/register",
+      "/forgot-password",
+      "/reset-password",
+      "/verify-email",
+    ];
+
+    // API routes (handled separately)
+    export const apiRoutes = ["/api"];
+
+    // Helper functions
+    export function isPublicRoute(pathname: string): boolean {
+      return publicRoutes.some(
+        (route) => pathname === route || pathname.startsWith(`${route}/`)
+      );
+    }
+
+    export function isProtectedRoute(pathname: string): boolean {
+      return protectedRoutes.some(
+        (route) => pathname === route || pathname.startsWith(`${route}/`)
+      );
+    }
+
+    export function isAuthRoute(pathname: string): boolean {
+      return authRoutes.some(
+        (route) => pathname === route || pathname.startsWith(`${route}/`)
+      );
+    }
+
+    export function isApiRoute(pathname: string): boolean {
+      return apiRoutes.some((route) => pathname.startsWith(route));
+    }
+
+edge_cases:
+  - id: infinite-redirect
+    symptom: "Page keeps redirecting in a loop"
+    cause: "Login page is in protected routes or callback URL causes loop"
+    solution: |
+      1. Ensure /login is in authRoutes, not protectedRoutes
+      2. Check callbackUrl doesn't point to an auth route
+      3. Add fallback: if (callbackUrl.includes('/login')) use '/dashboard'
+
+  - id: static-assets-blocked
+    symptom: "Images and CSS not loading on protected routes"
+    cause: "Middleware matching static files"
+    solution: |
+      Verify matcher config excludes static files:
+      matcher: ["/((?!_next/static|_next/image|favicon.ico|.*\\.(?:svg|png|jpg|jpeg|gif|webp|ico)$).*)"]
+
+  - id: api-routes-blocked
+    symptom: "API calls returning 302 redirects"
+    cause: "Middleware redirecting API routes"
+    solution: |
+      1. Add API routes to public or handle separately
+      2. Check isApiRoute function covers all API paths
+      3. Let API routes handle their own authentication
+
+  - id: session-not-detected
+    symptom: "Middleware doesn't detect logged-in users"
+    cause: "Wrong cookie name for auth provider"
+    solution: |
+      Check cookie name matches your auth provider:
+      - Supabase: sb-<project-ref>-auth-token
+      - NextAuth: next-auth.session-token (or __Secure- prefix in production)
+      - Lucia: auth_session
+      - Custom: whatever you set
+
+validation:
+  manual_test:
+    - "Configure routes in config/routes.ts"
+    - "Start dev server"
+    - "Visit protected route without auth - should redirect to /login"
+    - "Log in successfully"
+    - "Visit protected route - should work"
+    - "Visit /login while logged in - should redirect to /dashboard"
+    - "Check that public routes work without auth"
