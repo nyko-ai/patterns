@@ -1,0 +1,344 @@
+id: pm2-ecosystem
+version: "1.0.0"
+updated_at: "2026-01-31"
+author: "nyko-team"
+status: beta
+
+name: "PM2 Ecosystem Configuration"
+description: "Production-ready PM2 process manager configuration for Next.js applications"
+
+category: deploy
+tags:
+  - pm2
+  - process-manager
+  - production
+  - nodejs
+  - nextjs
+  - clustering
+
+difficulty: intermediate
+time_estimate: "15-20 min"
+
+stack:
+  required:
+    - name: "pm2"
+      version: "^5.0.0"
+      reason: "Production process manager for Node.js"
+    - name: "next"
+      version: "^15.1.0"
+      reason: "Next.js application"
+
+requires: []
+
+enables:
+  - nginx-ssl-certbot
+
+env_vars:
+  required:
+    - key: NODE_ENV
+      description: "Node environment"
+      format: "production"
+      where_to_find: "Set in ecosystem config"
+    - key: PORT
+      description: "Application port"
+      format: "3000"
+      where_to_find: "Your application config"
+  optional:
+    - key: PM2_INSTANCES
+      description: "Number of cluster instances"
+      default: "max"
+
+external_setup:
+  - service: "PM2 Installation"
+    url: "https://pm2.keymetrics.io"
+    steps:
+      - "Install PM2 globally: npm install -g pm2"
+      - "Install PM2 log rotation: pm2 install pm2-logrotate"
+      - "Setup startup script: pm2 startup"
+
+files:
+  - path: "ecosystem.config.js"
+    action: create
+    description: "PM2 ecosystem configuration"
+    priority: 1
+
+  - path: "scripts/deploy.sh"
+    action: create
+    description: "Deployment script"
+    priority: 2
+
+  - path: "scripts/pm2-setup.sh"
+    action: create
+    description: "PM2 initial setup script"
+    priority: 3
+
+  - path: ".env.production"
+    action: create
+    description: "Production environment template"
+    priority: 4
+
+code:
+  ecosystem.config.js: |
+    /**
+     * PM2 Ecosystem Configuration
+     *
+     * Start: pm2 start ecosystem.config.js
+     * Reload: pm2 reload ecosystem.config.js
+     * Stop: pm2 stop ecosystem.config.js
+     * Delete: pm2 delete ecosystem.config.js
+     * Logs: pm2 logs
+     * Monitor: pm2 monit
+     */
+
+    module.exports = {
+      apps: [
+        {
+          name: "nextjs-app",
+          script: "node_modules/next/dist/bin/next",
+          args: "start",
+          cwd: process.cwd(),
+          instances: process.env.PM2_INSTANCES || "max",
+          exec_mode: "cluster",
+          autorestart: true,
+          watch: false,
+          max_memory_restart: "1G",
+          env: {
+            NODE_ENV: "production",
+            PORT: 3000,
+          },
+          env_production: {
+            NODE_ENV: "production",
+            PORT: 3000,
+          },
+          env_staging: {
+            NODE_ENV: "staging",
+            PORT: 3001,
+          },
+
+          // Logging
+          log_date_format: "YYYY-MM-DD HH:mm:ss Z",
+          error_file: "./logs/error.log",
+          out_file: "./logs/out.log",
+          merge_logs: true,
+
+          // Graceful shutdown
+          kill_timeout: 5000,
+          listen_timeout: 3000,
+          shutdown_with_message: true,
+
+          // Health monitoring
+          min_uptime: "10s",
+          max_restarts: 10,
+          restart_delay: 4000,
+
+          // Source maps for error tracking
+          source_map_support: true,
+        },
+
+        // Background worker example (optional)
+        {
+          name: "email-worker",
+          script: "./scripts/start-worker.js",
+          instances: 1,
+          exec_mode: "fork",
+          autorestart: true,
+          watch: false,
+          env: {
+            NODE_ENV: "production",
+          },
+
+          // Logging
+          error_file: "./logs/worker-error.log",
+          out_file: "./logs/worker-out.log",
+          merge_logs: true,
+        },
+      ],
+
+      // Deployment configuration
+      deploy: {
+        production: {
+          user: "deploy",
+          host: ["your-server-ip"],
+          ref: "origin/main",
+          repo: "git@github.com:your-org/your-repo.git",
+          path: "/var/www/production",
+          "pre-deploy-local": "",
+          "post-deploy":
+            "npm ci && npm run build && pm2 reload ecosystem.config.js --env production",
+          "pre-setup": "",
+          env: {
+            NODE_ENV: "production",
+          },
+        },
+        staging: {
+          user: "deploy",
+          host: ["your-staging-server"],
+          ref: "origin/develop",
+          repo: "git@github.com:your-org/your-repo.git",
+          path: "/var/www/staging",
+          "post-deploy":
+            "npm ci && npm run build && pm2 reload ecosystem.config.js --env staging",
+          env: {
+            NODE_ENV: "staging",
+          },
+        },
+      },
+    };
+
+  scripts/deploy.sh: |
+    #!/bin/bash
+    set -e
+
+    # Colors
+    RED='\033[0;31m'
+    GREEN='\033[0;32m'
+    YELLOW='\033[1;33m'
+    NC='\033[0m'
+
+    echo -e "${GREEN}Starting deployment...${NC}"
+
+    # Pull latest code
+    echo -e "${YELLOW}Pulling latest code...${NC}"
+    git pull origin main
+
+    # Install dependencies
+    echo -e "${YELLOW}Installing dependencies...${NC}"
+    npm ci
+
+    # Build application
+    echo -e "${YELLOW}Building application...${NC}"
+    npm run build
+
+    # Create logs directory
+    mkdir -p logs
+
+    # Reload PM2
+    echo -e "${YELLOW}Reloading PM2...${NC}"
+    pm2 reload ecosystem.config.js --env production
+
+    # Save PM2 process list
+    pm2 save
+
+    echo -e "${GREEN}Deployment complete!${NC}"
+
+    # Show status
+    pm2 status
+
+  scripts/pm2-setup.sh: |
+    #!/bin/bash
+    set -e
+
+    # Colors
+    RED='\033[0;31m'
+    GREEN='\033[0;32m'
+    YELLOW='\033[1;33m'
+    NC='\033[0m'
+
+    echo -e "${GREEN}Setting up PM2...${NC}"
+
+    # Check if PM2 is installed
+    if ! command -v pm2 &> /dev/null; then
+        echo -e "${YELLOW}Installing PM2 globally...${NC}"
+        npm install -g pm2
+    fi
+
+    # Install PM2 logrotate module
+    echo -e "${YELLOW}Installing PM2 logrotate...${NC}"
+    pm2 install pm2-logrotate
+
+    # Configure logrotate
+    pm2 set pm2-logrotate:max_size 10M
+    pm2 set pm2-logrotate:retain 7
+    pm2 set pm2-logrotate:compress true
+    pm2 set pm2-logrotate:dateFormat YYYY-MM-DD_HH-mm-ss
+    pm2 set pm2-logrotate:rotateModule true
+
+    # Setup startup script
+    echo -e "${YELLOW}Setting up startup script...${NC}"
+    pm2 startup
+
+    # Create logs directory
+    mkdir -p logs
+
+    # Build the application
+    echo -e "${YELLOW}Building application...${NC}"
+    npm run build
+
+    # Start the application
+    echo -e "${YELLOW}Starting application...${NC}"
+    pm2 start ecosystem.config.js --env production
+
+    # Save process list
+    pm2 save
+
+    echo -e "${GREEN}PM2 setup complete!${NC}"
+    echo ""
+    echo "Useful commands:"
+    echo "  pm2 status        - Show process status"
+    echo "  pm2 logs          - Show logs"
+    echo "  pm2 monit         - Monitor processes"
+    echo "  pm2 reload all    - Zero-downtime reload"
+    echo "  pm2 restart all   - Restart all processes"
+
+  .env.production: |
+    # Production Environment Variables
+    # Copy this file and update values for your production server
+
+    NODE_ENV=production
+    PORT=3000
+
+    # Database
+    DATABASE_URL=postgresql://user:password@host:5432/database
+
+    # Authentication (example)
+    # NEXTAUTH_URL=https://yourdomain.com
+    # NEXTAUTH_SECRET=your-secret-here
+
+    # Add your other production environment variables here
+
+edge_cases:
+  - id: cluster-mode-issues
+    symptom: "Session/state not shared between instances"
+    cause: "In-memory state not shared in cluster mode"
+    solution: |
+      Use external session store:
+      1. Redis for sessions: npm install redis
+      2. Database sessions
+      3. Or use instances: 1 for stateful apps
+
+  - id: port-already-in-use
+    symptom: "Error: listen EADDRINUSE"
+    cause: "Port already used by another process"
+    solution: |
+      1. Find process: lsof -i :3000
+      2. Kill it: kill -9 <PID>
+      3. Or change PORT in ecosystem config
+      4. Restart: pm2 restart all
+
+  - id: memory-leak
+    symptom: "Process keeps restarting due to memory"
+    cause: "Memory limit exceeded"
+    solution: |
+      1. Increase limit: max_memory_restart: "2G"
+      2. Profile memory with: node --inspect
+      3. Check for memory leaks in your code
+      4. Monitor with: pm2 monit
+
+  - id: startup-not-persisted
+    symptom: "PM2 processes don't start after reboot"
+    cause: "Startup script not configured"
+    solution: |
+      1. Run: pm2 startup (copy and run the command it outputs)
+      2. Start your apps: pm2 start ecosystem.config.js
+      3. Save: pm2 save
+
+validation:
+  manual_test:
+    - "Run: bash scripts/pm2-setup.sh"
+    - "Check status: pm2 status"
+    - "View logs: pm2 logs"
+    - "Visit http://localhost:3000"
+    - "Test reload: pm2 reload all"
+    - "Test restart: pm2 restart all"
+    - "Monitor: pm2 monit"
+    - "Reboot server and verify apps start"
