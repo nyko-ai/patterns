@@ -1,0 +1,123 @@
+{
+  "version": "1.0.0",
+  "updated_at": "2026-01-30",
+  "patterns": [
+    {
+      "id": "supabase-client-nextjs",
+      "category": "auth",
+      "name": "Supabase Client for Next.js",
+      "description": "Setup Supabase client for Next.js 14+ App Router with SSR support",
+      "tags": ["supabase", "nextjs", "client", "ssr"],
+      "difficulty": "beginner",
+      "status": "beta"
+    },
+    {
+      "id": "supabase-google-oauth",
+      "category": "auth",
+      "name": "Google OAuth with Supabase",
+      "description": "Complete Google OAuth implementation with Supabase Auth",
+      "tags": ["supabase", "google", "oauth", "authentication"],
+      "difficulty": "intermediate",
+      "status": "beta"
+    },
+    {
+      "id": "supabase-github-oauth",
+      "category": "auth",
+      "name": "GitHub OAuth with Supabase",
+      "description": "GitHub OAuth implementation with Supabase Auth",
+      "tags": ["supabase", "github", "oauth", "authentication"],
+      "difficulty": "intermediate",
+      "status": "beta"
+    },
+    {
+      "id": "supabase-magic-link",
+      "category": "auth",
+      "name": "Magic Link Auth with Supabase",
+      "description": "Passwordless authentication with email magic links",
+      "tags": ["supabase", "magic-link", "email", "passwordless"],
+      "difficulty": "intermediate",
+      "status": "beta"
+    },
+    {
+      "id": "supabase-protected-routes",
+      "category": "auth",
+      "name": "Protected Routes with Supabase",
+      "description": "Middleware and helpers to protect routes requiring authentication",
+      "tags": ["supabase", "middleware", "protected", "routes"],
+      "difficulty": "beginner",
+      "status": "beta"
+    },
+    {
+      "id": "supabase-signout",
+      "category": "auth",
+      "name": "Sign Out with Supabase",
+      "description": "Client and server-side sign out implementation",
+      "tags": ["supabase", "signout", "logout", "session"],
+      "difficulty": "beginner",
+      "status": "beta"
+    },
+    {
+      "id": "stripe-checkout-session",
+      "category": "payments",
+      "name": "Stripe Checkout Session",
+      "description": "Create Stripe Checkout sessions for one-time and subscription payments",
+      "tags": ["stripe", "checkout", "payments", "subscriptions"],
+      "difficulty": "intermediate",
+      "status": "beta"
+    },
+    {
+      "id": "stripe-webhook-handler",
+      "category": "payments",
+      "name": "Stripe Webhook Handler",
+      "description": "Handle Stripe webhooks with signature verification",
+      "tags": ["stripe", "webhooks", "payments", "events"],
+      "difficulty": "intermediate",
+      "status": "beta"
+    },
+    {
+      "id": "stripe-customer-portal",
+      "category": "payments",
+      "name": "Stripe Customer Portal",
+      "description": "Redirect users to Stripe Customer Portal for subscription management",
+      "tags": ["stripe", "portal", "subscriptions", "billing"],
+      "difficulty": "beginner",
+      "status": "beta"
+    },
+    {
+      "id": "supabase-rls-policies",
+      "category": "database",
+      "name": "Supabase RLS Policies",
+      "description": "Row Level Security policies for common patterns",
+      "tags": ["supabase", "rls", "security", "policies", "postgres"],
+      "difficulty": "intermediate",
+      "status": "beta"
+    },
+    {
+      "id": "docker-compose-dev",
+      "category": "deploy",
+      "name": "Docker Compose for Development",
+      "description": "Docker Compose setup for local development with Postgres",
+      "tags": ["docker", "compose", "postgres", "development"],
+      "difficulty": "beginner",
+      "status": "beta"
+    },
+    {
+      "id": "github-actions-vercel",
+      "category": "deploy",
+      "name": "GitHub Actions to Vercel",
+      "description": "CI/CD pipeline to deploy Next.js to Vercel",
+      "tags": ["github", "actions", "vercel", "cicd", "deploy"],
+      "difficulty": "beginner",
+      "status": "beta"
+    },
+    {
+      "id": "rate-limiting-upstash",
+      "category": "api",
+      "name": "Rate Limiting with Upstash",
+      "description": "API rate limiting using Upstash Redis",
+      "tags": ["upstash", "redis", "rate-limit", "api"],
+      "difficulty": "intermediate",
+      "status": "beta"
+    }
+  ]
+}
