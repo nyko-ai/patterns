@@ -1,0 +1,264 @@
+id: request-validation-zod
+version: "1.0.0"
+updated_at: "2026-01-31"
+author: "nyko-team"
+status: beta
+
+name: "Request Validation with Zod"
+description: "Type-safe request validation middleware using Zod schemas"
+
+category: api
+tags:
+  - zod
+  - validation
+  - typescript
+  - middleware
+  - type-safety
+
+difficulty: beginner
+time_estimate: "15-20 min"
+
+stack:
+  required:
+    - name: "zod"
+      version: "^4.3.6"
+      reason: "Schema validation library"
+    - name: "next"
+      version: "^15.1.0"
+      reason: "App Router API routes"
+
+requires: []
+
+enables:
+  - error-handling-middleware
+
+env_vars: {}
+
+external_setup: []
+
+files:
+  - path: "lib/validation.ts"
+    action: create
+    description: "Zod validation utilities"
+    priority: 1
+
+  - path: "lib/schemas/common.ts"
+    action: create
+    description: "Common validation schemas"
+    priority: 2
+
+  - path: "app/api/example/route.ts"
+    action: create
+    description: "Example validated endpoint"
+    priority: 3
+
+code:
+  lib/validation.ts: |
+    import { NextRequest, NextResponse } from "next/server";
+    import { z, ZodError, ZodSchema } from "zod";
+
+    export type ValidationTarget = "body" | "query" | "params";
+
+    export interface ValidationResult<T> {
+      success: boolean;
+      data?: T;
+      errors?: Array<{ path: string; message: string }>;
+    }
+
+    export function formatZodError(error: ZodError): Array<{ path: string; message: string }> {
+      return error.errors.map((err) => ({
+        path: err.path.join("."),
+        message: err.message,
+      }));
+    }
+
+    export async function validateRequest<T>(
+      request: NextRequest,
+      schema: ZodSchema<T>,
+      target: ValidationTarget = "body"
+    ): Promise<ValidationResult<T>> {
+      try {
+        let data: unknown;
+
+        switch (target) {
+          case "body":
+            data = await request.json();
+            break;
+          case "query":
+            data = Object.fromEntries(request.nextUrl.searchParams);
+            break;
+          case "params":
+            data = {};
+            break;
+        }
+
+        const validated = schema.parse(data);
+        return { success: true, data: validated };
+      } catch (error) {
+        if (error instanceof ZodError) {
+          return { success: false, errors: formatZodError(error) };
+        }
+        if (error instanceof SyntaxError) {
+          return { success: false, errors: [{ path: "body", message: "Invalid JSON" }] };
+        }
+        throw error;
+      }
+    }
+
+    export function withValidation<T>(
+      schema: ZodSchema<T>,
+      handler: (req: NextRequest, data: T) => Promise<NextResponse>,
+      options?: { target?: ValidationTarget }
+    ) {
+      return async (req: NextRequest): Promise<NextResponse> => {
+        const result = await validateRequest(req, schema, options?.target || "body");
+
+        if (!result.success) {
+          return NextResponse.json(
+            {
+              error: "Validation failed",
+              details: result.errors,
+            },
+            { status: 400 }
+          );
+        }
+
+        return handler(req, result.data!);
+      };
+    }
+
+    export function createValidator<T>(schema: ZodSchema<T>) {
+      return {
+        parse: (data: unknown): T => schema.parse(data),
+        safeParse: (data: unknown) => schema.safeParse(data),
+        validate: async (req: NextRequest, target?: ValidationTarget) =>
+          validateRequest(req, schema, target),
+      };
+    }
+
+  lib/schemas/common.ts: |
+    import { z } from "zod";
+
+    export const emailSchema = z.string().email("Invalid email address");
+
+    export const passwordSchema = z
+      .string()
+      .min(8, "Password must be at least 8 characters")
+      .regex(/[A-Z]/, "Password must contain uppercase letter")
+      .regex(/[a-z]/, "Password must contain lowercase letter")
+      .regex(/[0-9]/, "Password must contain number");
+
+    export const uuidSchema = z.string().uuid("Invalid UUID");
+
+    export const paginationSchema = z.object({
+      page: z.coerce.number().int().positive().default(1),
+      limit: z.coerce.number().int().min(1).max(100).default(20),
+      sortBy: z.string().optional(),
+      sortOrder: z.enum(["asc", "desc"]).default("desc"),
+    });
+
+    export const dateRangeSchema = z.object({
+      startDate: z.coerce.date(),
+      endDate: z.coerce.date(),
+    }).refine(
+      (data) => data.startDate <= data.endDate,
+      { message: "Start date must be before end date" }
+    );
+
+    export const searchSchema = z.object({
+      q: z.string().min(1).max(100),
+      filters: z.record(z.string()).optional(),
+    });
+
+    export const createUserSchema = z.object({
+      email: emailSchema,
+      password: passwordSchema,
+      name: z.string().min(2).max(100),
+    });
+
+    export const updateUserSchema = z.object({
+      email: emailSchema.optional(),
+      name: z.string().min(2).max(100).optional(),
+    });
+
+    export type Pagination = z.infer<typeof paginationSchema>;
+    export type DateRange = z.infer<typeof dateRangeSchema>;
+    export type CreateUser = z.infer<typeof createUserSchema>;
+    export type UpdateUser = z.infer<typeof updateUserSchema>;
+
+  app/api/example/route.ts: |
+    import { NextRequest, NextResponse } from "next/server";
+    import { withValidation, validateRequest } from "@/lib/validation";
+    import { createUserSchema, paginationSchema } from "@/lib/schemas/common";
+    import { z } from "zod";
+
+    const createItemSchema = z.object({
+      name: z.string().min(1).max(255),
+      description: z.string().max(1000).optional(),
+      tags: z.array(z.string()).max(10).default([]),
+      metadata: z.record(z.unknown()).optional(),
+    });
+
+    export const POST = withValidation(
+      createItemSchema,
+      async (req, data) => {
+        console.log("Validated data:", data);
+
+        return NextResponse.json({
+          success: true,
+          item: {
+            id: "generated-id",
+            ...data,
+            createdAt: new Date().toISOString(),
+          },
+        });
+      }
+    );
+
+    export async function GET(req: NextRequest) {
+      const result = await validateRequest(req, paginationSchema, "query");
+
+      if (!result.success) {
+        return NextResponse.json(
+          { error: "Invalid query parameters", details: result.errors },
+          { status: 400 }
+        );
+      }
+
+      const { page, limit, sortBy, sortOrder } = result.data!;
+
+      return NextResponse.json({
+        items: [],
+        pagination: { page, limit, total: 0 },
+        sort: { field: sortBy, order: sortOrder },
+      });
+    }
+
+edge_cases:
+  - id: empty-body
+    symptom: "Validation fails with JSON parse error"
+    cause: "Request body is empty or not JSON"
+    solution: "Handle SyntaxError in validateRequest, return appropriate error message"
+
+  - id: coercion-failure
+    symptom: "Query params not converted to numbers"
+    cause: "Missing z.coerce for query parameters"
+    solution: "Use z.coerce.number() for query params that should be numbers"
+
+  - id: nested-errors
+    symptom: "Error paths unclear for nested objects"
+    cause: "Complex nested schema validation"
+    solution: "Format error paths with dot notation in formatZodError"
+
+  - id: type-inference
+    symptom: "TypeScript types not matching schema"
+    cause: "Schema type not exported or inferred"
+    solution: "Use z.infer<typeof schema> to extract TypeScript type"
+
+validation:
+  manual_test:
+    - "Send valid POST request"
+    - "Send invalid request and verify 400 response"
+    - "Check error details include field paths"
+    - "Test query parameter validation"
+    - "Verify type coercion works for numbers"

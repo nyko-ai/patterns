@@ -1,0 +1,331 @@
+id: api-key-auth
+version: "1.0.0"
+updated_at: "2026-01-31"
+author: "nyko-team"
+status: beta
+
+name: "API Key Authentication"
+description: "Custom API key validation for securing API endpoints"
+
+category: api
+tags:
+  - api-key
+  - authentication
+  - security
+  - middleware
+
+difficulty: intermediate
+time_estimate: "20-30 min"
+
+stack:
+  required:
+    - name: "next"
+      version: "^15.1.0"
+      reason: "App Router API routes"
+    - name: "@prisma/client"
+      version: "^7.3.0"
+      reason: "Database for API key storage"
+
+requires: []
+
+enables:
+  - rate-limiting-express
+
+env_vars:
+  required:
+    - key: API_KEY_SECRET
+      description: "Secret for hashing API keys"
+      format: "32+ character random string"
+      where_to_find: "Generate with: openssl rand -hex 32"
+
+external_setup: []
+
+files:
+  - path: "prisma/schema.prisma"
+    action: modify
+    description: "Add ApiKey model"
+    priority: 1
+
+  - path: "lib/api-keys.ts"
+    action: create
+    description: "API key generation and validation"
+    priority: 2
+
+  - path: "app/api/keys/route.ts"
+    action: create
+    description: "API key management endpoint"
+    priority: 3
+
+  - path: "lib/middleware/api-key-auth.ts"
+    action: create
+    description: "API key authentication middleware"
+    priority: 4
+
+code:
+  prisma/schema.prisma: |
+    // Add to existing schema.prisma
+
+    model ApiKey {
+      id          String   @id @default(cuid())
+      name        String
+      keyHash     String   @unique
+      keyPrefix   String
+      userId      String
+      scopes      String[] @default([])
+      expiresAt   DateTime?
+      lastUsedAt  DateTime?
+      createdAt   DateTime @default(now())
+      revokedAt   DateTime?
+
+      user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+      @@index([keyHash])
+      @@index([userId])
+    }
+
+  lib/api-keys.ts: |
+    import crypto from "crypto";
+    import { prisma } from "@/lib/prisma";
+
+    const API_KEY_SECRET = process.env.API_KEY_SECRET!;
+    const KEY_PREFIX = "nk";
+    const KEY_LENGTH = 32;
+
+    function generateKey(): string {
+      const randomBytes = crypto.randomBytes(KEY_LENGTH);
+      return `${KEY_PREFIX}_${randomBytes.toString("base64url")}`;
+    }
+
+    function hashKey(key: string): string {
+      return crypto
+        .createHmac("sha256", API_KEY_SECRET)
+        .update(key)
+        .digest("hex");
+    }
+
+    export async function createApiKey(params: {
+      userId: string;
+      name: string;
+      scopes?: string[];
+      expiresInDays?: number;
+    }) {
+      const key = generateKey();
+      const keyHash = hashKey(key);
+      const keyPrefix = key.substring(0, 10);
+
+      const expiresAt = params.expiresInDays
+        ? new Date(Date.now() + params.expiresInDays * 24 * 60 * 60 * 1000)
+        : null;
+
+      const apiKey = await prisma.apiKey.create({
+        data: {
+          name: params.name,
+          keyHash,
+          keyPrefix,
+          userId: params.userId,
+          scopes: params.scopes || [],
+          expiresAt,
+        },
+      });
+
+      return {
+        id: apiKey.id,
+        key,
+        name: apiKey.name,
+        keyPrefix,
+        expiresAt: apiKey.expiresAt,
+      };
+    }
+
+    export async function validateApiKey(key: string): Promise<{
+      valid: boolean;
+      userId?: string;
+      scopes?: string[];
+      error?: string;
+    }> {
+      if (!key.startsWith(`${KEY_PREFIX}_`)) {
+        return { valid: false, error: "Invalid key format" };
+      }
+
+      const keyHash = hashKey(key);
+
+      const apiKey = await prisma.apiKey.findUnique({
+        where: { keyHash },
+      });
+
+      if (!apiKey) {
+        return { valid: false, error: "Invalid API key" };
+      }
+
+      if (apiKey.revokedAt) {
+        return { valid: false, error: "API key has been revoked" };
+      }
+
+      if (apiKey.expiresAt && apiKey.expiresAt < new Date()) {
+        return { valid: false, error: "API key has expired" };
+      }
+
+      await prisma.apiKey.update({
+        where: { id: apiKey.id },
+        data: { lastUsedAt: new Date() },
+      });
+
+      return {
+        valid: true,
+        userId: apiKey.userId,
+        scopes: apiKey.scopes,
+      };
+    }
+
+    export async function revokeApiKey(keyId: string, userId: string) {
+      return prisma.apiKey.update({
+        where: { id: keyId, userId },
+        data: { revokedAt: new Date() },
+      });
+    }
+
+    export async function listApiKeys(userId: string) {
+      return prisma.apiKey.findMany({
+        where: { userId, revokedAt: null },
+        select: {
+          id: true,
+          name: true,
+          keyPrefix: true,
+          scopes: true,
+          expiresAt: true,
+          lastUsedAt: true,
+          createdAt: true,
+        },
+        orderBy: { createdAt: "desc" },
+      });
+    }
+
+  app/api/keys/route.ts: |
+    import { auth } from "@/auth";
+    import { createApiKey, listApiKeys, revokeApiKey } from "@/lib/api-keys";
+    import { NextRequest, NextResponse } from "next/server";
+
+    export async function GET() {
+      const session = await auth();
+      if (!session?.user?.id) {
+        return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+      }
+
+      const keys = await listApiKeys(session.user.id);
+      return NextResponse.json({ keys });
+    }
+
+    export async function POST(request: NextRequest) {
+      const session = await auth();
+      if (!session?.user?.id) {
+        return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+      }
+
+      const { name, scopes, expiresInDays } = await request.json();
+
+      if (!name) {
+        return NextResponse.json({ error: "Name is required" }, { status: 400 });
+      }
+
+      const apiKey = await createApiKey({
+        userId: session.user.id,
+        name,
+        scopes,
+        expiresInDays,
+      });
+
+      return NextResponse.json({
+        ...apiKey,
+        message: "Store this key securely. It won't be shown again.",
+      });
+    }
+
+    export async function DELETE(request: NextRequest) {
+      const session = await auth();
+      if (!session?.user?.id) {
+        return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+      }
+
+      const { keyId } = await request.json();
+
+      await revokeApiKey(keyId, session.user.id);
+      return NextResponse.json({ success: true });
+    }
+
+  lib/middleware/api-key-auth.ts: |
+    import { NextRequest, NextResponse } from "next/server";
+    import { validateApiKey } from "@/lib/api-keys";
+
+    export type ApiKeyContext = {
+      userId: string;
+      scopes: string[];
+    };
+
+    export function withApiKeyAuth(
+      handler: (req: NextRequest, ctx: ApiKeyContext) => Promise<NextResponse>,
+      options?: { requiredScopes?: string[] }
+    ) {
+      return async (req: NextRequest): Promise<NextResponse> => {
+        const authHeader = req.headers.get("authorization");
+        const apiKey = req.headers.get("x-api-key");
+
+        const key = apiKey || authHeader?.replace("Bearer ", "");
+
+        if (!key) {
+          return NextResponse.json(
+            { error: "API key required" },
+            { status: 401 }
+          );
+        }
+
+        const result = await validateApiKey(key);
+
+        if (!result.valid) {
+          return NextResponse.json(
+            { error: result.error },
+            { status: 401 }
+          );
+        }
+
+        if (options?.requiredScopes?.length) {
+          const hasScope = options.requiredScopes.every(
+            (scope) => result.scopes?.includes(scope)
+          );
+          if (!hasScope) {
+            return NextResponse.json(
+              { error: "Insufficient permissions" },
+              { status: 403 }
+            );
+          }
+        }
+
+        return handler(req, {
+          userId: result.userId!,
+          scopes: result.scopes || [],
+        });
+      };
+    }
+
+edge_cases:
+  - id: key-leaked
+    symptom: "API key exposed in logs or client"
+    cause: "Key logged or sent to frontend"
+    solution: "Immediately revoke key, implement key rotation, audit access logs"
+
+  - id: timing-attack
+    symptom: "Key validation timing varies"
+    cause: "Non-constant-time comparison"
+    solution: "Use crypto.timingSafeEqual for hash comparison"
+
+  - id: key-not-working
+    symptom: "Valid key returns 401"
+    cause: "Key expired or revoked"
+    solution: "Check expiresAt and revokedAt in database, generate new key if needed"
+
+validation:
+  manual_test:
+    - "Create API key via POST /api/keys"
+    - "Use key in X-API-Key header"
+    - "Verify protected endpoint accepts key"
+    - "Revoke key and verify rejection"
+    - "Test expired key handling"

@@ -1,0 +1,363 @@
+id: webhook-sender-retry
+version: "1.0.0"
+updated_at: "2026-01-31"
+author: "nyko-team"
+status: beta
+
+name: "Webhook Sender with Retry"
+description: "Outbound webhook delivery with exponential backoff retry logic"
+
+category: api
+tags:
+  - webhook
+  - retry
+  - queue
+  - reliability
+  - outbound
+
+difficulty: intermediate
+time_estimate: "25-35 min"
+
+stack:
+  required:
+    - name: "next"
+      version: "^15.1.0"
+      reason: "App Router with server actions"
+    - name: "@prisma/client"
+      version: "^7.3.0"
+      reason: "Webhook delivery tracking"
+
+requires: []
+
+enables: []
+
+env_vars:
+  optional:
+    - key: WEBHOOK_MAX_RETRIES
+      description: "Maximum retry attempts"
+      default: "5"
+    - key: WEBHOOK_TIMEOUT_MS
+      description: "Request timeout in milliseconds"
+      default: "30000"
+
+external_setup: []
+
+files:
+  - path: "prisma/schema.prisma"
+    action: modify
+    description: "Add webhook delivery models"
+    priority: 1
+
+  - path: "lib/webhooks/sender.ts"
+    action: create
+    description: "Webhook sending with retry logic"
+    priority: 2
+
+  - path: "lib/webhooks/queue.ts"
+    action: create
+    description: "Webhook queue processor"
+    priority: 3
+
+  - path: "app/api/webhooks/process/route.ts"
+    action: create
+    description: "Cron endpoint for processing queue"
+    priority: 4
+
+code:
+  prisma/schema.prisma: |
+    // Add to existing schema.prisma
+
+    model WebhookEndpoint {
+      id          String   @id @default(cuid())
+      url         String
+      secret      String
+      events      String[]
+      active      Boolean  @default(true)
+      userId      String
+      createdAt   DateTime @default(now())
+      updatedAt   DateTime @updatedAt
+
+      deliveries WebhookDelivery[]
+      user       User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+      @@index([userId])
+    }
+
+    model WebhookDelivery {
+      id            String   @id @default(cuid())
+      endpointId    String
+      event         String
+      payload       Json
+      status        WebhookStatus @default(PENDING)
+      attempts      Int      @default(0)
+      lastAttemptAt DateTime?
+      nextRetryAt   DateTime?
+      response      Json?
+      createdAt     DateTime @default(now())
+
+      endpoint WebhookEndpoint @relation(fields: [endpointId], references: [id], onDelete: Cascade)
+
+      @@index([status, nextRetryAt])
+      @@index([endpointId])
+    }
+
+    enum WebhookStatus {
+      PENDING
+      DELIVERED
+      FAILED
+      RETRYING
+    }
+
+  lib/webhooks/sender.ts: |
+    import crypto from "crypto";
+    import { prisma } from "@/lib/prisma";
+
+    const MAX_RETRIES = parseInt(process.env.WEBHOOK_MAX_RETRIES || "5");
+    const TIMEOUT_MS = parseInt(process.env.WEBHOOK_TIMEOUT_MS || "30000");
+
+    const RETRY_DELAYS = [
+      1 * 60 * 1000,
+      5 * 60 * 1000,
+      30 * 60 * 1000,
+      2 * 60 * 60 * 1000,
+      24 * 60 * 60 * 1000,
+    ];
+
+    function generateSignature(payload: string, secret: string): string {
+      const timestamp = Math.floor(Date.now() / 1000);
+      const signedPayload = `${timestamp}.${payload}`;
+      const signature = crypto
+        .createHmac("sha256", secret)
+        .update(signedPayload)
+        .digest("hex");
+      return `t=${timestamp},v1=${signature}`;
+    }
+
+    export async function sendWebhook(
+      endpoint: { url: string; secret: string },
+      event: string,
+      data: Record<string, unknown>
+    ): Promise<{ success: boolean; statusCode?: number; error?: string }> {
+      const payload = JSON.stringify({ event, data, timestamp: new Date().toISOString() });
+      const signature = generateSignature(payload, endpoint.secret);
+
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), TIMEOUT_MS);
+
+      try {
+        const response = await fetch(endpoint.url, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "X-Webhook-Signature": signature,
+            "X-Webhook-Event": event,
+          },
+          body: payload,
+          signal: controller.signal,
+        });
+
+        clearTimeout(timeoutId);
+
+        if (response.ok) {
+          return { success: true, statusCode: response.status };
+        }
+
+        return {
+          success: false,
+          statusCode: response.status,
+          error: `HTTP ${response.status}: ${response.statusText}`,
+        };
+      } catch (error) {
+        clearTimeout(timeoutId);
+        return {
+          success: false,
+          error: error instanceof Error ? error.message : "Unknown error",
+        };
+      }
+    }
+
+    export async function queueWebhook(params: {
+      userId: string;
+      event: string;
+      data: Record<string, unknown>;
+    }) {
+      const endpoints = await prisma.webhookEndpoint.findMany({
+        where: {
+          userId: params.userId,
+          active: true,
+          events: { has: params.event },
+        },
+      });
+
+      const deliveries = await Promise.all(
+        endpoints.map((endpoint) =>
+          prisma.webhookDelivery.create({
+            data: {
+              endpointId: endpoint.id,
+              event: params.event,
+              payload: params.data,
+              status: "PENDING",
+            },
+          })
+        )
+      );
+
+      return deliveries;
+    }
+
+    export async function processDelivery(deliveryId: string) {
+      const delivery = await prisma.webhookDelivery.findUnique({
+        where: { id: deliveryId },
+        include: { endpoint: true },
+      });
+
+      if (!delivery || !delivery.endpoint.active) {
+        return;
+      }
+
+      const result = await sendWebhook(
+        { url: delivery.endpoint.url, secret: delivery.endpoint.secret },
+        delivery.event,
+        delivery.payload as Record<string, unknown>
+      );
+
+      const attempts = delivery.attempts + 1;
+
+      if (result.success) {
+        await prisma.webhookDelivery.update({
+          where: { id: deliveryId },
+          data: {
+            status: "DELIVERED",
+            attempts,
+            lastAttemptAt: new Date(),
+            response: { statusCode: result.statusCode },
+          },
+        });
+      } else if (attempts >= MAX_RETRIES) {
+        await prisma.webhookDelivery.update({
+          where: { id: deliveryId },
+          data: {
+            status: "FAILED",
+            attempts,
+            lastAttemptAt: new Date(),
+            response: { error: result.error, statusCode: result.statusCode },
+          },
+        });
+      } else {
+        const nextRetryAt = new Date(Date.now() + RETRY_DELAYS[attempts - 1]);
+        await prisma.webhookDelivery.update({
+          where: { id: deliveryId },
+          data: {
+            status: "RETRYING",
+            attempts,
+            lastAttemptAt: new Date(),
+            nextRetryAt,
+            response: { error: result.error, statusCode: result.statusCode },
+          },
+        });
+      }
+
+      return result;
+    }
+
+  lib/webhooks/queue.ts: |
+    import { prisma } from "@/lib/prisma";
+    import { processDelivery } from "./sender";
+
+    export async function processWebhookQueue(batchSize: number = 100) {
+      const pendingDeliveries = await prisma.webhookDelivery.findMany({
+        where: {
+          OR: [
+            { status: "PENDING" },
+            {
+              status: "RETRYING",
+              nextRetryAt: { lte: new Date() },
+            },
+          ],
+        },
+        take: batchSize,
+        orderBy: { createdAt: "asc" },
+      });
+
+      const results = await Promise.allSettled(
+        pendingDeliveries.map((delivery) => processDelivery(delivery.id))
+      );
+
+      const succeeded = results.filter((r) => r.status === "fulfilled").length;
+      const failed = results.filter((r) => r.status === "rejected").length;
+
+      return { processed: pendingDeliveries.length, succeeded, failed };
+    }
+
+    export async function getDeliveryStats(userId: string) {
+      const [pending, delivered, failed, retrying] = await Promise.all([
+        prisma.webhookDelivery.count({
+          where: { endpoint: { userId }, status: "PENDING" },
+        }),
+        prisma.webhookDelivery.count({
+          where: { endpoint: { userId }, status: "DELIVERED" },
+        }),
+        prisma.webhookDelivery.count({
+          where: { endpoint: { userId }, status: "FAILED" },
+        }),
+        prisma.webhookDelivery.count({
+          where: { endpoint: { userId }, status: "RETRYING" },
+        }),
+      ]);
+
+      return { pending, delivered, failed, retrying };
+    }
+
+  app/api/webhooks/process/route.ts: |
+    import { NextRequest, NextResponse } from "next/server";
+    import { processWebhookQueue } from "@/lib/webhooks/queue";
+
+    export async function POST(request: NextRequest) {
+      const authHeader = request.headers.get("authorization");
+      const cronSecret = process.env.CRON_SECRET;
+
+      if (cronSecret && authHeader !== `Bearer ${cronSecret}`) {
+        return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+      }
+
+      try {
+        const result = await processWebhookQueue();
+        return NextResponse.json(result);
+      } catch (error) {
+        console.error("Webhook queue processing error:", error);
+        return NextResponse.json(
+          { error: "Processing failed" },
+          { status: 500 }
+        );
+      }
+    }
+
+edge_cases:
+  - id: endpoint-down
+    symptom: "All deliveries to endpoint failing"
+    cause: "Endpoint server is down or URL changed"
+    solution: "Implement circuit breaker pattern, notify user after multiple failures"
+
+  - id: signature-mismatch
+    symptom: "Receiver rejects webhook signature"
+    cause: "Clock skew or secret mismatch"
+    solution: "Include timestamp tolerance, verify secret in both systems"
+
+  - id: duplicate-delivery
+    symptom: "Webhook delivered multiple times"
+    cause: "Timeout occurred but request succeeded"
+    solution: "Include idempotency key in payload, implement deduplication on receiver"
+
+  - id: queue-backlog
+    symptom: "Webhooks delayed significantly"
+    cause: "Queue processing too slow"
+    solution: "Increase batch size, run processor more frequently, add parallel workers"
+
+validation:
+  manual_test:
+    - "Create webhook endpoint"
+    - "Trigger event that queues webhook"
+    - "Verify immediate delivery attempt"
+    - "Simulate failure and verify retry scheduling"
+    - "Check exponential backoff timing"
+    - "Verify delivery marked as failed after max retries"

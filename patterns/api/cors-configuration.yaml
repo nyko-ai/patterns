@@ -1,0 +1,240 @@
+id: cors-configuration
+version: "1.0.0"
+updated_at: "2026-01-31"
+author: "nyko-team"
+status: beta
+
+name: "CORS Configuration"
+description: "Cross-Origin Resource Sharing configuration for Next.js and Express"
+
+category: api
+tags:
+  - cors
+  - security
+  - headers
+  - middleware
+  - api
+
+difficulty: beginner
+time_estimate: "10-15 min"
+
+stack:
+  required:
+    - name: "next"
+      version: "^15.1.0"
+      reason: "App Router with middleware"
+
+requires: []
+
+enables: []
+
+env_vars:
+  optional:
+    - key: CORS_ALLOWED_ORIGINS
+      description: "Comma-separated list of allowed origins"
+      default: "http://localhost:3000"
+    - key: CORS_ALLOWED_METHODS
+      description: "Comma-separated list of allowed methods"
+      default: "GET,POST,PUT,DELETE,OPTIONS"
+
+external_setup: []
+
+files:
+  - path: "lib/cors.ts"
+    action: create
+    description: "CORS configuration utilities"
+    priority: 1
+
+  - path: "middleware.ts"
+    action: create
+    description: "Next.js middleware with CORS"
+    priority: 2
+
+  - path: "app/api/[...path]/route.ts"
+    action: create
+    description: "API route with CORS headers"
+    priority: 3
+
+code:
+  lib/cors.ts: |
+    import { NextRequest, NextResponse } from "next/server";
+
+    export interface CorsConfig {
+      allowedOrigins: string[];
+      allowedMethods: string[];
+      allowedHeaders: string[];
+      exposedHeaders: string[];
+      maxAge: number;
+      credentials: boolean;
+    }
+
+    const defaultConfig: CorsConfig = {
+      allowedOrigins: process.env.CORS_ALLOWED_ORIGINS?.split(",") || ["http://localhost:3000"],
+      allowedMethods: process.env.CORS_ALLOWED_METHODS?.split(",") || [
+        "GET",
+        "POST",
+        "PUT",
+        "DELETE",
+        "PATCH",
+        "OPTIONS",
+      ],
+      allowedHeaders: [
+        "Content-Type",
+        "Authorization",
+        "X-Requested-With",
+        "X-API-Key",
+        "Accept",
+      ],
+      exposedHeaders: ["X-Request-Id", "X-RateLimit-Limit", "X-RateLimit-Remaining"],
+      maxAge: 86400,
+      credentials: true,
+    };
+
+    export function getCorsHeaders(
+      request: NextRequest,
+      config: Partial<CorsConfig> = {}
+    ): Record<string, string> {
+      const finalConfig = { ...defaultConfig, ...config };
+      const origin = request.headers.get("origin");
+
+      const isAllowedOrigin =
+        finalConfig.allowedOrigins.includes("*") ||
+        (origin && finalConfig.allowedOrigins.includes(origin));
+
+      const headers: Record<string, string> = {};
+
+      if (isAllowedOrigin && origin) {
+        headers["Access-Control-Allow-Origin"] = origin;
+      } else if (finalConfig.allowedOrigins.includes("*")) {
+        headers["Access-Control-Allow-Origin"] = "*";
+      }
+
+      if (finalConfig.credentials && !finalConfig.allowedOrigins.includes("*")) {
+        headers["Access-Control-Allow-Credentials"] = "true";
+      }
+
+      headers["Access-Control-Allow-Methods"] = finalConfig.allowedMethods.join(", ");
+      headers["Access-Control-Allow-Headers"] = finalConfig.allowedHeaders.join(", ");
+      headers["Access-Control-Expose-Headers"] = finalConfig.exposedHeaders.join(", ");
+      headers["Access-Control-Max-Age"] = String(finalConfig.maxAge);
+
+      return headers;
+    }
+
+    export function handlePreflight(
+      request: NextRequest,
+      config?: Partial<CorsConfig>
+    ): NextResponse {
+      const corsHeaders = getCorsHeaders(request, config);
+      return new NextResponse(null, { status: 204, headers: corsHeaders });
+    }
+
+    export function withCors(
+      handler: (req: NextRequest) => Promise<NextResponse>,
+      config?: Partial<CorsConfig>
+    ) {
+      return async (req: NextRequest): Promise<NextResponse> => {
+        if (req.method === "OPTIONS") {
+          return handlePreflight(req, config);
+        }
+
+        const response = await handler(req);
+        const corsHeaders = getCorsHeaders(req, config);
+
+        Object.entries(corsHeaders).forEach(([key, value]) => {
+          response.headers.set(key, value);
+        });
+
+        return response;
+      };
+    }
+
+    export function createCorsMiddleware(config?: Partial<CorsConfig>) {
+      return (request: NextRequest): NextResponse | null => {
+        if (request.method === "OPTIONS") {
+          return handlePreflight(request, config);
+        }
+        return null;
+      };
+    }
+
+  middleware.ts: |
+    import { NextRequest, NextResponse } from "next/server";
+    import { getCorsHeaders, handlePreflight } from "@/lib/cors";
+
+    export function middleware(request: NextRequest) {
+      if (!request.nextUrl.pathname.startsWith("/api/")) {
+        return NextResponse.next();
+      }
+
+      if (request.method === "OPTIONS") {
+        return handlePreflight(request);
+      }
+
+      const response = NextResponse.next();
+      const corsHeaders = getCorsHeaders(request);
+
+      Object.entries(corsHeaders).forEach(([key, value]) => {
+        response.headers.set(key, value);
+      });
+
+      return response;
+    }
+
+    export const config = {
+      matcher: "/api/:path*",
+    };
+
+  app/api/[...path]/route.ts: |
+    import { NextRequest, NextResponse } from "next/server";
+    import { withCors } from "@/lib/cors";
+
+    async function handler(req: NextRequest) {
+      const path = req.nextUrl.pathname;
+
+      return NextResponse.json({
+        message: "CORS-enabled endpoint",
+        path,
+        method: req.method,
+        timestamp: new Date().toISOString(),
+      });
+    }
+
+    export const GET = withCors(handler);
+    export const POST = withCors(handler);
+    export const PUT = withCors(handler);
+    export const DELETE = withCors(handler);
+
+    export async function OPTIONS(req: NextRequest) {
+      const { handlePreflight } = await import("@/lib/cors");
+      return handlePreflight(req);
+    }
+
+edge_cases:
+  - id: credentials-with-wildcard
+    symptom: "Browser rejects response with credentials"
+    cause: "Cannot use Access-Control-Allow-Origin: * with credentials"
+    solution: "Use specific origin when credentials: true"
+
+  - id: preflight-not-cached
+    symptom: "OPTIONS request sent before every request"
+    cause: "Access-Control-Max-Age not set or too short"
+    solution: "Set maxAge to appropriate value (e.g., 86400 for 24 hours)"
+
+  - id: missing-header
+    symptom: "Request blocked due to header not allowed"
+    cause: "Custom header not in Access-Control-Allow-Headers"
+    solution: "Add custom headers to allowedHeaders array"
+
+  - id: subdomain-mismatch
+    symptom: "CORS error for subdomain requests"
+    cause: "Subdomains treated as different origins"
+    solution: "Add all subdomains to allowedOrigins or use pattern matching"
+
+validation:
+  manual_test:
+    - "Make cross-origin request from browser"
+    - "Verify preflight OPTIONS request handled"
+    - "Check CORS headers in response"
+    - "Test with credentials: include"
+    - "Verify blocked origin is rejected"

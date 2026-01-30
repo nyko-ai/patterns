@@ -1,0 +1,225 @@
+id: rate-limiting-express
+version: "1.0.0"
+updated_at: "2026-01-31"
+author: "nyko-team"
+status: beta
+
+name: "Rate Limiting with Express"
+description: "API rate limiting using express-rate-limit for Express and Next.js API routes"
+
+category: api
+tags:
+  - express
+  - rate-limit
+  - api
+  - security
+  - throttling
+
+difficulty: beginner
+time_estimate: "15-20 min"
+
+stack:
+  required:
+    - name: "express-rate-limit"
+      version: "^8.2.1"
+      reason: "Rate limiting middleware"
+    - name: "express"
+      version: "^5.1.0"
+      reason: "Express server (optional for Next.js)"
+
+requires: []
+
+enables: []
+
+env_vars:
+  optional:
+    - key: RATE_LIMIT_WINDOW_MS
+      description: "Time window in milliseconds"
+      default: "60000"
+    - key: RATE_LIMIT_MAX_REQUESTS
+      description: "Max requests per window"
+      default: "100"
+
+external_setup: []
+
+files:
+  - path: "lib/rate-limit.ts"
+    action: create
+    description: "Rate limiter configuration"
+    priority: 1
+
+  - path: "app/api/middleware.ts"
+    action: create
+    description: "Next.js API middleware with rate limiting"
+    priority: 2
+
+  - path: "middleware.ts"
+    action: create
+    description: "Next.js edge middleware for rate limiting"
+    priority: 3
+
+code:
+  lib/rate-limit.ts: |
+    import rateLimit from "express-rate-limit";
+
+    const WINDOW_MS = parseInt(process.env.RATE_LIMIT_WINDOW_MS || "60000");
+    const MAX_REQUESTS = parseInt(process.env.RATE_LIMIT_MAX_REQUESTS || "100");
+
+    export const apiLimiter = rateLimit({
+      windowMs: WINDOW_MS,
+      max: MAX_REQUESTS,
+      standardHeaders: "draft-7",
+      legacyHeaders: false,
+      message: {
+        error: "Too many requests",
+        message: "Please try again later",
+        retryAfter: Math.ceil(WINDOW_MS / 1000),
+      },
+      keyGenerator: (req) => {
+        return req.headers["x-forwarded-for"]?.toString().split(",")[0] ||
+               req.headers["x-real-ip"]?.toString() ||
+               req.ip ||
+               "unknown";
+      },
+      skip: (req) => {
+        const whitelist = process.env.RATE_LIMIT_WHITELIST?.split(",") || [];
+        const ip = req.headers["x-forwarded-for"]?.toString().split(",")[0] || req.ip;
+        return whitelist.includes(ip || "");
+      },
+    });
+
+    export const strictLimiter = rateLimit({
+      windowMs: 15 * 60 * 1000,
+      max: 5,
+      standardHeaders: "draft-7",
+      legacyHeaders: false,
+      message: { error: "Too many attempts", message: "Account locked temporarily" },
+    });
+
+    export const createCustomLimiter = (options: {
+      windowMs?: number;
+      max?: number;
+      message?: string;
+    }) => {
+      return rateLimit({
+        windowMs: options.windowMs || 60000,
+        max: options.max || 100,
+        standardHeaders: "draft-7",
+        legacyHeaders: false,
+        message: { error: options.message || "Rate limit exceeded" },
+      });
+    };
+
+  app/api/middleware.ts: |
+    import { NextRequest, NextResponse } from "next/server";
+
+    const rateLimitMap = new Map<string, { count: number; resetTime: number }>();
+    const WINDOW_MS = 60 * 1000;
+    const MAX_REQUESTS = 100;
+
+    export function withRateLimit(
+      handler: (req: NextRequest) => Promise<NextResponse>,
+      options?: { windowMs?: number; max?: number }
+    ) {
+      const windowMs = options?.windowMs || WINDOW_MS;
+      const max = options?.max || MAX_REQUESTS;
+
+      return async (req: NextRequest): Promise<NextResponse> => {
+        const ip = req.headers.get("x-forwarded-for")?.split(",")[0] ||
+                   req.headers.get("x-real-ip") ||
+                   "unknown";
+        
+        const now = Date.now();
+        const record = rateLimitMap.get(ip);
+
+        if (!record || now > record.resetTime) {
+          rateLimitMap.set(ip, { count: 1, resetTime: now + windowMs });
+        } else if (record.count >= max) {
+          return NextResponse.json(
+            { error: "Too many requests", retryAfter: Math.ceil((record.resetTime - now) / 1000) },
+            {
+              status: 429,
+              headers: {
+                "Retry-After": String(Math.ceil((record.resetTime - now) / 1000)),
+                "X-RateLimit-Limit": String(max),
+                "X-RateLimit-Remaining": "0",
+                "X-RateLimit-Reset": String(record.resetTime),
+              },
+            }
+          );
+        } else {
+          record.count++;
+        }
+
+        const response = await handler(req);
+        const remaining = Math.max(0, max - (rateLimitMap.get(ip)?.count || 0));
+        
+        response.headers.set("X-RateLimit-Limit", String(max));
+        response.headers.set("X-RateLimit-Remaining", String(remaining));
+        
+        return response;
+      };
+    }
+
+  middleware.ts: |
+    import { NextRequest, NextResponse } from "next/server";
+
+    const rateLimit = new Map<string, { count: number; resetTime: number }>();
+
+    export function middleware(request: NextRequest) {
+      if (!request.nextUrl.pathname.startsWith("/api/")) {
+        return NextResponse.next();
+      }
+
+      const ip = request.headers.get("x-forwarded-for")?.split(",")[0] ||
+                 request.headers.get("x-real-ip") ||
+                 "127.0.0.1";
+
+      const now = Date.now();
+      const windowMs = 60 * 1000;
+      const max = 100;
+
+      const record = rateLimit.get(ip);
+
+      if (!record || now > record.resetTime) {
+        rateLimit.set(ip, { count: 1, resetTime: now + windowMs });
+        return NextResponse.next();
+      }
+
+      if (record.count >= max) {
+        return NextResponse.json(
+          { error: "Too many requests" },
+          { status: 429, headers: { "Retry-After": "60" } }
+        );
+      }
+
+      record.count++;
+      return NextResponse.next();
+    }
+
+    export const config = {
+      matcher: "/api/:path*",
+    };
+
+edge_cases:
+  - id: ip-behind-proxy
+    symptom: "All requests show same IP"
+    cause: "Running behind reverse proxy without forwarded headers"
+    solution: "Configure proxy to send X-Forwarded-For header, use trustProxy option"
+
+  - id: memory-leak-production
+    symptom: "Memory usage grows over time"
+    cause: "In-memory store not cleaned up"
+    solution: "Use Redis store for production: rate-limit-redis package"
+
+  - id: distributed-bypass
+    symptom: "Rate limit bypassed with multiple servers"
+    cause: "Each server has separate in-memory store"
+    solution: "Use centralized store like Redis or Upstash"
+
+validation:
+  manual_test:
+    - "Send 100 requests within 1 minute"
+    - "Verify 429 response after limit exceeded"
+    - "Check rate limit headers in response"
+    - "Wait for window reset and verify access restored"

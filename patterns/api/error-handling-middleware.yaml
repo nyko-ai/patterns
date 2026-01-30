@@ -1,0 +1,349 @@
+id: error-handling-middleware
+version: "1.0.0"
+updated_at: "2026-01-31"
+author: "nyko-team"
+status: beta
+
+name: "Error Handling Middleware"
+description: "Standardized error handling and formatting for API responses"
+
+category: api
+tags:
+  - error-handling
+  - middleware
+  - api
+  - logging
+  - monitoring
+
+difficulty: beginner
+time_estimate: "15-20 min"
+
+stack:
+  required:
+    - name: "next"
+      version: "^15.1.0"
+      reason: "App Router API routes"
+
+requires: []
+
+enables: []
+
+env_vars:
+  optional:
+    - key: NODE_ENV
+      description: "Environment for error detail exposure"
+      default: "development"
+
+external_setup: []
+
+files:
+  - path: "lib/errors.ts"
+    action: create
+    description: "Custom error classes"
+    priority: 1
+
+  - path: "lib/middleware/error-handler.ts"
+    action: create
+    description: "Error handling middleware"
+    priority: 2
+
+  - path: "app/api/example/route.ts"
+    action: create
+    description: "Example with error handling"
+    priority: 3
+
+code:
+  lib/errors.ts: |
+    export class AppError extends Error {
+      public readonly statusCode: number;
+      public readonly code: string;
+      public readonly isOperational: boolean;
+      public readonly details?: Record<string, unknown>;
+
+      constructor(params: {
+        message: string;
+        statusCode?: number;
+        code?: string;
+        isOperational?: boolean;
+        details?: Record<string, unknown>;
+      }) {
+        super(params.message);
+        this.statusCode = params.statusCode || 500;
+        this.code = params.code || "INTERNAL_ERROR";
+        this.isOperational = params.isOperational ?? true;
+        this.details = params.details;
+
+        Error.captureStackTrace(this, this.constructor);
+      }
+    }
+
+    export class BadRequestError extends AppError {
+      constructor(message: string, details?: Record<string, unknown>) {
+        super({
+          message,
+          statusCode: 400,
+          code: "BAD_REQUEST",
+          details,
+        });
+      }
+    }
+
+    export class UnauthorizedError extends AppError {
+      constructor(message: string = "Authentication required") {
+        super({
+          message,
+          statusCode: 401,
+          code: "UNAUTHORIZED",
+        });
+      }
+    }
+
+    export class ForbiddenError extends AppError {
+      constructor(message: string = "Access denied") {
+        super({
+          message,
+          statusCode: 403,
+          code: "FORBIDDEN",
+        });
+      }
+    }
+
+    export class NotFoundError extends AppError {
+      constructor(resource: string = "Resource") {
+        super({
+          message: `${resource} not found`,
+          statusCode: 404,
+          code: "NOT_FOUND",
+        });
+      }
+    }
+
+    export class ConflictError extends AppError {
+      constructor(message: string) {
+        super({
+          message,
+          statusCode: 409,
+          code: "CONFLICT",
+        });
+      }
+    }
+
+    export class ValidationError extends AppError {
+      constructor(errors: Array<{ path: string; message: string }>) {
+        super({
+          message: "Validation failed",
+          statusCode: 400,
+          code: "VALIDATION_ERROR",
+          details: { errors },
+        });
+      }
+    }
+
+    export class RateLimitError extends AppError {
+      constructor(retryAfter: number) {
+        super({
+          message: "Too many requests",
+          statusCode: 429,
+          code: "RATE_LIMITED",
+          details: { retryAfter },
+        });
+      }
+    }
+
+    export class ServiceUnavailableError extends AppError {
+      constructor(service: string) {
+        super({
+          message: `${service} is temporarily unavailable`,
+          statusCode: 503,
+          code: "SERVICE_UNAVAILABLE",
+          isOperational: false,
+        });
+      }
+    }
+
+  lib/middleware/error-handler.ts: |
+    import { NextRequest, NextResponse } from "next/server";
+    import { AppError } from "@/lib/errors";
+    import { ZodError } from "zod";
+
+    interface ErrorResponse {
+      error: {
+        message: string;
+        code: string;
+        statusCode: number;
+        details?: Record<string, unknown>;
+        stack?: string;
+        requestId?: string;
+      };
+    }
+
+    function generateRequestId(): string {
+      return `req_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 9)}`;
+    }
+
+    function formatError(
+      error: unknown,
+      requestId: string,
+      includeStack: boolean
+    ): ErrorResponse {
+      if (error instanceof AppError) {
+        return {
+          error: {
+            message: error.message,
+            code: error.code,
+            statusCode: error.statusCode,
+            details: error.details,
+            stack: includeStack ? error.stack : undefined,
+            requestId,
+          },
+        };
+      }
+
+      if (error instanceof ZodError) {
+        return {
+          error: {
+            message: "Validation failed",
+            code: "VALIDATION_ERROR",
+            statusCode: 400,
+            details: {
+              errors: error.errors.map((e) => ({
+                path: e.path.join("."),
+                message: e.message,
+              })),
+            },
+            requestId,
+          },
+        };
+      }
+
+      const message = error instanceof Error ? error.message : "An unexpected error occurred";
+      const stack = error instanceof Error ? error.stack : undefined;
+
+      return {
+        error: {
+          message: process.env.NODE_ENV === "production" ? "Internal server error" : message,
+          code: "INTERNAL_ERROR",
+          statusCode: 500,
+          stack: includeStack ? stack : undefined,
+          requestId,
+        },
+      };
+    }
+
+    export function withErrorHandler(
+      handler: (req: NextRequest) => Promise<NextResponse>
+    ) {
+      return async (req: NextRequest): Promise<NextResponse> => {
+        const requestId = generateRequestId();
+        const startTime = Date.now();
+
+        try {
+          const response = await handler(req);
+          response.headers.set("X-Request-Id", requestId);
+          return response;
+        } catch (error) {
+          const duration = Date.now() - startTime;
+          const includeStack = process.env.NODE_ENV !== "production";
+          const formatted = formatError(error, requestId, includeStack);
+
+          console.error({
+            requestId,
+            method: req.method,
+            url: req.url,
+            error: formatted.error,
+            duration,
+            timestamp: new Date().toISOString(),
+          });
+
+          return NextResponse.json(formatted, {
+            status: formatted.error.statusCode,
+            headers: {
+              "X-Request-Id": requestId,
+            },
+          });
+        }
+      };
+    }
+
+    export function createErrorResponse(
+      error: AppError | Error,
+      requestId?: string
+    ): NextResponse {
+      const id = requestId || generateRequestId();
+      const includeStack = process.env.NODE_ENV !== "production";
+      const formatted = formatError(error, id, includeStack);
+
+      return NextResponse.json(formatted, {
+        status: formatted.error.statusCode,
+        headers: { "X-Request-Id": id },
+      });
+    }
+
+  app/api/example/route.ts: |
+    import { NextRequest, NextResponse } from "next/server";
+    import { withErrorHandler, createErrorResponse } from "@/lib/middleware/error-handler";
+    import {
+      NotFoundError,
+      BadRequestError,
+      UnauthorizedError,
+    } from "@/lib/errors";
+
+    export const GET = withErrorHandler(async (req: NextRequest) => {
+      const id = req.nextUrl.searchParams.get("id");
+
+      if (!id) {
+        throw new BadRequestError("ID parameter is required");
+      }
+
+      const item = null;
+
+      if (!item) {
+        throw new NotFoundError("Item");
+      }
+
+      return NextResponse.json({ item });
+    });
+
+    export const POST = withErrorHandler(async (req: NextRequest) => {
+      const authHeader = req.headers.get("authorization");
+
+      if (!authHeader) {
+        throw new UnauthorizedError();
+      }
+
+      const body = await req.json();
+
+      return NextResponse.json({
+        success: true,
+        data: body,
+      });
+    });
+
+edge_cases:
+  - id: stack-trace-leak
+    symptom: "Stack traces visible in production"
+    cause: "NODE_ENV not set to production"
+    solution: "Set NODE_ENV=production in production environment"
+
+  - id: unhandled-rejection
+    symptom: "Promise rejection crashes server"
+    cause: "Async error not caught by middleware"
+    solution: "Ensure all async operations are awaited within handler"
+
+  - id: circular-json
+    symptom: "JSON.stringify fails on error details"
+    cause: "Circular references in error object"
+    solution: "Sanitize error details before including in response"
+
+  - id: missing-request-id
+    symptom: "Cannot correlate logs with requests"
+    cause: "Request ID not propagated"
+    solution: "Include X-Request-Id header in all responses and logs"
+
+validation:
+  manual_test:
+    - "Trigger BadRequestError and verify 400 response"
+    - "Trigger NotFoundError and verify 404 response"
+    - "Verify stack traces hidden in production"
+    - "Check X-Request-Id header in response"
+    - "Verify error logged with request context"
