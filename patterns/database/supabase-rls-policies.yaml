@@ -21,7 +21,7 @@ time_estimate: "15-20 min"
 stack:
   required:
     - name: "@supabase/supabase-js"
-      version: "^2.49.0"
+      version: "^2.90.0"
       reason: "Supabase client for authentication context"
 
 requires:

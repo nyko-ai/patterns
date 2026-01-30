@@ -24,10 +24,10 @@ stack:
       version: "^15.1.0"
       reason: "App Router with server actions"
     - name: "@supabase/supabase-js"
-      version: "^2.49.0"
+      version: "^2.90.0"
       reason: "Supabase client library"
     - name: "@supabase/ssr"
-      version: "^0.5.2"
+      version: "^0.8.0"
       reason: "SSR utilities for cookie-based auth"
 
 requires:
