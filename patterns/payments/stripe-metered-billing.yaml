@@ -1,0 +1,657 @@
+id: stripe-metered-billing
+version: "1.0.0"
+updated_at: "2026-01-31"
+author: "nyko-team"
+status: beta
+
+name: "Stripe Metered/Usage-Based Billing"
+description: "Implement usage-based billing with Stripe metered subscriptions"
+
+category: payments
+tags:
+  - stripe
+  - metered
+  - usage-based
+  - billing
+  - subscriptions
+
+difficulty: advanced
+time_estimate: "35-45 min"
+
+stack:
+  required:
+    - name: "next"
+      version: "^15.1.0"
+      reason: "App Router"
+    - name: "stripe"
+      version: "^20.3.0"
+      reason: "Stripe SDK with metered billing support"
+
+requires:
+  - stripe-checkout-session
+  - stripe-webhook-handler
+
+enables: []
+
+env_vars:
+  required:
+    - key: STRIPE_SECRET_KEY
+      description: "Stripe secret API key"
+      format: "sk_test_... or sk_live_..."
+      where_to_find: "Stripe Dashboard > Developers > API keys"
+
+external_setup:
+  - service: "Stripe"
+    url: "https://dashboard.stripe.com"
+    steps:
+      - "Create a product for your metered service"
+      - "Add a price with 'Recurring' and 'Usage-based' pricing model"
+      - "Choose 'Per unit' or 'Graduated' pricing tier"
+      - "Set the billing period (monthly/yearly)"
+      - "Enable 'Report usage at interval' or 'Report usage in real-time'"
+      - "Copy the Price ID for use in your app"
+
+files:
+  - path: "lib/stripe/metered-billing.ts"
+    action: create
+    description: "Metered billing utilities"
+    priority: 1
+
+  - path: "app/api/usage/report/route.ts"
+    action: create
+    description: "Report usage endpoint"
+    priority: 2
+
+  - path: "app/api/usage/summary/route.ts"
+    action: create
+    description: "Usage summary endpoint"
+    priority: 3
+
+  - path: "lib/usage-tracker.ts"
+    action: create
+    description: "Usage tracking middleware"
+    priority: 4
+
+code:
+  lib/stripe/metered-billing.ts: |
+    import Stripe from "stripe";
+
+    let stripeInstance: Stripe | null = null;
+
+    function getStripe(): Stripe {
+      if (!process.env.STRIPE_SECRET_KEY) {
+        throw new Error("Missing STRIPE_SECRET_KEY");
+      }
+
+      if (!stripeInstance) {
+        stripeInstance = new Stripe(process.env.STRIPE_SECRET_KEY, {
+          apiVersion: "2025-01-28.clover",
+          typescript: true,
+        });
+      }
+
+      return stripeInstance;
+    }
+
+    /**
+     * Report usage for a metered subscription
+     */
+    export async function reportUsage(
+      subscriptionItemId: string,
+      quantity: number,
+      options?: {
+        timestamp?: number;
+        action?: "increment" | "set";
+        idempotencyKey?: string;
+      }
+    ): Promise<Stripe.UsageRecord> {
+      const stripe = getStripe();
+
+      const usageRecord = await stripe.subscriptionItems.createUsageRecord(
+        subscriptionItemId,
+        {
+          quantity,
+          timestamp: options?.timestamp || Math.floor(Date.now() / 1000),
+          action: options?.action || "increment",
+        },
+        {
+          idempotencyKey: options?.idempotencyKey,
+        }
+      );
+
+      return usageRecord;
+    }
+
+    /**
+     * Report usage by subscription ID (finds the metered item)
+     */
+    export async function reportUsageBySubscription(
+      subscriptionId: string,
+      meteredPriceId: string,
+      quantity: number,
+      options?: {
+        timestamp?: number;
+        action?: "increment" | "set";
+        idempotencyKey?: string;
+      }
+    ): Promise<Stripe.UsageRecord> {
+      const stripe = getStripe();
+
+      // Get subscription and find the metered item
+      const subscription = await stripe.subscriptions.retrieve(subscriptionId);
+
+      const meteredItem = subscription.items.data.find(
+        (item) => item.price.id === meteredPriceId
+      );
+
+      if (!meteredItem) {
+        throw new Error(`No metered item found for price ${meteredPriceId}`);
+      }
+
+      return reportUsage(meteredItem.id, quantity, options);
+    }
+
+    /**
+     * Get usage records for a subscription item
+     */
+    export async function getUsageRecords(
+      subscriptionItemId: string,
+      options?: {
+        startingAfter?: string;
+        endingBefore?: string;
+        limit?: number;
+      }
+    ): Promise<Stripe.ApiList<Stripe.UsageRecordSummary>> {
+      const stripe = getStripe();
+
+      return stripe.subscriptionItems.listUsageRecordSummaries(
+        subscriptionItemId,
+        {
+          limit: options?.limit || 100,
+          starting_after: options?.startingAfter,
+          ending_before: options?.endingBefore,
+        }
+      );
+    }
+
+    /**
+     * Get current period usage for a subscription
+     */
+    export async function getCurrentPeriodUsage(
+      subscriptionId: string,
+      meteredPriceId: string
+    ): Promise<{
+      totalUsage: number;
+      periodStart: Date;
+      periodEnd: Date;
+      records: Array<{
+        quantity: number;
+        timestamp: Date;
+      }>;
+    }> {
+      const stripe = getStripe();
+
+      const subscription = await stripe.subscriptions.retrieve(subscriptionId);
+
+      const meteredItem = subscription.items.data.find(
+        (item) => item.price.id === meteredPriceId
+      );
+
+      if (!meteredItem) {
+        throw new Error(`No metered item found for price ${meteredPriceId}`);
+      }
+
+      const summaries = await getUsageRecords(meteredItem.id);
+
+      // Filter to current billing period
+      const periodStart = subscription.current_period_start;
+      const periodEnd = subscription.current_period_end;
+
+      let totalUsage = 0;
+      const records: Array<{ quantity: number; timestamp: Date }> = [];
+
+      for (const summary of summaries.data) {
+        if (summary.period.start >= periodStart && summary.period.end <= periodEnd) {
+          totalUsage += summary.total_usage;
+          records.push({
+            quantity: summary.total_usage,
+            timestamp: new Date(summary.period.start * 1000),
+          });
+        }
+      }
+
+      return {
+        totalUsage,
+        periodStart: new Date(periodStart * 1000),
+        periodEnd: new Date(periodEnd * 1000),
+        records,
+      };
+    }
+
+    /**
+     * Get upcoming invoice with metered usage
+     */
+    export async function getUpcomingMeteredInvoice(
+      customerId: string,
+      subscriptionId: string
+    ): Promise<{
+      total: number;
+      usageLineItems: Array<{
+        description: string;
+        quantity: number;
+        unitAmount: number;
+        amount: number;
+      }>;
+    }> {
+      const stripe = getStripe();
+
+      const upcomingInvoice = await stripe.invoices.retrieveUpcoming({
+        customer: customerId,
+        subscription: subscriptionId,
+      });
+
+      const usageLineItems = upcomingInvoice.lines.data
+        .filter((line) => line.price?.recurring?.usage_type === "metered")
+        .map((line) => ({
+          description: line.description || "",
+          quantity: line.quantity || 0,
+          unitAmount: line.price?.unit_amount || 0,
+          amount: line.amount,
+        }));
+
+      return {
+        total: upcomingInvoice.total,
+        usageLineItems,
+      };
+    }
+
+    /**
+     * Create a subscription with metered billing
+     */
+    export async function createMeteredSubscription(
+      customerId: string,
+      meteredPriceId: string,
+      options?: {
+        basePriceId?: string; // Optional flat fee
+        metadata?: Record<string, string>;
+      }
+    ): Promise<Stripe.Subscription> {
+      const stripe = getStripe();
+
+      const items: Stripe.SubscriptionCreateParams.Item[] = [
+        { price: meteredPriceId },
+      ];
+
+      if (options?.basePriceId) {
+        items.push({ price: options.basePriceId });
+      }
+
+      return stripe.subscriptions.create({
+        customer: customerId,
+        items,
+        metadata: options?.metadata,
+      });
+    }
+
+    /**
+     * Usage thresholds and alerts configuration
+     */
+    export interface UsageThreshold {
+      quantity: number;
+      label: string;
+      alertEmail?: boolean;
+    }
+
+    export function checkUsageThresholds(
+      currentUsage: number,
+      thresholds: UsageThreshold[]
+    ): UsageThreshold[] {
+      return thresholds
+        .filter((threshold) => currentUsage >= threshold.quantity)
+        .sort((a, b) => b.quantity - a.quantity);
+    }
+
+  app/api/usage/report/route.ts: |
+    import { NextRequest, NextResponse } from "next/server";
+    import {
+      reportUsage,
+      reportUsageBySubscription,
+    } from "@/lib/stripe/metered-billing";
+
+    export async function POST(request: NextRequest) {
+      try {
+        const body = await request.json();
+        const {
+          subscriptionItemId,
+          subscriptionId,
+          meteredPriceId,
+          quantity,
+          action = "increment",
+          idempotencyKey,
+        } = body;
+
+        if (!quantity || quantity < 0) {
+          return NextResponse.json(
+            { error: "Invalid quantity" },
+            { status: 400 }
+          );
+        }
+
+        let usageRecord;
+
+        if (subscriptionItemId) {
+          // Direct subscription item ID provided
+          usageRecord = await reportUsage(subscriptionItemId, quantity, {
+            action,
+            idempotencyKey,
+          });
+        } else if (subscriptionId && meteredPriceId) {
+          // Lookup by subscription and price
+          usageRecord = await reportUsageBySubscription(
+            subscriptionId,
+            meteredPriceId,
+            quantity,
+            { action, idempotencyKey }
+          );
+        } else {
+          return NextResponse.json(
+            { error: "Provide subscriptionItemId OR (subscriptionId + meteredPriceId)" },
+            { status: 400 }
+          );
+        }
+
+        return NextResponse.json({
+          success: true,
+          usageRecord: {
+            id: usageRecord.id,
+            quantity: usageRecord.quantity,
+            timestamp: new Date(usageRecord.timestamp * 1000).toISOString(),
+          },
+        });
+      } catch (error) {
+        console.error("Report usage error:", error);
+        return NextResponse.json(
+          { error: error instanceof Error ? error.message : "Failed to report usage" },
+          { status: 500 }
+        );
+      }
+    }
+
+  app/api/usage/summary/route.ts: |
+    import { NextRequest, NextResponse } from "next/server";
+    import {
+      getCurrentPeriodUsage,
+      getUpcomingMeteredInvoice,
+    } from "@/lib/stripe/metered-billing";
+
+    export async function GET(request: NextRequest) {
+      try {
+        const { searchParams } = new URL(request.url);
+        const subscriptionId = searchParams.get("subscriptionId");
+        const customerId = searchParams.get("customerId");
+        const meteredPriceId = searchParams.get("meteredPriceId");
+
+        if (!subscriptionId || !meteredPriceId) {
+          return NextResponse.json(
+            { error: "subscriptionId and meteredPriceId are required" },
+            { status: 400 }
+          );
+        }
+
+        const usage = await getCurrentPeriodUsage(subscriptionId, meteredPriceId);
+
+        let upcomingInvoice = null;
+        if (customerId) {
+          upcomingInvoice = await getUpcomingMeteredInvoice(
+            customerId,
+            subscriptionId
+          );
+        }
+
+        return NextResponse.json({
+          usage: {
+            total: usage.totalUsage,
+            periodStart: usage.periodStart.toISOString(),
+            periodEnd: usage.periodEnd.toISOString(),
+          },
+          upcomingInvoice: upcomingInvoice
+            ? {
+                total: upcomingInvoice.total / 100,
+                usageLineItems: upcomingInvoice.usageLineItems.map((item) => ({
+                  ...item,
+                  unitAmount: item.unitAmount / 100,
+                  amount: item.amount / 100,
+                })),
+              }
+            : null,
+        });
+      } catch (error) {
+        console.error("Usage summary error:", error);
+        return NextResponse.json(
+          { error: error instanceof Error ? error.message : "Failed to get summary" },
+          { status: 500 }
+        );
+      }
+    }
+
+  lib/usage-tracker.ts: |
+    import { reportUsageBySubscription } from "@/lib/stripe/metered-billing";
+
+    /**
+     * In-memory usage buffer for batching
+     * In production, use Redis or a queue
+     */
+    const usageBuffer = new Map<
+      string,
+      {
+        subscriptionId: string;
+        meteredPriceId: string;
+        quantity: number;
+        lastFlushed: number;
+      }
+    >();
+
+    const FLUSH_INTERVAL = 60000; // 1 minute
+    const FLUSH_THRESHOLD = 100; // Flush after 100 units
+
+    /**
+     * Track usage with batching
+     */
+    export async function trackUsage(
+      subscriptionId: string,
+      meteredPriceId: string,
+      quantity: number = 1
+    ): Promise<void> {
+      const key = `${subscriptionId}:${meteredPriceId}`;
+      const now = Date.now();
+
+      const current = usageBuffer.get(key) || {
+        subscriptionId,
+        meteredPriceId,
+        quantity: 0,
+        lastFlushed: now,
+      };
+
+      current.quantity += quantity;
+
+      // Check if we should flush
+      const shouldFlush =
+        current.quantity >= FLUSH_THRESHOLD ||
+        now - current.lastFlushed >= FLUSH_INTERVAL;
+
+      if (shouldFlush) {
+        await flushUsage(key, current);
+      } else {
+        usageBuffer.set(key, current);
+      }
+    }
+
+    async function flushUsage(
+      key: string,
+      data: {
+        subscriptionId: string;
+        meteredPriceId: string;
+        quantity: number;
+      }
+    ): Promise<void> {
+      if (data.quantity === 0) return;
+
+      try {
+        await reportUsageBySubscription(
+          data.subscriptionId,
+          data.meteredPriceId,
+          data.quantity,
+          {
+            idempotencyKey: `${key}:${Date.now()}`,
+          }
+        );
+
+        // Reset buffer
+        usageBuffer.set(key, {
+          ...data,
+          quantity: 0,
+          lastFlushed: Date.now(),
+        });
+      } catch (error) {
+        console.error("Failed to flush usage:", error);
+        // Keep in buffer for retry
+      }
+    }
+
+    /**
+     * Flush all pending usage (call on shutdown)
+     */
+    export async function flushAllUsage(): Promise<void> {
+      const promises = Array.from(usageBuffer.entries()).map(([key, data]) =>
+        flushUsage(key, data)
+      );
+
+      await Promise.allSettled(promises);
+    }
+
+    /**
+     * Usage tracking middleware for API routes
+     */
+    export function createUsageMiddleware(
+      getSubscriptionInfo: (
+        request: Request
+      ) => Promise<{ subscriptionId: string; meteredPriceId: string } | null>,
+      getUsageAmount?: (request: Request) => number
+    ) {
+      return async function usageMiddleware(
+        request: Request,
+        handler: () => Promise<Response>
+      ): Promise<Response> {
+        const response = await handler();
+
+        // Only track on successful requests
+        if (response.ok) {
+          try {
+            const subscriptionInfo = await getSubscriptionInfo(request);
+            if (subscriptionInfo) {
+              const amount = getUsageAmount?.(request) || 1;
+              await trackUsage(
+                subscriptionInfo.subscriptionId,
+                subscriptionInfo.meteredPriceId,
+                amount
+              );
+            }
+          } catch (error) {
+            console.error("Usage tracking error:", error);
+            // Don't fail the request
+          }
+        }
+
+        return response;
+      };
+    }
+
+    /**
+     * Example: Track API calls
+     */
+    export async function trackApiCall(
+      userId: string,
+      subscriptionId: string,
+      meteredPriceId: string
+    ): Promise<void> {
+      await trackUsage(subscriptionId, meteredPriceId, 1);
+    }
+
+    /**
+     * Example: Track storage usage (in MB)
+     */
+    export async function trackStorageUsage(
+      subscriptionId: string,
+      meteredPriceId: string,
+      megabytes: number
+    ): Promise<void> {
+      await trackUsage(subscriptionId, meteredPriceId, Math.ceil(megabytes));
+    }
+
+    /**
+     * Example: Track compute time (in seconds)
+     */
+    export async function trackComputeTime(
+      subscriptionId: string,
+      meteredPriceId: string,
+      seconds: number
+    ): Promise<void> {
+      // Round up to nearest second
+      await trackUsage(subscriptionId, meteredPriceId, Math.ceil(seconds));
+    }
+
+edge_cases:
+  - id: duplicate-usage-records
+    symptom: "Usage counted multiple times"
+    cause: "Request retries without idempotency"
+    solution: |
+      Always use idempotency keys:
+
+      await reportUsage(subscriptionItemId, quantity, {
+        idempotencyKey: `${userId}:${requestId}:${timestamp}`,
+      });
+
+      Stripe will ignore duplicate requests with the same key.
+
+  - id: usage-not-appearing
+    symptom: "Reported usage not showing on invoice"
+    cause: "Usage reported after billing period closed"
+    solution: |
+      Report usage in real-time or use timestamps:
+
+      await reportUsage(subscriptionItemId, quantity, {
+        timestamp: originalEventTimestamp, // Unix timestamp
+      });
+
+      Check that timestamp is within current billing period.
+
+  - id: exceeding-usage-limits
+    symptom: "Want to cap usage at a certain amount"
+    cause: "Stripe doesn't have built-in usage limits"
+    solution: |
+      Implement your own usage caps:
+
+      const usage = await getCurrentPeriodUsage(subId, priceId);
+      const MONTHLY_LIMIT = 10000;
+
+      if (usage.totalUsage >= MONTHLY_LIMIT) {
+        throw new Error("Usage limit exceeded");
+      }
+
+  - id: zero-usage-invoice
+    symptom: "Customer billed $0 for metered subscription"
+    cause: "No usage reported during billing period"
+    solution: |
+      This is normal for pure metered billing.
+      Consider a minimum charge using aggregate_usage: "max":
+
+      Or add a base fee (flat-rate price) to the subscription.
+
+validation:
+  manual_test:
+    - "Create a metered price in Stripe Dashboard"
+    - "Create a subscription with the metered price"
+    - "Report usage via the API"
+    - "Check usage in Stripe Dashboard > Subscriptions"
+    - "View upcoming invoice to see usage charges"
+    - "Wait for billing cycle and verify invoice"

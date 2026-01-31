@@ -1,0 +1,673 @@
+id: stripe-connect
+version: "1.0.0"
+updated_at: "2026-01-31"
+author: "nyko-team"
+status: beta
+
+name: "Stripe Connect Marketplace"
+description: "Build a marketplace with Stripe Connect for multi-party payments"
+
+category: payments
+tags:
+  - stripe
+  - connect
+  - marketplace
+  - payouts
+  - platform
+
+difficulty: advanced
+time_estimate: "45-60 min"
+
+stack:
+  required:
+    - name: "next"
+      version: "^15.1.0"
+      reason: "App Router"
+    - name: "stripe"
+      version: "^20.3.0"
+      reason: "Stripe SDK with Connect support"
+
+requires:
+  - stripe-webhook-handler
+
+enables: []
+
+env_vars:
+  required:
+    - key: STRIPE_SECRET_KEY
+      description: "Stripe platform secret key"
+      format: "sk_test_... or sk_live_..."
+      where_to_find: "Stripe Dashboard > Developers > API keys"
+    - key: STRIPE_CONNECT_CLIENT_ID
+      description: "Stripe Connect OAuth client ID"
+      format: "ca_..."
+      where_to_find: "Stripe Dashboard > Settings > Connect settings"
+
+external_setup:
+  - service: "Stripe Connect"
+    url: "https://dashboard.stripe.com/settings/connect"
+    steps:
+      - "Enable Connect in Stripe Dashboard"
+      - "Choose your platform type (marketplace, SaaS platform, etc.)"
+      - "Configure branding in Connect settings"
+      - "Get the Connect client ID (ca_...)"
+      - "Set OAuth redirect URI to your callback URL"
+      - "Configure payout schedule and requirements"
+      - "Set up Connect webhooks for account events"
+
+files:
+  - path: "lib/stripe/connect.ts"
+    action: create
+    description: "Stripe Connect utilities"
+    priority: 1
+
+  - path: "app/api/connect/onboard/route.ts"
+    action: create
+    description: "Start seller onboarding"
+    priority: 2
+
+  - path: "app/api/connect/return/route.ts"
+    action: create
+    description: "Handle onboarding return"
+    priority: 3
+
+  - path: "app/api/connect/payment/route.ts"
+    action: create
+    description: "Create marketplace payment"
+    priority: 4
+
+  - path: "app/api/connect/payout/route.ts"
+    action: create
+    description: "Manage payouts"
+    priority: 5
+
+code:
+  lib/stripe/connect.ts: |
+    import Stripe from "stripe";
+
+    let stripeInstance: Stripe | null = null;
+
+    function getStripe(): Stripe {
+      if (!process.env.STRIPE_SECRET_KEY) {
+        throw new Error("Missing STRIPE_SECRET_KEY");
+      }
+
+      if (!stripeInstance) {
+        stripeInstance = new Stripe(process.env.STRIPE_SECRET_KEY, {
+          apiVersion: "2025-01-28.clover",
+          typescript: true,
+        });
+      }
+
+      return stripeInstance;
+    }
+
+    /**
+     * Account types for Connect
+     */
+    export const ACCOUNT_TYPES = {
+      EXPRESS: "express",
+      STANDARD: "standard",
+      CUSTOM: "custom",
+    } as const;
+
+    /**
+     * Create a connected account
+     */
+    export async function createConnectedAccount(
+      options: {
+        type?: "express" | "standard" | "custom";
+        email?: string;
+        country?: string;
+        capabilities?: {
+          card_payments?: { requested: boolean };
+          transfers?: { requested: boolean };
+        };
+        metadata?: Record<string, string>;
+      } = {}
+    ): Promise<Stripe.Account> {
+      const stripe = getStripe();
+
+      return stripe.accounts.create({
+        type: options.type || "express",
+        email: options.email,
+        country: options.country || "US",
+        capabilities: options.capabilities || {
+          card_payments: { requested: true },
+          transfers: { requested: true },
+        },
+        metadata: options.metadata,
+      });
+    }
+
+    /**
+     * Create onboarding link for Express accounts
+     */
+    export async function createOnboardingLink(
+      accountId: string,
+      returnUrl: string,
+      refreshUrl: string
+    ): Promise<string> {
+      const stripe = getStripe();
+
+      const accountLink = await stripe.accountLinks.create({
+        account: accountId,
+        refresh_url: refreshUrl,
+        return_url: returnUrl,
+        type: "account_onboarding",
+      });
+
+      return accountLink.url;
+    }
+
+    /**
+     * Create login link for Express dashboard
+     */
+    export async function createDashboardLink(
+      accountId: string
+    ): Promise<string> {
+      const stripe = getStripe();
+
+      const loginLink = await stripe.accounts.createLoginLink(accountId);
+      return loginLink.url;
+    }
+
+    /**
+     * Get connected account details
+     */
+    export async function getConnectedAccount(
+      accountId: string
+    ): Promise<Stripe.Account> {
+      const stripe = getStripe();
+      return stripe.accounts.retrieve(accountId);
+    }
+
+    /**
+     * Check if account is fully onboarded
+     */
+    export async function isAccountReady(accountId: string): Promise<{
+      ready: boolean;
+      chargesEnabled: boolean;
+      payoutsEnabled: boolean;
+      requirements: string[];
+    }> {
+      const account = await getConnectedAccount(accountId);
+
+      return {
+        ready: account.charges_enabled && account.payouts_enabled,
+        chargesEnabled: account.charges_enabled || false,
+        payoutsEnabled: account.payouts_enabled || false,
+        requirements: [
+          ...(account.requirements?.currently_due || []),
+          ...(account.requirements?.eventually_due || []),
+        ],
+      };
+    }
+
+    /**
+     * Create a payment with destination charge
+     * Platform takes fee, rest goes to connected account
+     */
+    export async function createDestinationCharge(options: {
+      amount: number;
+      currency?: string;
+      connectedAccountId: string;
+      applicationFeeAmount: number;
+      customerId?: string;
+      paymentMethodId?: string;
+      description?: string;
+      metadata?: Record<string, string>;
+    }): Promise<Stripe.PaymentIntent> {
+      const stripe = getStripe();
+
+      return stripe.paymentIntents.create({
+        amount: options.amount,
+        currency: options.currency || "usd",
+        customer: options.customerId,
+        payment_method: options.paymentMethodId,
+        application_fee_amount: options.applicationFeeAmount,
+        transfer_data: {
+          destination: options.connectedAccountId,
+        },
+        description: options.description,
+        metadata: options.metadata,
+        confirm: options.paymentMethodId ? true : false,
+      });
+    }
+
+    /**
+     * Create a payment with separate charge and transfer
+     * More control over timing and amounts
+     */
+    export async function createSeparateChargeAndTransfer(options: {
+      amount: number;
+      currency?: string;
+      customerId?: string;
+      paymentMethodId?: string;
+      transfers: Array<{
+        connectedAccountId: string;
+        amount: number;
+      }>;
+      metadata?: Record<string, string>;
+    }): Promise<{
+      paymentIntent: Stripe.PaymentIntent;
+      transferGroup: string;
+    }> {
+      const stripe = getStripe();
+
+      const transferGroup = `order_${Date.now()}`;
+
+      const paymentIntent = await stripe.paymentIntents.create({
+        amount: options.amount,
+        currency: options.currency || "usd",
+        customer: options.customerId,
+        payment_method: options.paymentMethodId,
+        transfer_group: transferGroup,
+        metadata: options.metadata,
+        confirm: options.paymentMethodId ? true : false,
+      });
+
+      // Note: Transfers are created after payment succeeds
+      // Handle in webhook for payment_intent.succeeded
+
+      return { paymentIntent, transferGroup };
+    }
+
+    /**
+     * Create transfers after successful payment
+     */
+    export async function createTransfers(
+      transferGroup: string,
+      transfers: Array<{
+        connectedAccountId: string;
+        amount: number;
+        description?: string;
+      }>
+    ): Promise<Stripe.Transfer[]> {
+      const stripe = getStripe();
+
+      const results = await Promise.all(
+        transfers.map((transfer) =>
+          stripe.transfers.create({
+            amount: transfer.amount,
+            currency: "usd",
+            destination: transfer.connectedAccountId,
+            transfer_group: transferGroup,
+            description: transfer.description,
+          })
+        )
+      );
+
+      return results;
+    }
+
+    /**
+     * Get connected account balance
+     */
+    export async function getAccountBalance(
+      accountId: string
+    ): Promise<Stripe.Balance> {
+      const stripe = getStripe();
+      return stripe.balance.retrieve({
+        stripeAccount: accountId,
+      });
+    }
+
+    /**
+     * Create instant payout (if eligible)
+     */
+    export async function createInstantPayout(
+      accountId: string,
+      amount: number,
+      currency: string = "usd"
+    ): Promise<Stripe.Payout> {
+      const stripe = getStripe();
+
+      return stripe.payouts.create(
+        {
+          amount,
+          currency,
+          method: "instant",
+        },
+        {
+          stripeAccount: accountId,
+        }
+      );
+    }
+
+    /**
+     * List connected accounts
+     */
+    export async function listConnectedAccounts(
+      options?: {
+        limit?: number;
+        startingAfter?: string;
+      }
+    ): Promise<Stripe.ApiList<Stripe.Account>> {
+      const stripe = getStripe();
+
+      return stripe.accounts.list({
+        limit: options?.limit || 10,
+        starting_after: options?.startingAfter,
+      });
+    }
+
+    /**
+     * Calculate platform fee
+     */
+    export function calculatePlatformFee(
+      amount: number,
+      feePercent: number,
+      minFee: number = 0
+    ): number {
+      const percentageFee = Math.round(amount * (feePercent / 100));
+      return Math.max(percentageFee, minFee);
+    }
+
+  app/api/connect/onboard/route.ts: |
+    import { NextRequest, NextResponse } from "next/server";
+    import {
+      createConnectedAccount,
+      createOnboardingLink,
+    } from "@/lib/stripe/connect";
+
+    export async function POST(request: NextRequest) {
+      try {
+        const body = await request.json();
+        const { email, country, userId, businessType } = body;
+
+        // Create connected account
+        const account = await createConnectedAccount({
+          type: "express",
+          email,
+          country: country || "US",
+          metadata: {
+            userId: userId || "",
+            businessType: businessType || "",
+          },
+        });
+
+        // Get origin for return URLs
+        const origin = request.headers.get("origin") || "http://localhost:3000";
+
+        // Create onboarding link
+        const onboardingUrl = await createOnboardingLink(
+          account.id,
+          `${origin}/connect/return?account=${account.id}`,
+          `${origin}/connect/refresh?account=${account.id}`
+        );
+
+        return NextResponse.json({
+          accountId: account.id,
+          onboardingUrl,
+        });
+      } catch (error) {
+        console.error("Onboarding error:", error);
+        return NextResponse.json(
+          { error: error instanceof Error ? error.message : "Onboarding failed" },
+          { status: 500 }
+        );
+      }
+    }
+
+  app/api/connect/return/route.ts: |
+    import { NextRequest, NextResponse } from "next/server";
+    import { isAccountReady, createDashboardLink } from "@/lib/stripe/connect";
+
+    export async function GET(request: NextRequest) {
+      try {
+        const { searchParams } = new URL(request.url);
+        const accountId = searchParams.get("account");
+
+        if (!accountId) {
+          return NextResponse.json(
+            { error: "Missing account ID" },
+            { status: 400 }
+          );
+        }
+
+        const status = await isAccountReady(accountId);
+
+        // TODO: Update your database with account status
+        // await db.user.update({
+        //   where: { stripeAccountId: accountId },
+        //   data: { stripeOnboarded: status.ready }
+        // });
+
+        let dashboardUrl = null;
+        if (status.ready) {
+          dashboardUrl = await createDashboardLink(accountId);
+        }
+
+        return NextResponse.json({
+          accountId,
+          ...status,
+          dashboardUrl,
+        });
+      } catch (error) {
+        console.error("Return handler error:", error);
+        return NextResponse.json(
+          { error: "Failed to verify account" },
+          { status: 500 }
+        );
+      }
+    }
+
+  app/api/connect/payment/route.ts: |
+    import { NextRequest, NextResponse } from "next/server";
+    import {
+      createDestinationCharge,
+      calculatePlatformFee,
+    } from "@/lib/stripe/connect";
+    import Stripe from "stripe";
+
+    const PLATFORM_FEE_PERCENT = 10; // 10% platform fee
+    const MIN_PLATFORM_FEE = 50; // $0.50 minimum
+
+    export async function POST(request: NextRequest) {
+      try {
+        const body = await request.json();
+        const {
+          amount,
+          currency = "usd",
+          connectedAccountId,
+          customerId,
+          paymentMethodId,
+          description,
+          metadata,
+        } = body;
+
+        if (!amount || !connectedAccountId) {
+          return NextResponse.json(
+            { error: "Missing amount or connectedAccountId" },
+            { status: 400 }
+          );
+        }
+
+        // Calculate platform fee
+        const applicationFee = calculatePlatformFee(
+          amount,
+          PLATFORM_FEE_PERCENT,
+          MIN_PLATFORM_FEE
+        );
+
+        const paymentIntent = await createDestinationCharge({
+          amount,
+          currency,
+          connectedAccountId,
+          applicationFeeAmount: applicationFee,
+          customerId,
+          paymentMethodId,
+          description,
+          metadata,
+        });
+
+        return NextResponse.json({
+          clientSecret: paymentIntent.client_secret,
+          paymentIntentId: paymentIntent.id,
+          amount: paymentIntent.amount,
+          applicationFee,
+          sellerReceives: amount - applicationFee,
+        });
+      } catch (error) {
+        console.error("Payment error:", error);
+
+        if (error instanceof Stripe.errors.StripeError) {
+          return NextResponse.json(
+            { error: error.message },
+            { status: error.statusCode || 500 }
+          );
+        }
+
+        return NextResponse.json(
+          { error: "Payment failed" },
+          { status: 500 }
+        );
+      }
+    }
+
+  app/api/connect/payout/route.ts: |
+    import { NextRequest, NextResponse } from "next/server";
+    import {
+      getAccountBalance,
+      createInstantPayout,
+    } from "@/lib/stripe/connect";
+
+    export async function GET(request: NextRequest) {
+      try {
+        const { searchParams } = new URL(request.url);
+        const accountId = searchParams.get("accountId");
+
+        if (!accountId) {
+          return NextResponse.json(
+            { error: "Missing accountId" },
+            { status: 400 }
+          );
+        }
+
+        const balance = await getAccountBalance(accountId);
+
+        return NextResponse.json({
+          available: balance.available.map((b) => ({
+            amount: b.amount,
+            currency: b.currency,
+          })),
+          pending: balance.pending.map((b) => ({
+            amount: b.amount,
+            currency: b.currency,
+          })),
+          instantAvailable: balance.instant_available?.map((b) => ({
+            amount: b.amount,
+            currency: b.currency,
+          })),
+        });
+      } catch (error) {
+        console.error("Balance error:", error);
+        return NextResponse.json(
+          { error: "Failed to get balance" },
+          { status: 500 }
+        );
+      }
+    }
+
+    export async function POST(request: NextRequest) {
+      try {
+        const body = await request.json();
+        const { accountId, amount, currency = "usd", instant = false } = body;
+
+        if (!accountId || !amount) {
+          return NextResponse.json(
+            { error: "Missing accountId or amount" },
+            { status: 400 }
+          );
+        }
+
+        if (instant) {
+          const payout = await createInstantPayout(accountId, amount, currency);
+          return NextResponse.json({
+            success: true,
+            payout: {
+              id: payout.id,
+              amount: payout.amount,
+              status: payout.status,
+              arrivalDate: payout.arrival_date
+                ? new Date(payout.arrival_date * 1000)
+                : null,
+            },
+          });
+        }
+
+        // Standard payout would be handled by Stripe's automatic schedule
+        return NextResponse.json({
+          message: "Standard payouts are handled automatically by Stripe",
+        });
+      } catch (error) {
+        console.error("Payout error:", error);
+        return NextResponse.json(
+          { error: error instanceof Error ? error.message : "Payout failed" },
+          { status: 500 }
+        );
+      }
+    }
+
+edge_cases:
+  - id: account-not-ready
+    symptom: "Payments fail with 'account cannot accept payments'"
+    cause: "Connected account onboarding not complete"
+    solution: |
+      Always check account status before payments:
+
+      const status = await isAccountReady(accountId);
+      if (!status.ready) {
+        throw new Error(`Account incomplete: ${status.requirements.join(", ")}`);
+      }
+
+  - id: insufficient-balance
+    symptom: "Payout fails with insufficient funds"
+    cause: "Available balance less than payout amount"
+    solution: |
+      Check balance before payout:
+
+      const balance = await getAccountBalance(accountId);
+      const available = balance.available.find(b => b.currency === "usd");
+
+      if (!available || available.amount < payoutAmount) {
+        throw new Error("Insufficient balance for payout");
+      }
+
+  - id: deauthorization
+    symptom: "Previously working account returns errors"
+    cause: "User disconnected the Connect account"
+    solution: |
+      Handle account.application.deauthorized webhook:
+
+      if (event.type === "account.application.deauthorized") {
+        const account = event.data.object;
+        await db.user.update({
+          where: { stripeAccountId: account.id },
+          data: { stripeConnected: false }
+        });
+      }
+
+  - id: negative-balance
+    symptom: "Payout scheduled but account has negative balance"
+    cause: "Refunds or chargebacks created negative balance"
+    solution: |
+      Monitor account balance and handle negative balances:
+
+      const balance = await getAccountBalance(accountId);
+      if (balance.available[0].amount < 0) {
+        // Notify seller, potentially pause payouts
+        // Consider platform covering negative balance
+      }
+
+validation:
+  manual_test:
+    - "Enable Stripe Connect in Dashboard"
+    - "Create a connected Express account"
+    - "Complete onboarding with test data"
+    - "Create a payment with destination charge"
+    - "Verify platform fee is collected"
+    - "Check connected account balance"
+    - "Test payout functionality"
+    - "Verify webhook events fire correctly"

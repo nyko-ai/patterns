@@ -1,0 +1,678 @@
+id: refund-handling
+version: "1.0.0"
+updated_at: "2026-01-31"
+author: "nyko-team"
+status: beta
+
+name: "Stripe Refund Handling"
+description: "Complete refund flow with full, partial, and Connect refunds"
+
+category: payments
+tags:
+  - stripe
+  - refunds
+  - payments
+  - chargebacks
+  - disputes
+
+difficulty: intermediate
+time_estimate: "25-30 min"
+
+stack:
+  required:
+    - name: "next"
+      version: "^15.1.0"
+      reason: "App Router"
+    - name: "stripe"
+      version: "^20.3.0"
+      reason: "Stripe SDK with refund support"
+
+requires:
+  - stripe-webhook-handler
+
+enables: []
+
+env_vars:
+  required:
+    - key: STRIPE_SECRET_KEY
+      description: "Stripe secret API key"
+      format: "sk_test_... or sk_live_..."
+      where_to_find: "Stripe Dashboard > Developers > API keys"
+
+external_setup:
+  - service: "Stripe"
+    url: "https://dashboard.stripe.com"
+    steps:
+      - "Set up webhook endpoint for refund events"
+      - "Configure refund policy settings"
+      - "Enable refund.created and charge.refunded webhooks"
+      - "Review Stripe's refund fees and timing"
+
+files:
+  - path: "lib/stripe/refunds.ts"
+    action: create
+    description: "Refund management utilities"
+    priority: 1
+
+  - path: "app/api/refunds/route.ts"
+    action: create
+    description: "Refund creation endpoint"
+    priority: 2
+
+  - path: "app/api/refunds/[refundId]/route.ts"
+    action: create
+    description: "Single refund operations"
+    priority: 3
+
+  - path: "lib/stripe/webhook-refund-handlers.ts"
+    action: create
+    description: "Refund webhook handlers"
+    priority: 4
+
+code:
+  lib/stripe/refunds.ts: |
+    import Stripe from "stripe";
+
+    let stripeInstance: Stripe | null = null;
+
+    function getStripe(): Stripe {
+      if (!process.env.STRIPE_SECRET_KEY) {
+        throw new Error("Missing STRIPE_SECRET_KEY");
+      }
+
+      if (!stripeInstance) {
+        stripeInstance = new Stripe(process.env.STRIPE_SECRET_KEY, {
+          apiVersion: "2025-01-28.clover",
+          typescript: true,
+        });
+      }
+
+      return stripeInstance;
+    }
+
+    export type RefundReason =
+      | "duplicate"
+      | "fraudulent"
+      | "requested_by_customer";
+
+    export interface CreateRefundParams {
+      paymentIntentId?: string;
+      chargeId?: string;
+      amount?: number; // In cents, omit for full refund
+      reason?: RefundReason;
+      metadata?: Record<string, string>;
+      reverseTransfer?: boolean; // For Connect
+      refundApplicationFee?: boolean; // For Connect
+    }
+
+    /**
+     * Create a refund
+     */
+    export async function createRefund(
+      params: CreateRefundParams
+    ): Promise<Stripe.Refund> {
+      const stripe = getStripe();
+
+      if (!params.paymentIntentId && !params.chargeId) {
+        throw new Error("Either paymentIntentId or chargeId is required");
+      }
+
+      const refundParams: Stripe.RefundCreateParams = {
+        reason: params.reason,
+        metadata: params.metadata,
+      };
+
+      if (params.paymentIntentId) {
+        refundParams.payment_intent = params.paymentIntentId;
+      } else if (params.chargeId) {
+        refundParams.charge = params.chargeId;
+      }
+
+      // Partial refund
+      if (params.amount) {
+        refundParams.amount = params.amount;
+      }
+
+      // Connect options
+      if (params.reverseTransfer !== undefined) {
+        refundParams.reverse_transfer = params.reverseTransfer;
+      }
+      if (params.refundApplicationFee !== undefined) {
+        refundParams.refund_application_fee = params.refundApplicationFee;
+      }
+
+      return stripe.refunds.create(refundParams);
+    }
+
+    /**
+     * Create a full refund
+     */
+    export async function createFullRefund(
+      paymentIntentId: string,
+      reason?: RefundReason,
+      metadata?: Record<string, string>
+    ): Promise<Stripe.Refund> {
+      return createRefund({
+        paymentIntentId,
+        reason,
+        metadata,
+      });
+    }
+
+    /**
+     * Create a partial refund
+     */
+    export async function createPartialRefund(
+      paymentIntentId: string,
+      amount: number,
+      reason?: RefundReason,
+      metadata?: Record<string, string>
+    ): Promise<Stripe.Refund> {
+      return createRefund({
+        paymentIntentId,
+        amount,
+        reason,
+        metadata,
+      });
+    }
+
+    /**
+     * Get refund details
+     */
+    export async function getRefund(refundId: string): Promise<Stripe.Refund> {
+      const stripe = getStripe();
+      return stripe.refunds.retrieve(refundId);
+    }
+
+    /**
+     * List refunds for a payment
+     */
+    export async function listRefundsForPayment(
+      paymentIntentId: string
+    ): Promise<Stripe.Refund[]> {
+      const stripe = getStripe();
+
+      const refunds = await stripe.refunds.list({
+        payment_intent: paymentIntentId,
+        limit: 100,
+      });
+
+      return refunds.data;
+    }
+
+    /**
+     * Calculate refundable amount
+     */
+    export async function getRefundableAmount(
+      paymentIntentId: string
+    ): Promise<{
+      originalAmount: number;
+      refundedAmount: number;
+      refundableAmount: number;
+      currency: string;
+      refunds: Array<{
+        id: string;
+        amount: number;
+        status: string;
+        created: Date;
+      }>;
+    }> {
+      const stripe = getStripe();
+
+      const paymentIntent = await stripe.paymentIntents.retrieve(paymentIntentId);
+      const refunds = await listRefundsForPayment(paymentIntentId);
+
+      const refundedAmount = refunds
+        .filter((r) => r.status === "succeeded")
+        .reduce((sum, r) => sum + r.amount, 0);
+
+      return {
+        originalAmount: paymentIntent.amount,
+        refundedAmount,
+        refundableAmount: paymentIntent.amount - refundedAmount,
+        currency: paymentIntent.currency,
+        refunds: refunds.map((r) => ({
+          id: r.id,
+          amount: r.amount,
+          status: r.status || "unknown",
+          created: new Date(r.created * 1000),
+        })),
+      };
+    }
+
+    /**
+     * Cancel a pending refund
+     */
+    export async function cancelRefund(refundId: string): Promise<Stripe.Refund> {
+      const stripe = getStripe();
+      return stripe.refunds.cancel(refundId);
+    }
+
+    /**
+     * Update refund metadata
+     */
+    export async function updateRefund(
+      refundId: string,
+      metadata: Record<string, string>
+    ): Promise<Stripe.Refund> {
+      const stripe = getStripe();
+      return stripe.refunds.update(refundId, { metadata });
+    }
+
+    /**
+     * Create refund for Connect payment
+     * Handles application fee and transfer reversal
+     */
+    export async function createConnectRefund(
+      paymentIntentId: string,
+      options: {
+        amount?: number;
+        reverseTransfer?: boolean;
+        refundApplicationFee?: boolean;
+        reason?: RefundReason;
+      } = {}
+    ): Promise<Stripe.Refund> {
+      return createRefund({
+        paymentIntentId,
+        amount: options.amount,
+        reason: options.reason,
+        reverseTransfer: options.reverseTransfer ?? true,
+        refundApplicationFee: options.refundApplicationFee ?? true,
+      });
+    }
+
+    /**
+     * Refund status descriptions
+     */
+    export const REFUND_STATUS = {
+      pending: "Refund is being processed",
+      requires_action: "Refund requires additional action",
+      succeeded: "Refund has been completed",
+      failed: "Refund failed to process",
+      canceled: "Refund was canceled",
+    } as const;
+
+    /**
+     * Format refund for API response
+     */
+    export function formatRefund(refund: Stripe.Refund) {
+      return {
+        id: refund.id,
+        amount: refund.amount,
+        currency: refund.currency,
+        status: refund.status,
+        statusDescription: REFUND_STATUS[refund.status as keyof typeof REFUND_STATUS] || "Unknown",
+        reason: refund.reason,
+        created: new Date(refund.created * 1000),
+        metadata: refund.metadata,
+        paymentIntentId: refund.payment_intent,
+      };
+    }
+
+  app/api/refunds/route.ts: |
+    import { NextRequest, NextResponse } from "next/server";
+    import {
+      createRefund,
+      getRefundableAmount,
+      formatRefund,
+    } from "@/lib/stripe/refunds";
+
+    export async function GET(request: NextRequest) {
+      try {
+        const { searchParams } = new URL(request.url);
+        const paymentIntentId = searchParams.get("paymentIntentId");
+
+        if (!paymentIntentId) {
+          return NextResponse.json(
+            { error: "paymentIntentId is required" },
+            { status: 400 }
+          );
+        }
+
+        const refundInfo = await getRefundableAmount(paymentIntentId);
+
+        return NextResponse.json({
+          ...refundInfo,
+          originalAmount: refundInfo.originalAmount / 100,
+          refundedAmount: refundInfo.refundedAmount / 100,
+          refundableAmount: refundInfo.refundableAmount / 100,
+          refunds: refundInfo.refunds.map((r) => ({
+            ...r,
+            amount: r.amount / 100,
+          })),
+        });
+      } catch (error) {
+        console.error("Get refundable error:", error);
+        return NextResponse.json(
+          { error: "Failed to get refund info" },
+          { status: 500 }
+        );
+      }
+    }
+
+    export async function POST(request: NextRequest) {
+      try {
+        const body = await request.json();
+        const {
+          paymentIntentId,
+          chargeId,
+          amount,
+          reason,
+          metadata,
+          reverseTransfer,
+          refundApplicationFee,
+        } = body;
+
+        if (!paymentIntentId && !chargeId) {
+          return NextResponse.json(
+            { error: "paymentIntentId or chargeId is required" },
+            { status: 400 }
+          );
+        }
+
+        // Validate amount if partial refund
+        if (amount !== undefined && amount <= 0) {
+          return NextResponse.json(
+            { error: "Amount must be positive" },
+            { status: 400 }
+          );
+        }
+
+        // Check refundable amount if partial
+        if (amount && paymentIntentId) {
+          const { refundableAmount } = await getRefundableAmount(paymentIntentId);
+          if (amount > refundableAmount) {
+            return NextResponse.json(
+              { error: `Amount exceeds refundable: ${refundableAmount / 100}` },
+              { status: 400 }
+            );
+          }
+        }
+
+        const refund = await createRefund({
+          paymentIntentId,
+          chargeId,
+          amount,
+          reason,
+          metadata,
+          reverseTransfer,
+          refundApplicationFee,
+        });
+
+        return NextResponse.json({
+          success: true,
+          refund: formatRefund(refund),
+        });
+      } catch (error) {
+        console.error("Create refund error:", error);
+        return NextResponse.json(
+          { error: error instanceof Error ? error.message : "Refund failed" },
+          { status: 500 }
+        );
+      }
+    }
+
+  app/api/refunds/[refundId]/route.ts: |
+    import { NextRequest, NextResponse } from "next/server";
+    import {
+      getRefund,
+      cancelRefund,
+      updateRefund,
+      formatRefund,
+    } from "@/lib/stripe/refunds";
+
+    interface RouteParams {
+      params: Promise<{ refundId: string }>;
+    }
+
+    export async function GET(request: NextRequest, { params }: RouteParams) {
+      try {
+        const { refundId } = await params;
+        const refund = await getRefund(refundId);
+        return NextResponse.json(formatRefund(refund));
+      } catch (error) {
+        return NextResponse.json({ error: "Refund not found" }, { status: 404 });
+      }
+    }
+
+    export async function PATCH(request: NextRequest, { params }: RouteParams) {
+      try {
+        const { refundId } = await params;
+        const body = await request.json();
+        const { metadata } = body;
+
+        const refund = await updateRefund(refundId, metadata);
+        return NextResponse.json(formatRefund(refund));
+      } catch (error) {
+        return NextResponse.json(
+          { error: "Failed to update refund" },
+          { status: 500 }
+        );
+      }
+    }
+
+    export async function DELETE(request: NextRequest, { params }: RouteParams) {
+      try {
+        const { refundId } = await params;
+
+        // Check if refund can be canceled (must be pending)
+        const refund = await getRefund(refundId);
+        if (refund.status !== "pending") {
+          return NextResponse.json(
+            { error: "Only pending refunds can be canceled" },
+            { status: 400 }
+          );
+        }
+
+        const canceledRefund = await cancelRefund(refundId);
+        return NextResponse.json({
+          success: true,
+          refund: formatRefund(canceledRefund),
+        });
+      } catch (error) {
+        return NextResponse.json(
+          { error: "Failed to cancel refund" },
+          { status: 500 }
+        );
+      }
+    }
+
+  lib/stripe/webhook-refund-handlers.ts: |
+    import Stripe from "stripe";
+
+    /**
+     * Handle refund.created event
+     */
+    export async function handleRefundCreated(
+      refund: Stripe.Refund
+    ): Promise<void> {
+      console.log("Refund created:", refund.id);
+
+      // TODO: Update your database
+      // await db.refund.create({
+      //   data: {
+      //     stripeRefundId: refund.id,
+      //     paymentIntentId: refund.payment_intent as string,
+      //     amount: refund.amount,
+      //     status: refund.status,
+      //     reason: refund.reason,
+      //   }
+      // });
+
+      // TODO: Notify customer
+      // await sendRefundConfirmationEmail(refund);
+
+      // TODO: Update order status
+      // await updateOrderStatus(refund.metadata?.orderId, "refunded");
+    }
+
+    /**
+     * Handle refund.updated event
+     */
+    export async function handleRefundUpdated(
+      refund: Stripe.Refund
+    ): Promise<void> {
+      console.log("Refund updated:", refund.id, "Status:", refund.status);
+
+      // TODO: Update refund status in database
+      // await db.refund.update({
+      //   where: { stripeRefundId: refund.id },
+      //   data: { status: refund.status }
+      // });
+
+      if (refund.status === "failed") {
+        // Handle failed refund
+        console.error("Refund failed:", refund.id, refund.failure_reason);
+
+        // TODO: Notify admin
+        // await notifyAdminRefundFailed(refund);
+      }
+    }
+
+    /**
+     * Handle charge.refunded event
+     */
+    export async function handleChargeRefunded(
+      charge: Stripe.Charge
+    ): Promise<void> {
+      console.log("Charge refunded:", charge.id);
+      console.log("Amount refunded:", charge.amount_refunded);
+      console.log("Refund status:", charge.refunded ? "full" : "partial");
+
+      // TODO: Update order based on refund amount
+      // const isFullRefund = charge.amount_refunded === charge.amount;
+      // if (isFullRefund) {
+      //   await updateOrderStatus(charge.metadata.orderId, "fully_refunded");
+      // } else {
+      //   await updateOrderStatus(charge.metadata.orderId, "partially_refunded");
+      // }
+    }
+
+    /**
+     * Handle charge.dispute.created event
+     */
+    export async function handleDisputeCreated(
+      dispute: Stripe.Dispute
+    ): Promise<void> {
+      console.error("Dispute created:", dispute.id);
+      console.log("Amount:", dispute.amount);
+      console.log("Reason:", dispute.reason);
+
+      // TODO: Alert admin immediately
+      // await alertAdminDispute(dispute);
+
+      // TODO: Gather evidence for response
+      // const charge = await stripe.charges.retrieve(dispute.charge as string);
+      // await prepareDisputeEvidence(dispute, charge);
+
+      // TODO: Update order status
+      // await updateOrderStatus(charge.metadata.orderId, "disputed");
+    }
+
+    /**
+     * Handle charge.dispute.closed event
+     */
+    export async function handleDisputeClosed(
+      dispute: Stripe.Dispute
+    ): Promise<void> {
+      console.log("Dispute closed:", dispute.id);
+      console.log("Status:", dispute.status);
+
+      if (dispute.status === "won") {
+        // Dispute won - funds returned to you
+        console.log("Dispute won!");
+      } else if (dispute.status === "lost") {
+        // Dispute lost - customer keeps funds
+        console.error("Dispute lost:", dispute.id);
+
+        // TODO: Update records
+        // await finalizeDisputeLoss(dispute);
+      }
+    }
+
+    /**
+     * Webhook handler registry
+     */
+    export const refundWebhookHandlers: Record<
+      string,
+      (event: Stripe.Event) => Promise<void>
+    > = {
+      "refund.created": async (event) =>
+        handleRefundCreated(event.data.object as Stripe.Refund),
+
+      "refund.updated": async (event) =>
+        handleRefundUpdated(event.data.object as Stripe.Refund),
+
+      "charge.refunded": async (event) =>
+        handleChargeRefunded(event.data.object as Stripe.Charge),
+
+      "charge.dispute.created": async (event) =>
+        handleDisputeCreated(event.data.object as Stripe.Dispute),
+
+      "charge.dispute.closed": async (event) =>
+        handleDisputeClosed(event.data.object as Stripe.Dispute),
+    };
+
+edge_cases:
+  - id: refund-exceeds-amount
+    symptom: "Error: Refund amount exceeds charge amount"
+    cause: "Trying to refund more than the original payment"
+    solution: |
+      Check refundable amount first:
+
+      const { refundableAmount } = await getRefundableAmount(paymentIntentId);
+      if (requestedAmount > refundableAmount) {
+        throw new Error(`Max refundable: ${refundableAmount / 100}`);
+      }
+
+  - id: refund-failed
+    symptom: "Refund status is 'failed'"
+    cause: "Customer's bank rejected the refund"
+    solution: |
+      Check failure reason and handle appropriately:
+
+      const refund = await getRefund(refundId);
+      if (refund.status === "failed") {
+        console.error("Failure reason:", refund.failure_reason);
+        // Options: retry, issue credit, manual bank transfer
+      }
+
+  - id: dispute-received
+    symptom: "Customer filed a chargeback"
+    cause: "Customer disputed the charge with their bank"
+    solution: |
+      Respond to disputes quickly (usually 7-21 days):
+
+      1. Gather evidence (receipts, logs, communications)
+      2. Submit via Stripe Dashboard or API
+      3. Write a clear rebuttal
+
+      const evidence = {
+        receipt: "...",
+        customer_communication: "...",
+        service_documentation: "...",
+      };
+      await stripe.disputes.update(disputeId, { evidence });
+
+  - id: partial-refund-rounding
+    symptom: "Final refund leaves small amount un-refunded"
+    cause: "Rounding errors in partial refunds"
+    solution: |
+      For the final refund, use the exact remaining amount:
+
+      const { refundableAmount } = await getRefundableAmount(paymentIntentId);
+      if (refundableAmount > 0 && refundableAmount <= 50) {
+        // Refund exact remaining amount
+        await createRefund({ paymentIntentId, amount: refundableAmount });
+      }
+
+validation:
+  manual_test:
+    - "Make a test payment"
+    - "Create a full refund"
+    - "Verify refund in Stripe Dashboard"
+    - "Make another payment"
+    - "Create multiple partial refunds"
+    - "Verify total refunded matches sum"
+    - "Test refund of Connect payment"
+    - "Verify webhook events fire"

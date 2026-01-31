@@ -1,0 +1,618 @@
+id: stripe-proration
+version: "1.0.0"
+updated_at: "2026-01-31"
+author: "nyko-team"
+status: beta
+
+name: "Stripe Subscription Proration"
+description: "Handle subscription upgrades, downgrades, and proration calculations"
+
+category: payments
+tags:
+  - stripe
+  - subscriptions
+  - proration
+  - billing
+  - upgrades
+
+difficulty: advanced
+time_estimate: "30-40 min"
+
+stack:
+  required:
+    - name: "next"
+      version: "^15.1.0"
+      reason: "App Router"
+    - name: "stripe"
+      version: "^20.3.0"
+      reason: "Stripe SDK with proration support"
+
+requires:
+  - stripe-checkout-session
+  - stripe-webhook-handler
+
+enables: []
+
+env_vars:
+  required:
+    - key: STRIPE_SECRET_KEY
+      description: "Stripe secret API key"
+      format: "sk_test_... or sk_live_..."
+      where_to_find: "Stripe Dashboard > Developers > API keys"
+
+external_setup:
+  - service: "Stripe"
+    url: "https://dashboard.stripe.com"
+    steps:
+      - "Create multiple subscription products with different prices"
+      - "Enable customer billing portal in Settings > Billing > Customer portal"
+      - "Configure proration behavior in Billing settings"
+      - "Set up webhooks for subscription events"
+
+files:
+  - path: "lib/stripe/proration.ts"
+    action: create
+    description: "Proration calculation and preview utilities"
+    priority: 1
+
+  - path: "app/api/subscriptions/preview-proration/route.ts"
+    action: create
+    description: "Preview proration before plan change"
+    priority: 2
+
+  - path: "app/api/subscriptions/change-plan/route.ts"
+    action: create
+    description: "Change subscription plan with proration"
+    priority: 3
+
+  - path: "components/plan-change-modal.tsx"
+    action: create
+    description: "UI for plan change with proration preview"
+    priority: 4
+
+code:
+  lib/stripe/proration.ts: |
+    import Stripe from "stripe";
+
+    let stripeInstance: Stripe | null = null;
+
+    function getStripe(): Stripe {
+      if (!process.env.STRIPE_SECRET_KEY) {
+        throw new Error("Missing STRIPE_SECRET_KEY");
+      }
+
+      if (!stripeInstance) {
+        stripeInstance = new Stripe(process.env.STRIPE_SECRET_KEY, {
+          apiVersion: "2025-01-28.clover",
+          typescript: true,
+        });
+      }
+
+      return stripeInstance;
+    }
+
+    export interface ProrationPreview {
+      immediate_amount: number;
+      next_invoice_amount: number;
+      proration_date: number;
+      currency: string;
+      credit_amount: number;
+      debit_amount: number;
+      line_items: Array<{
+        description: string;
+        amount: number;
+        proration: boolean;
+      }>;
+    }
+
+    /**
+     * Preview proration for a subscription plan change
+     */
+    export async function previewProration(
+      subscriptionId: string,
+      newPriceId: string,
+      options?: {
+        prorationDate?: number;
+        prorationBehavior?: Stripe.SubscriptionUpdateParams.ProrationBehavior;
+      }
+    ): Promise<ProrationPreview> {
+      const stripe = getStripe();
+
+      // Get current subscription
+      const subscription = await stripe.subscriptions.retrieve(subscriptionId);
+
+      if (!subscription || subscription.status !== "active") {
+        throw new Error("Subscription not found or not active");
+      }
+
+      const currentItem = subscription.items.data[0];
+      if (!currentItem) {
+        throw new Error("No subscription items found");
+      }
+
+      const prorationDate = options?.prorationDate || Math.floor(Date.now() / 1000);
+
+      // Create preview invoice to see proration
+      const upcomingInvoice = await stripe.invoices.retrieveUpcoming({
+        customer: subscription.customer as string,
+        subscription: subscriptionId,
+        subscription_items: [
+          {
+            id: currentItem.id,
+            price: newPriceId,
+          },
+        ],
+        subscription_proration_date: prorationDate,
+        subscription_proration_behavior: options?.prorationBehavior || "create_prorations",
+      });
+
+      // Calculate credit and debit amounts
+      let creditAmount = 0;
+      let debitAmount = 0;
+
+      const lineItems = upcomingInvoice.lines.data.map((line) => {
+        if (line.proration) {
+          if (line.amount < 0) {
+            creditAmount += Math.abs(line.amount);
+          } else {
+            debitAmount += line.amount;
+          }
+        }
+
+        return {
+          description: line.description || "",
+          amount: line.amount,
+          proration: line.proration || false,
+        };
+      });
+
+      return {
+        immediate_amount: debitAmount - creditAmount,
+        next_invoice_amount: upcomingInvoice.total,
+        proration_date: prorationDate,
+        currency: upcomingInvoice.currency,
+        credit_amount: creditAmount,
+        debit_amount: debitAmount,
+        line_items: lineItems,
+      };
+    }
+
+    /**
+     * Change subscription plan with proration
+     */
+    export async function changeSubscriptionPlan(
+      subscriptionId: string,
+      newPriceId: string,
+      options?: {
+        prorationBehavior?: Stripe.SubscriptionUpdateParams.ProrationBehavior;
+        billingCycleAnchor?: "now" | "unchanged";
+        paymentBehavior?: Stripe.SubscriptionUpdateParams.PaymentBehavior;
+      }
+    ): Promise<Stripe.Subscription> {
+      const stripe = getStripe();
+
+      const subscription = await stripe.subscriptions.retrieve(subscriptionId);
+      const currentItem = subscription.items.data[0];
+
+      if (!currentItem) {
+        throw new Error("No subscription items found");
+      }
+
+      const updatedSubscription = await stripe.subscriptions.update(subscriptionId, {
+        items: [
+          {
+            id: currentItem.id,
+            price: newPriceId,
+          },
+        ],
+        proration_behavior: options?.prorationBehavior || "create_prorations",
+        billing_cycle_anchor: options?.billingCycleAnchor,
+        payment_behavior: options?.paymentBehavior || "error_if_incomplete",
+      });
+
+      return updatedSubscription;
+    }
+
+    /**
+     * Get available proration behaviors
+     */
+    export const PRORATION_BEHAVIORS = {
+      CREATE_PRORATIONS: "create_prorations" as const,
+      NONE: "none" as const,
+      ALWAYS_INVOICE: "always_invoice" as const,
+    };
+
+    /**
+     * Calculate the difference between two plans
+     */
+    export function calculatePlanDifference(
+      currentPrice: number,
+      newPrice: number,
+      daysRemaining: number,
+      totalDays: number
+    ): {
+      credit: number;
+      charge: number;
+      net: number;
+      isUpgrade: boolean;
+    } {
+      const unusedCredit = (currentPrice * daysRemaining) / totalDays;
+      const newCharge = (newPrice * daysRemaining) / totalDays;
+      const net = newCharge - unusedCredit;
+
+      return {
+        credit: Math.round(unusedCredit),
+        charge: Math.round(newCharge),
+        net: Math.round(net),
+        isUpgrade: newPrice > currentPrice,
+      };
+    }
+
+  app/api/subscriptions/preview-proration/route.ts: |
+    import { NextRequest, NextResponse } from "next/server";
+    import { previewProration } from "@/lib/stripe/proration";
+
+    export async function POST(request: NextRequest) {
+      try {
+        const body = await request.json();
+        const { subscriptionId, newPriceId, prorationDate } = body;
+
+        if (!subscriptionId || !newPriceId) {
+          return NextResponse.json(
+            { error: "Missing subscriptionId or newPriceId" },
+            { status: 400 }
+          );
+        }
+
+        const preview = await previewProration(subscriptionId, newPriceId, {
+          prorationDate,
+        });
+
+        return NextResponse.json(preview);
+      } catch (error) {
+        console.error("Proration preview error:", error);
+        return NextResponse.json(
+          { error: error instanceof Error ? error.message : "Preview failed" },
+          { status: 500 }
+        );
+      }
+    }
+
+  app/api/subscriptions/change-plan/route.ts: |
+    import { NextRequest, NextResponse } from "next/server";
+    import { changeSubscriptionPlan, PRORATION_BEHAVIORS } from "@/lib/stripe/proration";
+    import Stripe from "stripe";
+
+    export async function POST(request: NextRequest) {
+      try {
+        const body = await request.json();
+        const {
+          subscriptionId,
+          newPriceId,
+          prorationBehavior = PRORATION_BEHAVIORS.CREATE_PRORATIONS,
+          billingCycleAnchor,
+        } = body;
+
+        if (!subscriptionId || !newPriceId) {
+          return NextResponse.json(
+            { error: "Missing subscriptionId or newPriceId" },
+            { status: 400 }
+          );
+        }
+
+        const subscription = await changeSubscriptionPlan(
+          subscriptionId,
+          newPriceId,
+          {
+            prorationBehavior,
+            billingCycleAnchor,
+          }
+        );
+
+        return NextResponse.json({
+          success: true,
+          subscription: {
+            id: subscription.id,
+            status: subscription.status,
+            currentPeriodEnd: subscription.current_period_end,
+            items: subscription.items.data.map((item) => ({
+              priceId: item.price.id,
+              productId: item.price.product,
+            })),
+          },
+        });
+      } catch (error) {
+        console.error("Plan change error:", error);
+
+        if (error instanceof Stripe.errors.StripeError) {
+          return NextResponse.json(
+            { error: error.message },
+            { status: error.statusCode || 500 }
+          );
+        }
+
+        return NextResponse.json(
+          { error: error instanceof Error ? error.message : "Plan change failed" },
+          { status: 500 }
+        );
+      }
+    }
+
+  components/plan-change-modal.tsx: |
+    "use client";
+
+    import { useState, useEffect } from "react";
+
+    interface Plan {
+      id: string;
+      priceId: string;
+      name: string;
+      price: number;
+      interval: "month" | "year";
+      features: string[];
+    }
+
+    interface ProrationPreview {
+      immediate_amount: number;
+      next_invoice_amount: number;
+      currency: string;
+      credit_amount: number;
+      debit_amount: number;
+      line_items: Array<{
+        description: string;
+        amount: number;
+        proration: boolean;
+      }>;
+    }
+
+    interface PlanChangeModalProps {
+      isOpen: boolean;
+      onClose: () => void;
+      currentPlan: Plan;
+      availablePlans: Plan[];
+      subscriptionId: string;
+      onPlanChanged?: () => void;
+    }
+
+    export function PlanChangeModal({
+      isOpen,
+      onClose,
+      currentPlan,
+      availablePlans,
+      subscriptionId,
+      onPlanChanged,
+    }: PlanChangeModalProps) {
+      const [selectedPlan, setSelectedPlan] = useState<Plan | null>(null);
+      const [preview, setPreview] = useState<ProrationPreview | null>(null);
+      const [isLoading, setIsLoading] = useState(false);
+      const [isChanging, setIsChanging] = useState(false);
+      const [error, setError] = useState<string | null>(null);
+
+      // Fetch proration preview when plan is selected
+      useEffect(() => {
+        if (!selectedPlan || selectedPlan.priceId === currentPlan.priceId) {
+          setPreview(null);
+          return;
+        }
+
+        const fetchPreview = async () => {
+          setIsLoading(true);
+          setError(null);
+
+          try {
+            const response = await fetch("/api/subscriptions/preview-proration", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                subscriptionId,
+                newPriceId: selectedPlan.priceId,
+              }),
+            });
+
+            if (!response.ok) {
+              const data = await response.json();
+              throw new Error(data.error || "Failed to preview proration");
+            }
+
+            const data = await response.json();
+            setPreview(data);
+          } catch (err) {
+            setError(err instanceof Error ? err.message : "Preview failed");
+          } finally {
+            setIsLoading(false);
+          }
+        };
+
+        fetchPreview();
+      }, [selectedPlan, currentPlan.priceId, subscriptionId]);
+
+      const handleChangePlan = async () => {
+        if (!selectedPlan) return;
+
+        setIsChanging(true);
+        setError(null);
+
+        try {
+          const response = await fetch("/api/subscriptions/change-plan", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              subscriptionId,
+              newPriceId: selectedPlan.priceId,
+            }),
+          });
+
+          if (!response.ok) {
+            const data = await response.json();
+            throw new Error(data.error || "Failed to change plan");
+          }
+
+          onPlanChanged?.();
+          onClose();
+        } catch (err) {
+          setError(err instanceof Error ? err.message : "Change failed");
+        } finally {
+          setIsChanging(false);
+        }
+      };
+
+      const formatAmount = (amount: number, currency: string) => {
+        return new Intl.NumberFormat("en-US", {
+          style: "currency",
+          currency: currency.toUpperCase(),
+        }).format(amount / 100);
+      };
+
+      if (!isOpen) return null;
+
+      return (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
+          <div className="w-full max-w-lg rounded-lg bg-white p-6 shadow-xl">
+            <h2 className="text-xl font-bold">Change Plan</h2>
+            <p className="mt-1 text-sm text-gray-500">
+              Current plan: {currentPlan.name}
+            </p>
+
+            {/* Plan Selection */}
+            <div className="mt-4 space-y-2">
+              {availablePlans
+                .filter((plan) => plan.priceId !== currentPlan.priceId)
+                .map((plan) => (
+                  <button
+                    key={plan.id}
+                    onClick={() => setSelectedPlan(plan)}
+                    className={`w-full rounded-lg border p-4 text-left transition ${
+                      selectedPlan?.id === plan.id
+                        ? "border-blue-500 bg-blue-50"
+                        : "border-gray-200 hover:border-gray-300"
+                    }`}
+                  >
+                    <div className="flex items-center justify-between">
+                      <span className="font-medium">{plan.name}</span>
+                      <span className="text-lg font-bold">
+                        ${plan.price}/{plan.interval}
+                      </span>
+                    </div>
+                  </button>
+                ))}
+            </div>
+
+            {/* Proration Preview */}
+            {isLoading && (
+              <div className="mt-4 text-center text-gray-500">
+                Calculating proration...
+              </div>
+            )}
+
+            {preview && selectedPlan && (
+              <div className="mt-4 rounded-lg bg-gray-50 p-4">
+                <h3 className="font-medium">Proration Details</h3>
+
+                <div className="mt-2 space-y-1 text-sm">
+                  {preview.credit_amount > 0 && (
+                    <div className="flex justify-between text-green-600">
+                      <span>Credit for unused time</span>
+                      <span>-{formatAmount(preview.credit_amount, preview.currency)}</span>
+                    </div>
+                  )}
+
+                  {preview.debit_amount > 0 && (
+                    <div className="flex justify-between">
+                      <span>Charge for new plan</span>
+                      <span>{formatAmount(preview.debit_amount, preview.currency)}</span>
+                    </div>
+                  )}
+
+                  <div className="flex justify-between border-t pt-2 font-medium">
+                    <span>
+                      {preview.immediate_amount > 0 ? "Due now" : "Credit applied"}
+                    </span>
+                    <span className={preview.immediate_amount < 0 ? "text-green-600" : ""}>
+                      {formatAmount(Math.abs(preview.immediate_amount), preview.currency)}
+                    </span>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {error && (
+              <div className="mt-4 rounded-lg bg-red-50 p-3 text-sm text-red-600">
+                {error}
+              </div>
+            )}
+
+            {/* Actions */}
+            <div className="mt-6 flex gap-3">
+              <button
+                onClick={onClose}
+                className="flex-1 rounded-lg border px-4 py-2 hover:bg-gray-50"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleChangePlan}
+                disabled={!selectedPlan || isChanging || isLoading}
+                className="flex-1 rounded-lg bg-blue-600 px-4 py-2 text-white hover:bg-blue-700 disabled:opacity-50"
+              >
+                {isChanging ? "Changing..." : "Confirm Change"}
+              </button>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+edge_cases:
+  - id: insufficient-funds
+    symptom: "Plan change fails with payment error"
+    cause: "Customer's payment method cannot cover the proration charge"
+    solution: |
+      Use payment_behavior: "default_incomplete" to allow retry:
+
+      await changeSubscriptionPlan(subscriptionId, newPriceId, {
+        paymentBehavior: "default_incomplete",
+      });
+
+      Then handle the incomplete payment in your webhook.
+
+  - id: mid-cycle-downgrade
+    symptom: "Customer charged immediately when downgrading"
+    cause: "Default proration behavior creates immediate charges"
+    solution: |
+      For downgrades, consider using "none" proration behavior
+      to apply the change at the end of the billing period:
+
+      await changeSubscriptionPlan(subscriptionId, newPriceId, {
+        prorationBehavior: "none",
+      });
+
+  - id: preview-mismatch
+    symptom: "Final charge differs from preview"
+    cause: "Time elapsed between preview and actual change"
+    solution: |
+      Pass a fixed proration_date to both preview and change:
+
+      const prorationDate = Math.floor(Date.now() / 1000);
+
+      // Use same date for preview and actual change
+      await previewProration(subId, priceId, { prorationDate });
+
+  - id: trial-period-proration
+    symptom: "Unexpected charges during trial"
+    cause: "Proration applies even during trial periods"
+    solution: |
+      Check for trial status before allowing plan changes:
+
+      const sub = await stripe.subscriptions.retrieve(subscriptionId);
+      if (sub.trial_end && sub.trial_end > Date.now() / 1000) {
+        // Handle trial differently
+      }
+
+validation:
+  manual_test:
+    - "Create two subscription plans with different prices"
+    - "Subscribe a test customer to the lower plan"
+    - "Use preview endpoint to see proration calculation"
+    - "Change to higher plan and verify prorated charge"
+    - "Check Stripe Dashboard for correct invoice"
+    - "Downgrade and verify credit is applied"

@@ -1,0 +1,697 @@
+id: stripe-invoices
+version: "1.0.0"
+updated_at: "2026-01-31"
+author: "nyko-team"
+status: beta
+
+name: "Stripe Invoices and Receipts"
+description: "Generate, customize, and manage invoices and receipts with Stripe"
+
+category: payments
+tags:
+  - stripe
+  - invoices
+  - receipts
+  - billing
+  - pdf
+
+difficulty: intermediate
+time_estimate: "25-35 min"
+
+stack:
+  required:
+    - name: "next"
+      version: "^15.1.0"
+      reason: "App Router"
+    - name: "stripe"
+      version: "^20.3.0"
+      reason: "Stripe SDK with invoice support"
+
+requires:
+  - stripe-checkout-session
+
+enables: []
+
+env_vars:
+  required:
+    - key: STRIPE_SECRET_KEY
+      description: "Stripe secret API key"
+      format: "sk_test_... or sk_live_..."
+      where_to_find: "Stripe Dashboard > Developers > API keys"
+
+external_setup:
+  - service: "Stripe"
+    url: "https://dashboard.stripe.com"
+    steps:
+      - "Go to Settings > Branding > Invoice template"
+      - "Customize invoice appearance, logo, and colors"
+      - "Configure invoice settings in Settings > Billing > Invoices"
+      - "Set up email settings for automatic invoice delivery"
+
+files:
+  - path: "lib/stripe/invoices.ts"
+    action: create
+    description: "Invoice management utilities"
+    priority: 1
+
+  - path: "app/api/invoices/route.ts"
+    action: create
+    description: "Invoice listing and creation endpoint"
+    priority: 2
+
+  - path: "app/api/invoices/[invoiceId]/route.ts"
+    action: create
+    description: "Single invoice operations"
+    priority: 3
+
+  - path: "components/invoice-list.tsx"
+    action: create
+    description: "Invoice listing component"
+    priority: 4
+
+code:
+  lib/stripe/invoices.ts: |
+    import Stripe from "stripe";
+
+    let stripeInstance: Stripe | null = null;
+
+    function getStripe(): Stripe {
+      if (!process.env.STRIPE_SECRET_KEY) {
+        throw new Error("Missing STRIPE_SECRET_KEY");
+      }
+
+      if (!stripeInstance) {
+        stripeInstance = new Stripe(process.env.STRIPE_SECRET_KEY, {
+          apiVersion: "2025-01-28.clover",
+          typescript: true,
+        });
+      }
+
+      return stripeInstance;
+    }
+
+    export interface InvoiceItem {
+      description: string;
+      amount: number; // in cents
+      quantity?: number;
+    }
+
+    export interface CreateInvoiceParams {
+      customerId: string;
+      items: InvoiceItem[];
+      dueDate?: Date;
+      description?: string;
+      footer?: string;
+      metadata?: Record<string, string>;
+      autoAdvance?: boolean;
+      collectionMethod?: "charge_automatically" | "send_invoice";
+    }
+
+    /**
+     * Create a one-off invoice
+     */
+    export async function createInvoice(
+      params: CreateInvoiceParams
+    ): Promise<Stripe.Invoice> {
+      const stripe = getStripe();
+
+      // Create invoice items first
+      for (const item of params.items) {
+        await stripe.invoiceItems.create({
+          customer: params.customerId,
+          amount: item.amount,
+          description: item.description,
+          quantity: item.quantity || 1,
+          currency: "usd",
+        });
+      }
+
+      // Create the invoice
+      const invoice = await stripe.invoices.create({
+        customer: params.customerId,
+        auto_advance: params.autoAdvance ?? true,
+        collection_method: params.collectionMethod || "charge_automatically",
+        description: params.description,
+        footer: params.footer,
+        metadata: params.metadata,
+        due_date: params.dueDate
+          ? Math.floor(params.dueDate.getTime() / 1000)
+          : undefined,
+      });
+
+      return invoice;
+    }
+
+    /**
+     * Finalize and send invoice
+     */
+    export async function finalizeAndSendInvoice(
+      invoiceId: string
+    ): Promise<Stripe.Invoice> {
+      const stripe = getStripe();
+
+      // Finalize the invoice
+      const finalized = await stripe.invoices.finalizeInvoice(invoiceId);
+
+      // Send the invoice email
+      await stripe.invoices.sendInvoice(invoiceId);
+
+      return finalized;
+    }
+
+    /**
+     * List customer invoices
+     */
+    export async function listCustomerInvoices(
+      customerId: string,
+      options?: {
+        status?: Stripe.InvoiceListParams.Status;
+        limit?: number;
+        startingAfter?: string;
+      }
+    ): Promise<Stripe.ApiList<Stripe.Invoice>> {
+      const stripe = getStripe();
+
+      return stripe.invoices.list({
+        customer: customerId,
+        status: options?.status,
+        limit: options?.limit || 10,
+        starting_after: options?.startingAfter,
+      });
+    }
+
+    /**
+     * Get invoice details
+     */
+    export async function getInvoice(invoiceId: string): Promise<Stripe.Invoice> {
+      const stripe = getStripe();
+      return stripe.invoices.retrieve(invoiceId, {
+        expand: ["customer", "charge", "payment_intent"],
+      });
+    }
+
+    /**
+     * Get invoice PDF URL
+     */
+    export async function getInvoicePdfUrl(
+      invoiceId: string
+    ): Promise<string | null> {
+      const invoice = await getInvoice(invoiceId);
+      return invoice.invoice_pdf;
+    }
+
+    /**
+     * Get hosted invoice URL
+     */
+    export async function getInvoiceHostedUrl(
+      invoiceId: string
+    ): Promise<string | null> {
+      const invoice = await getInvoice(invoiceId);
+      return invoice.hosted_invoice_url;
+    }
+
+    /**
+     * Void an invoice
+     */
+    export async function voidInvoice(invoiceId: string): Promise<Stripe.Invoice> {
+      const stripe = getStripe();
+      return stripe.invoices.voidInvoice(invoiceId);
+    }
+
+    /**
+     * Mark invoice as uncollectible
+     */
+    export async function markUncollectible(
+      invoiceId: string
+    ): Promise<Stripe.Invoice> {
+      const stripe = getStripe();
+      return stripe.invoices.markUncollectible(invoiceId);
+    }
+
+    /**
+     * Pay an open invoice
+     */
+    export async function payInvoice(
+      invoiceId: string,
+      paymentMethodId?: string
+    ): Promise<Stripe.Invoice> {
+      const stripe = getStripe();
+      return stripe.invoices.pay(invoiceId, {
+        payment_method: paymentMethodId,
+      });
+    }
+
+    /**
+     * Add a discount to an invoice
+     */
+    export async function addInvoiceDiscount(
+      invoiceId: string,
+      couponId: string
+    ): Promise<Stripe.Invoice> {
+      const stripe = getStripe();
+      return stripe.invoices.update(invoiceId, {
+        discounts: [{ coupon: couponId }],
+      });
+    }
+
+    /**
+     * Get upcoming invoice for a subscription
+     */
+    export async function getUpcomingInvoice(
+      customerId: string,
+      subscriptionId?: string
+    ): Promise<Stripe.UpcomingInvoice> {
+      const stripe = getStripe();
+      return stripe.invoices.retrieveUpcoming({
+        customer: customerId,
+        subscription: subscriptionId,
+      });
+    }
+
+    /**
+     * Format invoice for display
+     */
+    export function formatInvoice(invoice: Stripe.Invoice) {
+      return {
+        id: invoice.id,
+        number: invoice.number,
+        status: invoice.status,
+        amount_due: invoice.amount_due,
+        amount_paid: invoice.amount_paid,
+        currency: invoice.currency,
+        created: new Date(invoice.created * 1000),
+        due_date: invoice.due_date ? new Date(invoice.due_date * 1000) : null,
+        paid_at: invoice.status_transitions?.paid_at
+          ? new Date(invoice.status_transitions.paid_at * 1000)
+          : null,
+        pdf_url: invoice.invoice_pdf,
+        hosted_url: invoice.hosted_invoice_url,
+        lines: invoice.lines?.data.map((line) => ({
+          description: line.description,
+          amount: line.amount,
+          quantity: line.quantity,
+        })),
+      };
+    }
+
+  app/api/invoices/route.ts: |
+    import { NextRequest, NextResponse } from "next/server";
+    import {
+      createInvoice,
+      listCustomerInvoices,
+      formatInvoice,
+    } from "@/lib/stripe/invoices";
+
+    export async function GET(request: NextRequest) {
+      try {
+        const { searchParams } = new URL(request.url);
+        const customerId = searchParams.get("customerId");
+        const status = searchParams.get("status") as "draft" | "open" | "paid" | "void" | "uncollectible" | null;
+        const limit = parseInt(searchParams.get("limit") || "10");
+
+        if (!customerId) {
+          return NextResponse.json(
+            { error: "customerId is required" },
+            { status: 400 }
+          );
+        }
+
+        const invoices = await listCustomerInvoices(customerId, {
+          status: status || undefined,
+          limit,
+        });
+
+        return NextResponse.json({
+          invoices: invoices.data.map(formatInvoice),
+          hasMore: invoices.has_more,
+        });
+      } catch (error) {
+        console.error("List invoices error:", error);
+        return NextResponse.json(
+          { error: "Failed to list invoices" },
+          { status: 500 }
+        );
+      }
+    }
+
+    export async function POST(request: NextRequest) {
+      try {
+        const body = await request.json();
+        const {
+          customerId,
+          items,
+          dueDate,
+          description,
+          footer,
+          autoAdvance,
+          sendImmediately,
+        } = body;
+
+        if (!customerId || !items || items.length === 0) {
+          return NextResponse.json(
+            { error: "customerId and items are required" },
+            { status: 400 }
+          );
+        }
+
+        const invoice = await createInvoice({
+          customerId,
+          items,
+          dueDate: dueDate ? new Date(dueDate) : undefined,
+          description,
+          footer,
+          autoAdvance: autoAdvance ?? !sendImmediately,
+          collectionMethod: sendImmediately ? "send_invoice" : "charge_automatically",
+        });
+
+        return NextResponse.json({
+          success: true,
+          invoice: formatInvoice(invoice),
+        });
+      } catch (error) {
+        console.error("Create invoice error:", error);
+        return NextResponse.json(
+          { error: error instanceof Error ? error.message : "Failed to create invoice" },
+          { status: 500 }
+        );
+      }
+    }
+
+  app/api/invoices/[invoiceId]/route.ts: |
+    import { NextRequest, NextResponse } from "next/server";
+    import {
+      getInvoice,
+      voidInvoice,
+      payInvoice,
+      finalizeAndSendInvoice,
+      formatInvoice,
+    } from "@/lib/stripe/invoices";
+
+    interface RouteParams {
+      params: Promise<{ invoiceId: string }>;
+    }
+
+    export async function GET(request: NextRequest, { params }: RouteParams) {
+      try {
+        const { invoiceId } = await params;
+        const invoice = await getInvoice(invoiceId);
+        return NextResponse.json(formatInvoice(invoice));
+      } catch (error) {
+        console.error("Get invoice error:", error);
+        return NextResponse.json(
+          { error: "Invoice not found" },
+          { status: 404 }
+        );
+      }
+    }
+
+    export async function POST(request: NextRequest, { params }: RouteParams) {
+      try {
+        const { invoiceId } = await params;
+        const body = await request.json();
+        const { action, paymentMethodId } = body;
+
+        let invoice;
+
+        switch (action) {
+          case "finalize":
+            invoice = await finalizeAndSendInvoice(invoiceId);
+            break;
+
+          case "pay":
+            invoice = await payInvoice(invoiceId, paymentMethodId);
+            break;
+
+          case "void":
+            invoice = await voidInvoice(invoiceId);
+            break;
+
+          default:
+            return NextResponse.json(
+              { error: "Invalid action" },
+              { status: 400 }
+            );
+        }
+
+        return NextResponse.json({
+          success: true,
+          invoice: formatInvoice(invoice),
+        });
+      } catch (error) {
+        console.error("Invoice action error:", error);
+        return NextResponse.json(
+          { error: error instanceof Error ? error.message : "Action failed" },
+          { status: 500 }
+        );
+      }
+    }
+
+  components/invoice-list.tsx: |
+    "use client";
+
+    import { useState, useEffect } from "react";
+
+    interface Invoice {
+      id: string;
+      number: string | null;
+      status: string;
+      amount_due: number;
+      amount_paid: number;
+      currency: string;
+      created: string;
+      due_date: string | null;
+      paid_at: string | null;
+      pdf_url: string | null;
+      hosted_url: string | null;
+    }
+
+    interface InvoiceListProps {
+      customerId: string;
+    }
+
+    export function InvoiceList({ customerId }: InvoiceListProps) {
+      const [invoices, setInvoices] = useState<Invoice[]>([]);
+      const [isLoading, setIsLoading] = useState(true);
+      const [error, setError] = useState<string | null>(null);
+      const [filter, setFilter] = useState<string>("all");
+
+      useEffect(() => {
+        const fetchInvoices = async () => {
+          setIsLoading(true);
+          try {
+            const params = new URLSearchParams({ customerId });
+            if (filter !== "all") {
+              params.append("status", filter);
+            }
+
+            const response = await fetch(`/api/invoices?${params}`);
+            if (!response.ok) throw new Error("Failed to fetch invoices");
+
+            const data = await response.json();
+            setInvoices(data.invoices);
+          } catch (err) {
+            setError(err instanceof Error ? err.message : "Failed to load");
+          } finally {
+            setIsLoading(false);
+          }
+        };
+
+        fetchInvoices();
+      }, [customerId, filter]);
+
+      const formatAmount = (amount: number, currency: string) => {
+        return new Intl.NumberFormat("en-US", {
+          style: "currency",
+          currency: currency.toUpperCase(),
+        }).format(amount / 100);
+      };
+
+      const formatDate = (dateString: string | null) => {
+        if (!dateString) return "-";
+        return new Date(dateString).toLocaleDateString();
+      };
+
+      const getStatusBadge = (status: string) => {
+        const styles: Record<string, string> = {
+          paid: "bg-green-100 text-green-800",
+          open: "bg-yellow-100 text-yellow-800",
+          draft: "bg-gray-100 text-gray-800",
+          void: "bg-red-100 text-red-800",
+          uncollectible: "bg-red-100 text-red-800",
+        };
+
+        return (
+          <span
+            className={`inline-flex rounded-full px-2 py-1 text-xs font-medium ${
+              styles[status] || styles.draft
+            }`}
+          >
+            {status}
+          </span>
+        );
+      };
+
+      if (isLoading) {
+        return <div className="py-8 text-center text-gray-500">Loading invoices...</div>;
+      }
+
+      if (error) {
+        return <div className="py-8 text-center text-red-500">{error}</div>;
+      }
+
+      return (
+        <div className="space-y-4">
+          {/* Filter */}
+          <div className="flex gap-2">
+            {["all", "paid", "open", "draft", "void"].map((status) => (
+              <button
+                key={status}
+                onClick={() => setFilter(status)}
+                className={`rounded-lg px-3 py-1 text-sm ${
+                  filter === status
+                    ? "bg-blue-600 text-white"
+                    : "bg-gray-100 hover:bg-gray-200"
+                }`}
+              >
+                {status.charAt(0).toUpperCase() + status.slice(1)}
+              </button>
+            ))}
+          </div>
+
+          {/* Invoice Table */}
+          <div className="overflow-hidden rounded-lg border">
+            <table className="min-w-full divide-y divide-gray-200">
+              <thead className="bg-gray-50">
+                <tr>
+                  <th className="px-4 py-3 text-left text-xs font-medium uppercase text-gray-500">
+                    Invoice
+                  </th>
+                  <th className="px-4 py-3 text-left text-xs font-medium uppercase text-gray-500">
+                    Status
+                  </th>
+                  <th className="px-4 py-3 text-left text-xs font-medium uppercase text-gray-500">
+                    Amount
+                  </th>
+                  <th className="px-4 py-3 text-left text-xs font-medium uppercase text-gray-500">
+                    Date
+                  </th>
+                  <th className="px-4 py-3 text-left text-xs font-medium uppercase text-gray-500">
+                    Actions
+                  </th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-200 bg-white">
+                {invoices.length === 0 ? (
+                  <tr>
+                    <td colSpan={5} className="px-4 py-8 text-center text-gray-500">
+                      No invoices found
+                    </td>
+                  </tr>
+                ) : (
+                  invoices.map((invoice) => (
+                    <tr key={invoice.id}>
+                      <td className="whitespace-nowrap px-4 py-3 text-sm font-medium">
+                        {invoice.number || invoice.id.slice(-8)}
+                      </td>
+                      <td className="whitespace-nowrap px-4 py-3 text-sm">
+                        {getStatusBadge(invoice.status)}
+                      </td>
+                      <td className="whitespace-nowrap px-4 py-3 text-sm">
+                        {formatAmount(invoice.amount_due, invoice.currency)}
+                      </td>
+                      <td className="whitespace-nowrap px-4 py-3 text-sm text-gray-500">
+                        {formatDate(invoice.created)}
+                      </td>
+                      <td className="whitespace-nowrap px-4 py-3 text-sm">
+                        <div className="flex gap-2">
+                          {invoice.pdf_url && (
+                            <a
+                              href={invoice.pdf_url}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="text-blue-600 hover:underline"
+                            >
+                              PDF
+                            </a>
+                          )}
+                          {invoice.hosted_url && (
+                            <a
+                              href={invoice.hosted_url}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="text-blue-600 hover:underline"
+                            >
+                              View
+                            </a>
+                          )}
+                        </div>
+                      </td>
+                    </tr>
+                  ))
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      );
+    }
+
+edge_cases:
+  - id: invoice-already-finalized
+    symptom: "Error when trying to modify a finalized invoice"
+    cause: "Invoices cannot be modified after finalization"
+    solution: |
+      Check invoice status before modifications:
+
+      const invoice = await getInvoice(invoiceId);
+      if (invoice.status !== "draft") {
+        throw new Error("Cannot modify finalized invoice");
+      }
+
+      For changes to finalized invoices, void and create new.
+
+  - id: missing-payment-method
+    symptom: "Invoice payment fails with no payment method"
+    cause: "Customer has no default payment method"
+    solution: |
+      Ensure customer has a payment method:
+
+      const customer = await stripe.customers.retrieve(customerId);
+      if (!customer.invoice_settings?.default_payment_method) {
+        // Redirect to add payment method or use send_invoice
+        await createInvoice({
+          ...params,
+          collectionMethod: "send_invoice",
+        });
+      }
+
+  - id: pdf-not-available
+    symptom: "Invoice PDF URL is null"
+    cause: "PDF is only generated for finalized invoices"
+    solution: |
+      Finalize the invoice first:
+
+      const finalized = await stripe.invoices.finalizeInvoice(invoiceId);
+      // Now finalized.invoice_pdf will be available
+
+  - id: invoice-void-failed
+    symptom: "Cannot void a paid invoice"
+    cause: "Paid invoices cannot be voided"
+    solution: |
+      For paid invoices, create a refund instead:
+
+      if (invoice.status === "paid") {
+        await stripe.refunds.create({
+          payment_intent: invoice.payment_intent as string,
+        });
+      }
+
+validation:
+  manual_test:
+    - "Create a test customer in Stripe"
+    - "Create an invoice with multiple items"
+    - "Finalize and send the invoice"
+    - "Check email delivery of invoice"
+    - "Download PDF and verify formatting"
+    - "Pay invoice and verify status updates"
+    - "Test voiding a draft invoice"
