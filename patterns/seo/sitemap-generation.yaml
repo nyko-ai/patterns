@@ -1,0 +1,470 @@
+id: sitemap-generation
+name: Dynamic Sitemap Generation
+description: Dynamic sitemap.xml generation with Next.js for SEO optimization
+category: seo
+tags:
+  - seo
+  - sitemap
+  - next.js
+  - indexing
+  - google
+dependencies: []
+files:
+  - path: app/sitemap.ts
+    description: Main sitemap generation
+    content: |
+      import { MetadataRoute } from 'next';
+
+      const BASE_URL = process.env.NEXT_PUBLIC_SITE_URL || 'https://example.com';
+
+      // Static pages
+      const staticPages = [
+        '',
+        '/about',
+        '/contact',
+        '/pricing',
+        '/blog',
+        '/faq',
+      ];
+
+      // Fetch dynamic content (replace with your data source)
+      async function getBlogPosts() {
+        // Example: fetch from database or CMS
+        const posts = [
+          { slug: 'hello-world', updatedAt: '2024-01-15' },
+          { slug: 'getting-started', updatedAt: '2024-01-20' },
+          { slug: 'advanced-guide', updatedAt: '2024-02-01' },
+        ];
+        return posts;
+      }
+
+      async function getProducts() {
+        // Example: fetch from database
+        const products = [
+          { slug: 'product-1', updatedAt: '2024-01-10' },
+          { slug: 'product-2', updatedAt: '2024-01-25' },
+        ];
+        return products;
+      }
+
+      export default async function sitemap(): Promise<MetadataRoute.Sitemap> {
+        // Static pages
+        const staticEntries: MetadataRoute.Sitemap = staticPages.map((path) => ({
+          url: `${BASE_URL}${path}`,
+          lastModified: new Date(),
+          changeFrequency: path === '' ? 'daily' : 'weekly',
+          priority: path === '' ? 1.0 : 0.8,
+        }));
+
+        // Blog posts
+        const posts = await getBlogPosts();
+        const blogEntries: MetadataRoute.Sitemap = posts.map((post) => ({
+          url: `${BASE_URL}/blog/${post.slug}`,
+          lastModified: new Date(post.updatedAt),
+          changeFrequency: 'monthly',
+          priority: 0.6,
+        }));
+
+        // Products
+        const products = await getProducts();
+        const productEntries: MetadataRoute.Sitemap = products.map((product) => ({
+          url: `${BASE_URL}/products/${product.slug}`,
+          lastModified: new Date(product.updatedAt),
+          changeFrequency: 'weekly',
+          priority: 0.7,
+        }));
+
+        return [...staticEntries, ...blogEntries, ...productEntries];
+      }
+
+  - path: app/sitemap/[id]/route.ts
+    description: Paginated sitemap for large sites
+    content: |
+      import { NextRequest, NextResponse } from 'next/server';
+
+      const BASE_URL = process.env.NEXT_PUBLIC_SITE_URL || 'https://example.com';
+      const URLS_PER_SITEMAP = 10000;
+
+      // Get total count of URLs
+      async function getTotalUrls(): Promise<number> {
+        // Replace with actual database query
+        return 25000;
+      }
+
+      // Get URLs for a specific page
+      async function getUrlsForPage(page: number): Promise<Array<{
+        url: string;
+        lastModified: Date;
+        changeFrequency: string;
+        priority: number;
+      }>> {
+        const offset = page * URLS_PER_SITEMAP;
+        // Replace with actual database query
+        // Example: prisma.post.findMany({ skip: offset, take: URLS_PER_SITEMAP })
+        const urls = [];
+
+        for (let i = offset; i < offset + URLS_PER_SITEMAP && i < 25000; i++) {
+          urls.push({
+            url: `${BASE_URL}/page/${i}`,
+            lastModified: new Date(),
+            changeFrequency: 'monthly',
+            priority: 0.5,
+          });
+        }
+
+        return urls;
+      }
+
+      export async function GET(
+        request: NextRequest,
+        { params }: { params: Promise<{ id: string }> }
+      ) {
+        const { id } = await params;
+        const page = parseInt(id, 10);
+
+        if (isNaN(page) || page < 0) {
+          return NextResponse.json({ error: 'Invalid sitemap ID' }, { status: 400 });
+        }
+
+        const urls = await getUrlsForPage(page);
+
+        if (urls.length === 0) {
+          return NextResponse.json({ error: 'Sitemap not found' }, { status: 404 });
+        }
+
+        const xml = generateSitemapXml(urls);
+
+        return new NextResponse(xml, {
+          headers: {
+            'Content-Type': 'application/xml',
+            'Cache-Control': 'public, max-age=3600, s-maxage=3600',
+          },
+        });
+      }
+
+      function generateSitemapXml(
+        urls: Array<{
+          url: string;
+          lastModified: Date;
+          changeFrequency: string;
+          priority: number;
+        }>
+      ): string {
+        const urlEntries = urls
+          .map(
+            (entry) => `
+        <url>
+          <loc>${entry.url}</loc>
+          <lastmod>${entry.lastModified.toISOString()}</lastmod>
+          <changefreq>${entry.changeFrequency}</changefreq>
+          <priority>${entry.priority}</priority>
+        </url>`
+          )
+          .join('');
+
+        return `<?xml version="1.0" encoding="UTF-8"?>
+      <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+        ${urlEntries}
+      </urlset>`;
+      }
+
+  - path: app/sitemap-index.xml/route.ts
+    description: Sitemap index for multiple sitemaps
+    content: |
+      import { NextResponse } from 'next/server';
+
+      const BASE_URL = process.env.NEXT_PUBLIC_SITE_URL || 'https://example.com';
+      const URLS_PER_SITEMAP = 10000;
+
+      async function getTotalUrls(): Promise<number> {
+        // Replace with actual count query
+        return 25000;
+      }
+
+      export async function GET() {
+        const totalUrls = await getTotalUrls();
+        const numSitemaps = Math.ceil(totalUrls / URLS_PER_SITEMAP);
+
+        const sitemapEntries = Array.from({ length: numSitemaps }, (_, i) => ({
+          url: `${BASE_URL}/sitemap/${i}`,
+          lastModified: new Date(),
+        }));
+
+        // Add main sitemap
+        sitemapEntries.unshift({
+          url: `${BASE_URL}/sitemap.xml`,
+          lastModified: new Date(),
+        });
+
+        const xml = generateSitemapIndexXml(sitemapEntries);
+
+        return new NextResponse(xml, {
+          headers: {
+            'Content-Type': 'application/xml',
+            'Cache-Control': 'public, max-age=3600, s-maxage=3600',
+          },
+        });
+      }
+
+      function generateSitemapIndexXml(
+        sitemaps: Array<{ url: string; lastModified: Date }>
+      ): string {
+        const entries = sitemaps
+          .map(
+            (sitemap) => `
+        <sitemap>
+          <loc>${sitemap.url}</loc>
+          <lastmod>${sitemap.lastModified.toISOString()}</lastmod>
+        </sitemap>`
+          )
+          .join('');
+
+        return `<?xml version="1.0" encoding="UTF-8"?>
+      <sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+        ${entries}
+      </sitemapindex>`;
+      }
+
+  - path: lib/sitemap/generator.ts
+    description: Sitemap utility functions
+    content: |
+      interface SitemapEntry {
+        url: string;
+        lastModified?: Date | string;
+        changeFrequency?: 'always' | 'hourly' | 'daily' | 'weekly' | 'monthly' | 'yearly' | 'never';
+        priority?: number;
+        images?: Array<{
+          url: string;
+          title?: string;
+          caption?: string;
+        }>;
+        alternates?: Record<string, string>;
+      }
+
+      export function generateSitemapXml(entries: SitemapEntry[]): string {
+        const xmlns = [
+          'xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"',
+          'xmlns:image="http://www.google.com/schemas/sitemap-image/1.1"',
+          'xmlns:xhtml="http://www.w3.org/1999/xhtml"',
+        ].join(' ');
+
+        const urlEntries = entries.map((entry) => {
+          const parts = [`<loc>${escapeXml(entry.url)}</loc>`];
+
+          if (entry.lastModified) {
+            const date = typeof entry.lastModified === 'string'
+              ? entry.lastModified
+              : entry.lastModified.toISOString();
+            parts.push(`<lastmod>${date}</lastmod>`);
+          }
+
+          if (entry.changeFrequency) {
+            parts.push(`<changefreq>${entry.changeFrequency}</changefreq>`);
+          }
+
+          if (entry.priority !== undefined) {
+            parts.push(`<priority>${entry.priority}</priority>`);
+          }
+
+          // Images
+          if (entry.images?.length) {
+            entry.images.forEach((image) => {
+              parts.push(`
+            <image:image>
+              <image:loc>${escapeXml(image.url)}</image:loc>
+              ${image.title ? `<image:title>${escapeXml(image.title)}</image:title>` : ''}
+              ${image.caption ? `<image:caption>${escapeXml(image.caption)}</image:caption>` : ''}
+            </image:image>`);
+            });
+          }
+
+          // Alternate languages
+          if (entry.alternates) {
+            Object.entries(entry.alternates).forEach(([lang, url]) => {
+              parts.push(
+                `<xhtml:link rel="alternate" hreflang="${lang}" href="${escapeXml(url)}" />`
+              );
+            });
+          }
+
+          return `<url>${parts.join('\n    ')}</url>`;
+        });
+
+        return `<?xml version="1.0" encoding="UTF-8"?>
+      <urlset ${xmlns}>
+        ${urlEntries.join('\n  ')}
+      </urlset>`;
+      }
+
+      function escapeXml(str: string): string {
+        return str
+          .replace(/&/g, '&amp;')
+          .replace(/</g, '&lt;')
+          .replace(/>/g, '&gt;')
+          .replace(/"/g, '&quot;')
+          .replace(/'/g, '&apos;');
+      }
+
+      // Priority calculator based on page depth
+      export function calculatePriority(path: string): number {
+        if (path === '/' || path === '') return 1.0;
+
+        const depth = path.split('/').filter(Boolean).length;
+
+        switch (depth) {
+          case 1:
+            return 0.8;
+          case 2:
+            return 0.6;
+          case 3:
+            return 0.4;
+          default:
+            return 0.3;
+        }
+      }
+
+      // Change frequency based on content type
+      export function getChangeFrequency(
+        type: 'homepage' | 'blog' | 'product' | 'static' | 'archive'
+      ): SitemapEntry['changeFrequency'] {
+        switch (type) {
+          case 'homepage':
+            return 'daily';
+          case 'blog':
+            return 'weekly';
+          case 'product':
+            return 'weekly';
+          case 'static':
+            return 'monthly';
+          case 'archive':
+            return 'yearly';
+        }
+      }
+
+  - path: scripts/generate-sitemap.ts
+    description: Script for static sitemap generation
+    content: |
+      import fs from 'fs';
+      import path from 'path';
+      import { generateSitemapXml, calculatePriority } from '@/lib/sitemap/generator';
+
+      const BASE_URL = process.env.NEXT_PUBLIC_SITE_URL || 'https://example.com';
+      const OUTPUT_DIR = path.join(process.cwd(), 'public');
+
+      interface PageData {
+        path: string;
+        lastModified?: Date;
+        type: 'homepage' | 'blog' | 'product' | 'static';
+      }
+
+      async function getAllPages(): Promise<PageData[]> {
+        // Collect all pages from your data sources
+        const pages: PageData[] = [
+          { path: '/', lastModified: new Date(), type: 'homepage' },
+          { path: '/about', lastModified: new Date('2024-01-01'), type: 'static' },
+          { path: '/contact', lastModified: new Date('2024-01-01'), type: 'static' },
+        ];
+
+        // Add blog posts
+        // const posts = await prisma.post.findMany({ where: { published: true } });
+        // posts.forEach(post => {
+        //   pages.push({
+        //     path: `/blog/${post.slug}`,
+        //     lastModified: post.updatedAt,
+        //     type: 'blog'
+        //   });
+        // });
+
+        return pages;
+      }
+
+      async function main() {
+        console.log('Generating sitemap...');
+
+        const pages = await getAllPages();
+
+        const entries = pages.map((page) => ({
+          url: `${BASE_URL}${page.path}`,
+          lastModified: page.lastModified,
+          changeFrequency: page.type === 'homepage' ? 'daily' as const : 'weekly' as const,
+          priority: calculatePriority(page.path),
+        }));
+
+        const xml = generateSitemapXml(entries);
+
+        const outputPath = path.join(OUTPUT_DIR, 'sitemap-static.xml');
+        fs.writeFileSync(outputPath, xml, 'utf-8');
+
+        console.log(`✅ Sitemap generated: ${outputPath}`);
+        console.log(`   Total URLs: ${entries.length}`);
+      }
+
+      main().catch(console.error);
+
+  - path: app/api/sitemap/ping/route.ts
+    description: API to ping search engines
+    content: |
+      import { NextRequest, NextResponse } from 'next/server';
+
+      const BASE_URL = process.env.NEXT_PUBLIC_SITE_URL || 'https://example.com';
+      const SITEMAP_URL = `${BASE_URL}/sitemap.xml`;
+
+      const SEARCH_ENGINES = {
+        google: `https://www.google.com/ping?sitemap=${encodeURIComponent(SITEMAP_URL)}`,
+        bing: `https://www.bing.com/ping?sitemap=${encodeURIComponent(SITEMAP_URL)}`,
+      };
+
+      export async function POST(request: NextRequest) {
+        // Protect with API key
+        const authHeader = request.headers.get('authorization');
+        if (authHeader !== `Bearer ${process.env.SITEMAP_API_KEY}`) {
+          return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+        }
+
+        const results: Record<string, { success: boolean; message?: string }> = {};
+
+        for (const [engine, pingUrl] of Object.entries(SEARCH_ENGINES)) {
+          try {
+            const response = await fetch(pingUrl, { method: 'GET' });
+            results[engine] = {
+              success: response.ok,
+              message: response.ok ? 'Ping successful' : `Status: ${response.status}`,
+            };
+          } catch (error) {
+            results[engine] = {
+              success: false,
+              message: error instanceof Error ? error.message : 'Unknown error',
+            };
+          }
+        }
+
+        return NextResponse.json({
+          sitemap: SITEMAP_URL,
+          results,
+          timestamp: new Date().toISOString(),
+        });
+      }
+
+external_setup:
+  - step: Set environment variable
+    details: Add NEXT_PUBLIC_SITE_URL to .env.local
+  - step: Submit to Google Search Console
+    details: Verify site ownership and submit sitemap URL at https://search.google.com/search-console
+  - step: Submit to Bing Webmaster Tools
+    details: Submit sitemap at https://www.bing.com/webmasters
+  - step: Add to robots.txt
+    details: |
+      Ensure robots.txt includes:
+      Sitemap: https://yourdomain.com/sitemap.xml
+
+edge_cases:
+  - case: More than 50,000 URLs
+    solution: Use sitemap index with multiple sitemap files (max 50K URLs each)
+  - case: URLs with special characters
+    solution: XML escape all URLs using escapeXml function
+  - case: Stale sitemap cache
+    solution: Set appropriate Cache-Control headers, use revalidate in Next.js
+  - case: Large database queries
+    solution: Use cursor-based pagination and streaming for large datasets
+  - case: Multi-language support
+    solution: Add xhtml:link alternates for each language version

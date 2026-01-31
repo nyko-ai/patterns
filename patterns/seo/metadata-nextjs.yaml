@@ -1,0 +1,481 @@
+id: metadata-nextjs
+name: Next.js Metadata API
+description: Complete SEO metadata setup using Next.js 14+ Metadata API
+category: seo
+tags:
+  - seo
+  - metadata
+  - next.js
+  - open-graph
+  - twitter-cards
+dependencies: []
+files:
+  - path: lib/metadata/config.ts
+    description: Base metadata configuration
+    content: |
+      import { Metadata, Viewport } from 'next';
+
+      export const siteConfig = {
+        name: 'My Application',
+        description: 'A comprehensive web application built with Next.js',
+        url: process.env.NEXT_PUBLIC_SITE_URL || 'https://example.com',
+        ogImage: '/og-image.jpg',
+        twitterHandle: '@myapp',
+        locale: 'en_US',
+        author: {
+          name: 'Your Name',
+          url: 'https://yoursite.com',
+        },
+      };
+
+      export const baseMetadata: Metadata = {
+        metadataBase: new URL(siteConfig.url),
+        title: {
+          default: siteConfig.name,
+          template: `%s | ${siteConfig.name}`,
+        },
+        description: siteConfig.description,
+        keywords: ['nextjs', 'react', 'web application'],
+        authors: [siteConfig.author],
+        creator: siteConfig.author.name,
+        publisher: siteConfig.author.name,
+        robots: {
+          index: true,
+          follow: true,
+          googleBot: {
+            index: true,
+            follow: true,
+            'max-video-preview': -1,
+            'max-image-preview': 'large',
+            'max-snippet': -1,
+          },
+        },
+        openGraph: {
+          type: 'website',
+          locale: siteConfig.locale,
+          url: siteConfig.url,
+          title: siteConfig.name,
+          description: siteConfig.description,
+          siteName: siteConfig.name,
+          images: [
+            {
+              url: siteConfig.ogImage,
+              width: 1200,
+              height: 630,
+              alt: siteConfig.name,
+            },
+          ],
+        },
+        twitter: {
+          card: 'summary_large_image',
+          title: siteConfig.name,
+          description: siteConfig.description,
+          images: [siteConfig.ogImage],
+          creator: siteConfig.twitterHandle,
+        },
+        icons: {
+          icon: [
+            { url: '/favicon.ico', sizes: 'any' },
+            { url: '/icon.svg', type: 'image/svg+xml' },
+          ],
+          apple: [
+            { url: '/apple-touch-icon.png', sizes: '180x180' },
+          ],
+        },
+        manifest: '/manifest.json',
+        alternates: {
+          canonical: siteConfig.url,
+          languages: {
+            'en-US': '/en',
+            'fr-FR': '/fr',
+          },
+        },
+      };
+
+      export const baseViewport: Viewport = {
+        width: 'device-width',
+        initialScale: 1,
+        maximumScale: 5,
+        themeColor: [
+          { media: '(prefers-color-scheme: light)', color: '#ffffff' },
+          { media: '(prefers-color-scheme: dark)', color: '#000000' },
+        ],
+      };
+
+  - path: lib/metadata/generators.ts
+    description: Metadata generator functions
+    content: |
+      import { Metadata } from 'next';
+      import { siteConfig } from './config';
+
+      interface PageMetadataProps {
+        title: string;
+        description: string;
+        path?: string;
+        image?: string;
+        noIndex?: boolean;
+        keywords?: string[];
+      }
+
+      export function generatePageMetadata({
+        title,
+        description,
+        path = '',
+        image,
+        noIndex = false,
+        keywords = [],
+      }: PageMetadataProps): Metadata {
+        const url = `${siteConfig.url}${path}`;
+        const ogImage = image || siteConfig.ogImage;
+
+        return {
+          title,
+          description,
+          keywords,
+          robots: noIndex ? { index: false, follow: false } : undefined,
+          alternates: {
+            canonical: url,
+          },
+          openGraph: {
+            title,
+            description,
+            url,
+            images: [{ url: ogImage, width: 1200, height: 630, alt: title }],
+          },
+          twitter: {
+            title,
+            description,
+            images: [ogImage],
+          },
+        };
+      }
+
+      interface ArticleMetadataProps {
+        title: string;
+        description: string;
+        slug: string;
+        publishedTime: string;
+        modifiedTime?: string;
+        author: string;
+        tags?: string[];
+        image?: string;
+      }
+
+      export function generateArticleMetadata({
+        title,
+        description,
+        slug,
+        publishedTime,
+        modifiedTime,
+        author,
+        tags = [],
+        image,
+      }: ArticleMetadataProps): Metadata {
+        const url = `${siteConfig.url}/blog/${slug}`;
+        const ogImage = image || siteConfig.ogImage;
+
+        return {
+          title,
+          description,
+          keywords: tags,
+          authors: [{ name: author }],
+          alternates: {
+            canonical: url,
+          },
+          openGraph: {
+            type: 'article',
+            title,
+            description,
+            url,
+            publishedTime,
+            modifiedTime,
+            authors: [author],
+            tags,
+            images: [{ url: ogImage, width: 1200, height: 630, alt: title }],
+          },
+          twitter: {
+            card: 'summary_large_image',
+            title,
+            description,
+            images: [ogImage],
+          },
+        };
+      }
+
+      interface ProductMetadataProps {
+        name: string;
+        description: string;
+        slug: string;
+        price: number;
+        currency?: string;
+        availability?: 'in stock' | 'out of stock' | 'preorder';
+        image?: string;
+        brand?: string;
+        category?: string;
+      }
+
+      export function generateProductMetadata({
+        name,
+        description,
+        slug,
+        price,
+        currency = 'USD',
+        availability = 'in stock',
+        image,
+        brand,
+        category,
+      }: ProductMetadataProps): Metadata {
+        const url = `${siteConfig.url}/products/${slug}`;
+        const ogImage = image || siteConfig.ogImage;
+
+        return {
+          title: name,
+          description,
+          keywords: [name, brand, category].filter(Boolean) as string[],
+          alternates: {
+            canonical: url,
+          },
+          openGraph: {
+            type: 'website',
+            title: name,
+            description,
+            url,
+            images: [{ url: ogImage, width: 1200, height: 630, alt: name }],
+          },
+          twitter: {
+            card: 'summary_large_image',
+            title: name,
+            description,
+            images: [ogImage],
+          },
+          other: {
+            'product:price:amount': price.toString(),
+            'product:price:currency': currency,
+            'product:availability': availability,
+            ...(brand && { 'product:brand': brand }),
+            ...(category && { 'product:category': category }),
+          },
+        };
+      }
+
+  - path: app/layout.tsx
+    description: Root layout with base metadata
+    content: |
+      import type { Metadata, Viewport } from 'next';
+      import { baseMetadata, baseViewport } from '@/lib/metadata/config';
+      import './globals.css';
+
+      export const metadata: Metadata = baseMetadata;
+      export const viewport: Viewport = baseViewport;
+
+      export default function RootLayout({
+        children,
+      }: {
+        children: React.ReactNode;
+      }) {
+        return (
+          <html lang="en">
+            <body>{children}</body>
+          </html>
+        );
+      }
+
+  - path: app/about/page.tsx
+    description: Example page with custom metadata
+    content: |
+      import { Metadata } from 'next';
+      import { generatePageMetadata } from '@/lib/metadata/generators';
+
+      export const metadata: Metadata = generatePageMetadata({
+        title: 'About Us',
+        description: 'Learn more about our company and mission',
+        path: '/about',
+        keywords: ['about', 'company', 'team', 'mission'],
+      });
+
+      export default function AboutPage() {
+        return (
+          <main>
+            <h1>About Us</h1>
+            {/* Page content */}
+          </main>
+        );
+      }
+
+  - path: app/blog/[slug]/page.tsx
+    description: Dynamic page with generated metadata
+    content: |
+      import { Metadata } from 'next';
+      import { notFound } from 'next/navigation';
+      import { generateArticleMetadata } from '@/lib/metadata/generators';
+
+      // Simulated data fetch
+      async function getArticle(slug: string) {
+        // Replace with actual data fetch
+        const articles: Record<string, any> = {
+          'hello-world': {
+            title: 'Hello World',
+            description: 'My first blog post about getting started',
+            content: 'Article content here...',
+            publishedAt: '2024-01-15T10:00:00Z',
+            updatedAt: '2024-01-20T15:30:00Z',
+            author: 'John Doe',
+            tags: ['getting-started', 'tutorial'],
+            image: '/blog/hello-world.jpg',
+          },
+        };
+        return articles[slug] || null;
+      }
+
+      interface Props {
+        params: Promise<{ slug: string }>;
+      }
+
+      export async function generateMetadata({ params }: Props): Promise<Metadata> {
+        const { slug } = await params;
+        const article = await getArticle(slug);
+
+        if (!article) {
+          return {
+            title: 'Article Not Found',
+          };
+        }
+
+        return generateArticleMetadata({
+          title: article.title,
+          description: article.description,
+          slug,
+          publishedTime: article.publishedAt,
+          modifiedTime: article.updatedAt,
+          author: article.author,
+          tags: article.tags,
+          image: article.image,
+        });
+      }
+
+      export default async function ArticlePage({ params }: Props) {
+        const { slug } = await params;
+        const article = await getArticle(slug);
+
+        if (!article) {
+          notFound();
+        }
+
+        return (
+          <article>
+            <h1>{article.title}</h1>
+            <p>{article.content}</p>
+          </article>
+        );
+      }
+
+  - path: app/robots.ts
+    description: Dynamic robots.txt generation
+    content: |
+      import { MetadataRoute } from 'next';
+      import { siteConfig } from '@/lib/metadata/config';
+
+      export default function robots(): MetadataRoute.Robots {
+        return {
+          rules: [
+            {
+              userAgent: '*',
+              allow: '/',
+              disallow: ['/api/', '/admin/', '/private/'],
+            },
+            {
+              userAgent: 'Googlebot',
+              allow: '/',
+            },
+          ],
+          sitemap: `${siteConfig.url}/sitemap.xml`,
+          host: siteConfig.url,
+        };
+      }
+
+  - path: components/seo/json-ld.tsx
+    description: JSON-LD component for structured data
+    content: |
+      interface JsonLdProps {
+        data: Record<string, any>;
+      }
+
+      export function JsonLd({ data }: JsonLdProps) {
+        return (
+          <script
+            type="application/ld+json"
+            dangerouslySetInnerHTML={{ __html: JSON.stringify(data) }}
+          />
+        );
+      }
+
+      // Pre-built schemas
+      export function WebsiteJsonLd({
+        name,
+        url,
+        description,
+      }: {
+        name: string;
+        url: string;
+        description: string;
+      }) {
+        return (
+          <JsonLd
+            data={{
+              '@context': 'https://schema.org',
+              '@type': 'WebSite',
+              name,
+              url,
+              description,
+              potentialAction: {
+                '@type': 'SearchAction',
+                target: `${url}/search?q={search_term_string}`,
+                'query-input': 'required name=search_term_string',
+              },
+            }}
+          />
+        );
+      }
+
+      export function BreadcrumbJsonLd({
+        items,
+      }: {
+        items: { name: string; url: string }[];
+      }) {
+        return (
+          <JsonLd
+            data={{
+              '@context': 'https://schema.org',
+              '@type': 'BreadcrumbList',
+              itemListElement: items.map((item, index) => ({
+                '@type': 'ListItem',
+                position: index + 1,
+                name: item.name,
+                item: item.url,
+              })),
+            }}
+          />
+        );
+      }
+
+external_setup:
+  - step: Set NEXT_PUBLIC_SITE_URL
+    details: Add NEXT_PUBLIC_SITE_URL=https://yourdomain.com to .env.local
+  - step: Create favicon files
+    details: Place favicon.ico, icon.svg, apple-touch-icon.png in public/
+  - step: Create OG image
+    details: Create a 1200x630px image at public/og-image.jpg
+  - step: Create manifest.json
+    details: Add PWA manifest at public/manifest.json
+
+edge_cases:
+  - case: Dynamic OG images
+    solution: Use Next.js ImageResponse API in app/og/[...path]/route.tsx
+  - case: Multi-language metadata
+    solution: Generate metadata per locale using generateMetadata with locale param
+  - case: No-index pages
+    solution: Pass noIndex=true to generatePageMetadata for private pages
+  - case: Social preview testing
+    solution: Use https://metatags.io or Twitter Card Validator to test
+  - case: Metadata inheritance
+    solution: Child pages inherit parent metadata, use template for title pattern
