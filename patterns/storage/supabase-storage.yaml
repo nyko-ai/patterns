@@ -1,0 +1,759 @@
+id: supabase-storage
+version: "1.0.0"
+updated_at: "2026-01-31"
+author: "nyko-team"
+status: beta
+
+name: "Supabase Storage with Signed URLs"
+description: "Secure file storage with Supabase Storage including signed URLs, public buckets, and image transformations"
+
+category: storage
+tags:
+  - supabase
+  - storage
+  - signed-urls
+  - file-upload
+  - images
+
+difficulty: intermediate
+time_estimate: "25-30 min"
+
+stack:
+  required:
+    - name: "next"
+      version: "^15.1.0"
+      reason: "App Router"
+    - name: "@supabase/supabase-js"
+      version: "^2.93.3"
+      reason: "Supabase client"
+
+requires:
+  - supabase-client-nextjs
+
+enables: []
+
+env_vars:
+  required:
+    - key: NEXT_PUBLIC_SUPABASE_URL
+      description: "Supabase project URL"
+      format: "https://xxx.supabase.co"
+      where_to_find: "Supabase Dashboard > Settings > API"
+    - key: NEXT_PUBLIC_SUPABASE_ANON_KEY
+      description: "Supabase anon key"
+      format: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+      where_to_find: "Supabase Dashboard > Settings > API"
+    - key: SUPABASE_SERVICE_ROLE_KEY
+      description: "Supabase service role key (server-side only)"
+      format: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+      where_to_find: "Supabase Dashboard > Settings > API"
+
+external_setup:
+  - service: "Supabase Storage"
+    url: "https://supabase.com/dashboard"
+    steps:
+      - "Go to Storage in your Supabase dashboard"
+      - "Create a new bucket (e.g., 'avatars', 'documents')"
+      - "For public files: Enable 'Public bucket'"
+      - "For private files: Keep bucket private and use signed URLs"
+      - "Configure RLS policies for the bucket"
+
+files:
+  - path: "lib/supabase/storage.ts"
+    action: create
+    description: "Storage utilities and helpers"
+    priority: 1
+
+  - path: "app/api/storage/upload/route.ts"
+    action: create
+    description: "Server-side upload endpoint"
+    priority: 2
+
+  - path: "app/api/storage/signed-url/route.ts"
+    action: create
+    description: "Generate signed URLs for private files"
+    priority: 3
+
+  - path: "components/storage/image-upload.tsx"
+    action: create
+    description: "Image upload component with preview"
+    priority: 4
+
+  - path: "hooks/use-storage.ts"
+    action: create
+    description: "React hook for storage operations"
+    priority: 5
+
+code:
+  lib/supabase/storage.ts: |
+    import { createClient } from "@supabase/supabase-js";
+
+    // Server-side client with service role for admin operations
+    function getAdminClient() {
+      const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!;
+      const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY!;
+
+      return createClient(supabaseUrl, serviceRoleKey, {
+        auth: {
+          autoRefreshToken: false,
+          persistSession: false,
+        },
+      });
+    }
+
+    export type StorageBucket = "avatars" | "documents" | "images" | "videos";
+
+    export interface UploadOptions {
+      bucket: StorageBucket;
+      path: string;
+      file: File | Blob;
+      contentType?: string;
+      upsert?: boolean;
+    }
+
+    export interface UploadResult {
+      path: string;
+      publicUrl?: string;
+      signedUrl?: string;
+    }
+
+    /**
+     * Upload file to Supabase Storage (server-side)
+     */
+    export async function uploadFile(options: UploadOptions): Promise<UploadResult> {
+      const { bucket, path, file, contentType, upsert = false } = options;
+      const supabase = getAdminClient();
+
+      const { data, error } = await supabase.storage.from(bucket).upload(path, file, {
+        contentType,
+        upsert,
+      });
+
+      if (error) {
+        throw new Error(`Upload failed: ${error.message}`);
+      }
+
+      // Get public URL if bucket is public
+      const {
+        data: { publicUrl },
+      } = supabase.storage.from(bucket).getPublicUrl(data.path);
+
+      return {
+        path: data.path,
+        publicUrl,
+      };
+    }
+
+    /**
+     * Generate signed URL for private file access
+     */
+    export async function getSignedUrl(
+      bucket: StorageBucket,
+      path: string,
+      expiresIn: number = 3600 // 1 hour default
+    ): Promise<string> {
+      const supabase = getAdminClient();
+
+      const { data, error } = await supabase.storage
+        .from(bucket)
+        .createSignedUrl(path, expiresIn);
+
+      if (error) {
+        throw new Error(`Failed to generate signed URL: ${error.message}`);
+      }
+
+      return data.signedUrl;
+    }
+
+    /**
+     * Generate signed URLs for multiple files
+     */
+    export async function getSignedUrls(
+      bucket: StorageBucket,
+      paths: string[],
+      expiresIn: number = 3600
+    ): Promise<{ path: string; signedUrl: string }[]> {
+      const supabase = getAdminClient();
+
+      const { data, error } = await supabase.storage
+        .from(bucket)
+        .createSignedUrls(paths, expiresIn);
+
+      if (error) {
+        throw new Error(`Failed to generate signed URLs: ${error.message}`);
+      }
+
+      return data.map((item) => ({
+        path: item.path || "",
+        signedUrl: item.signedUrl,
+      }));
+    }
+
+    /**
+     * Delete file from storage
+     */
+    export async function deleteFile(
+      bucket: StorageBucket,
+      path: string
+    ): Promise<void> {
+      const supabase = getAdminClient();
+
+      const { error } = await supabase.storage.from(bucket).remove([path]);
+
+      if (error) {
+        throw new Error(`Delete failed: ${error.message}`);
+      }
+    }
+
+    /**
+     * Delete multiple files
+     */
+    export async function deleteFiles(
+      bucket: StorageBucket,
+      paths: string[]
+    ): Promise<void> {
+      const supabase = getAdminClient();
+
+      const { error } = await supabase.storage.from(bucket).remove(paths);
+
+      if (error) {
+        throw new Error(`Delete failed: ${error.message}`);
+      }
+    }
+
+    /**
+     * List files in a folder
+     */
+    export async function listFiles(
+      bucket: StorageBucket,
+      folder: string = ""
+    ): Promise<{ name: string; id: string; size: number; createdAt: string }[]> {
+      const supabase = getAdminClient();
+
+      const { data, error } = await supabase.storage.from(bucket).list(folder, {
+        limit: 100,
+        sortBy: { column: "created_at", order: "desc" },
+      });
+
+      if (error) {
+        throw new Error(`List failed: ${error.message}`);
+      }
+
+      return data.map((file) => ({
+        name: file.name,
+        id: file.id,
+        size: file.metadata?.size || 0,
+        createdAt: file.created_at,
+      }));
+    }
+
+    /**
+     * Move/rename file
+     */
+    export async function moveFile(
+      bucket: StorageBucket,
+      fromPath: string,
+      toPath: string
+    ): Promise<void> {
+      const supabase = getAdminClient();
+
+      const { error } = await supabase.storage.from(bucket).move(fromPath, toPath);
+
+      if (error) {
+        throw new Error(`Move failed: ${error.message}`);
+      }
+    }
+
+    /**
+     * Get public URL with image transformations
+     */
+    export function getTransformedImageUrl(
+      bucket: StorageBucket,
+      path: string,
+      options: {
+        width?: number;
+        height?: number;
+        quality?: number;
+        format?: "origin" | "avif" | "webp";
+        resize?: "cover" | "contain" | "fill";
+      } = {}
+    ): string {
+      const supabase = getAdminClient();
+
+      const { data } = supabase.storage.from(bucket).getPublicUrl(path, {
+        transform: {
+          width: options.width,
+          height: options.height,
+          quality: options.quality || 80,
+          format: options.format || "webp",
+          resize: options.resize || "cover",
+        },
+      });
+
+      return data.publicUrl;
+    }
+
+    /**
+     * Generate unique file path with user prefix
+     */
+    export function generateFilePath(
+      userId: string,
+      fileName: string,
+      prefix?: string
+    ): string {
+      const timestamp = Date.now();
+      const randomSuffix = Math.random().toString(36).substring(2, 8);
+      const extension = fileName.split(".").pop();
+      const safeName = fileName
+        .replace(/\.[^/.]+$/, "")
+        .replace(/[^a-zA-Z0-9]/g, "-")
+        .substring(0, 50);
+
+      const basePath = prefix ? `${prefix}/${userId}` : userId;
+      return `${basePath}/${safeName}-${timestamp}-${randomSuffix}.${extension}`;
+    }
+
+  app/api/storage/upload/route.ts: |
+    import { NextRequest, NextResponse } from "next/server";
+    import { uploadFile, generateFilePath } from "@/lib/supabase/storage";
+    import type { StorageBucket } from "@/lib/supabase/storage";
+
+    const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB
+    const ALLOWED_TYPES = [
+      "image/jpeg",
+      "image/png",
+      "image/webp",
+      "image/gif",
+      "application/pdf",
+    ];
+
+    export async function POST(request: NextRequest) {
+      try {
+        // Get user from session - replace with your auth logic
+        const userId = "user_123"; // await getSessionUser(request);
+        if (!userId) {
+          return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+        }
+
+        const formData = await request.formData();
+        const file = formData.get("file") as File | null;
+        const bucket = (formData.get("bucket") as StorageBucket) || "images";
+
+        if (!file) {
+          return NextResponse.json({ error: "No file provided" }, { status: 400 });
+        }
+
+        // Validate file size
+        if (file.size > MAX_FILE_SIZE) {
+          return NextResponse.json(
+            { error: `File too large. Max size: ${MAX_FILE_SIZE / 1024 / 1024}MB` },
+            { status: 400 }
+          );
+        }
+
+        // Validate file type
+        if (!ALLOWED_TYPES.includes(file.type)) {
+          return NextResponse.json(
+            { error: `Invalid file type. Allowed: ${ALLOWED_TYPES.join(", ")}` },
+            { status: 400 }
+          );
+        }
+
+        // Generate unique path
+        const path = generateFilePath(userId, file.name);
+
+        // Upload file
+        const result = await uploadFile({
+          bucket,
+          path,
+          file,
+          contentType: file.type,
+        });
+
+        return NextResponse.json({
+          success: true,
+          path: result.path,
+          publicUrl: result.publicUrl,
+        });
+      } catch (error) {
+        console.error("Upload error:", error);
+        return NextResponse.json(
+          { error: error instanceof Error ? error.message : "Upload failed" },
+          { status: 500 }
+        );
+      }
+    }
+
+  app/api/storage/signed-url/route.ts: |
+    import { NextRequest, NextResponse } from "next/server";
+    import { getSignedUrl, getSignedUrls } from "@/lib/supabase/storage";
+    import type { StorageBucket } from "@/lib/supabase/storage";
+
+    export async function POST(request: NextRequest) {
+      try {
+        // Get user from session - replace with your auth logic
+        const userId = "user_123"; // await getSessionUser(request);
+        if (!userId) {
+          return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+        }
+
+        const { bucket, path, paths, expiresIn = 3600 } = await request.json();
+
+        if (!bucket) {
+          return NextResponse.json(
+            { error: "Bucket is required" },
+            { status: 400 }
+          );
+        }
+
+        // Handle multiple paths
+        if (paths && Array.isArray(paths)) {
+          // Optional: Verify user has access to these files
+          // const hasAccess = await verifyAccess(userId, paths);
+
+          const signedUrls = await getSignedUrls(
+            bucket as StorageBucket,
+            paths,
+            expiresIn
+          );
+
+          return NextResponse.json({ signedUrls });
+        }
+
+        // Handle single path
+        if (!path) {
+          return NextResponse.json(
+            { error: "Path or paths required" },
+            { status: 400 }
+          );
+        }
+
+        // Optional: Verify user has access to this file
+        // const hasAccess = await verifyAccess(userId, path);
+
+        const signedUrl = await getSignedUrl(
+          bucket as StorageBucket,
+          path,
+          expiresIn
+        );
+
+        return NextResponse.json({ signedUrl });
+      } catch (error) {
+        console.error("Signed URL error:", error);
+        return NextResponse.json(
+          { error: error instanceof Error ? error.message : "Failed to generate URL" },
+          { status: 500 }
+        );
+      }
+    }
+
+  components/storage/image-upload.tsx: |
+    "use client";
+
+    import { useState, useCallback } from "react";
+    import Image from "next/image";
+
+    interface ImageUploadProps {
+      bucket?: string;
+      onUploadComplete?: (url: string) => void;
+      onUploadError?: (error: string) => void;
+      currentImageUrl?: string;
+      className?: string;
+    }
+
+    export function ImageUpload({
+      bucket = "images",
+      onUploadComplete,
+      onUploadError,
+      currentImageUrl,
+      className = "",
+    }: ImageUploadProps) {
+      const [preview, setPreview] = useState<string | null>(currentImageUrl || null);
+      const [isUploading, setIsUploading] = useState(false);
+      const [progress, setProgress] = useState(0);
+
+      const handleFileChange = useCallback(
+        async (e: React.ChangeEvent<HTMLInputElement>) => {
+          const file = e.target.files?.[0];
+          if (!file) return;
+
+          // Create local preview
+          const objectUrl = URL.createObjectURL(file);
+          setPreview(objectUrl);
+          setIsUploading(true);
+          setProgress(0);
+
+          try {
+            const formData = new FormData();
+            formData.append("file", file);
+            formData.append("bucket", bucket);
+
+            const response = await fetch("/api/storage/upload", {
+              method: "POST",
+              body: formData,
+            });
+
+            if (!response.ok) {
+              const error = await response.json();
+              throw new Error(error.error || "Upload failed");
+            }
+
+            const result = await response.json();
+            setProgress(100);
+            onUploadComplete?.(result.publicUrl || result.path);
+          } catch (error) {
+            console.error("Upload error:", error);
+            setPreview(currentImageUrl || null);
+            onUploadError?.(
+              error instanceof Error ? error.message : "Upload failed"
+            );
+          } finally {
+            setIsUploading(false);
+            URL.revokeObjectURL(objectUrl);
+          }
+        },
+        [bucket, currentImageUrl, onUploadComplete, onUploadError]
+      );
+
+      return (
+        <div className={`relative ${className}`}>
+          <label className="block cursor-pointer">
+            <div
+              className={`
+              relative w-32 h-32 rounded-full overflow-hidden
+              border-2 border-dashed border-gray-300
+              hover:border-gray-400 transition-colors
+              ${isUploading ? "opacity-50" : ""}
+            `}
+            >
+              {preview ? (
+                <Image
+                  src={preview}
+                  alt="Preview"
+                  fill
+                  className="object-cover"
+                />
+              ) : (
+                <div className="w-full h-full flex items-center justify-center bg-gray-100">
+                  <svg
+                    className="w-8 h-8 text-gray-400"
+                    fill="none"
+                    stroke="currentColor"
+                    viewBox="0 0 24 24"
+                  >
+                    <path
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      strokeWidth={2}
+                      d="M12 6v6m0 0v6m0-6h6m-6 0H6"
+                    />
+                  </svg>
+                </div>
+              )}
+
+              {isUploading && (
+                <div className="absolute inset-0 flex items-center justify-center bg-black/50">
+                  <div className="w-16 h-16">
+                    <svg className="animate-spin text-white" viewBox="0 0 24 24">
+                      <circle
+                        className="opacity-25"
+                        cx="12"
+                        cy="12"
+                        r="10"
+                        stroke="currentColor"
+                        strokeWidth="4"
+                        fill="none"
+                      />
+                      <path
+                        className="opacity-75"
+                        fill="currentColor"
+                        d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"
+                      />
+                    </svg>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            <input
+              type="file"
+              accept="image/*"
+              onChange={handleFileChange}
+              disabled={isUploading}
+              className="hidden"
+            />
+          </label>
+
+          <p className="mt-2 text-sm text-gray-500 text-center">
+            Click to upload image
+          </p>
+        </div>
+      );
+    }
+
+  hooks/use-storage.ts: |
+    "use client";
+
+    import { useState, useCallback } from "react";
+    import { createBrowserClient } from "@supabase/ssr";
+
+    type StorageBucket = "avatars" | "documents" | "images" | "videos";
+
+    interface UseStorageOptions {
+      bucket: StorageBucket;
+    }
+
+    interface UploadProgress {
+      loaded: number;
+      total: number;
+      percentage: number;
+    }
+
+    export function useStorage({ bucket }: UseStorageOptions) {
+      const [isUploading, setIsUploading] = useState(false);
+      const [progress, setProgress] = useState<UploadProgress | null>(null);
+      const [error, setError] = useState<string | null>(null);
+
+      const supabase = createBrowserClient(
+        process.env.NEXT_PUBLIC_SUPABASE_URL!,
+        process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
+      );
+
+      const upload = useCallback(
+        async (file: File, path?: string) => {
+          setIsUploading(true);
+          setError(null);
+          setProgress({ loaded: 0, total: file.size, percentage: 0 });
+
+          try {
+            const filePath =
+              path ||
+              `${Date.now()}-${Math.random().toString(36).substring(7)}-${file.name}`;
+
+            const { data, error: uploadError } = await supabase.storage
+              .from(bucket)
+              .upload(filePath, file, {
+                cacheControl: "3600",
+                upsert: false,
+              });
+
+            if (uploadError) throw uploadError;
+
+            setProgress({ loaded: file.size, total: file.size, percentage: 100 });
+
+            // Get public URL
+            const {
+              data: { publicUrl },
+            } = supabase.storage.from(bucket).getPublicUrl(data.path);
+
+            return { path: data.path, publicUrl };
+          } catch (err) {
+            const message = err instanceof Error ? err.message : "Upload failed";
+            setError(message);
+            throw err;
+          } finally {
+            setIsUploading(false);
+          }
+        },
+        [bucket, supabase]
+      );
+
+      const remove = useCallback(
+        async (path: string) => {
+          try {
+            const { error: deleteError } = await supabase.storage
+              .from(bucket)
+              .remove([path]);
+
+            if (deleteError) throw deleteError;
+          } catch (err) {
+            const message = err instanceof Error ? err.message : "Delete failed";
+            setError(message);
+            throw err;
+          }
+        },
+        [bucket, supabase]
+      );
+
+      const getSignedUrl = useCallback(
+        async (path: string, expiresIn: number = 3600) => {
+          const { data, error: signError } = await supabase.storage
+            .from(bucket)
+            .createSignedUrl(path, expiresIn);
+
+          if (signError) throw signError;
+          return data.signedUrl;
+        },
+        [bucket, supabase]
+      );
+
+      return {
+        upload,
+        remove,
+        getSignedUrl,
+        isUploading,
+        progress,
+        error,
+      };
+    }
+
+edge_cases:
+  - id: rls-policy-blocking
+    symptom: "Upload fails with 'new row violates RLS policy'"
+    cause: "Missing or incorrect RLS policies on storage bucket"
+    solution: |
+      Add proper RLS policies in Supabase SQL editor:
+
+      -- Allow authenticated users to upload to their folder
+      CREATE POLICY "Users can upload to own folder"
+      ON storage.objects FOR INSERT
+      TO authenticated
+      WITH CHECK (
+        bucket_id = 'images' AND
+        (storage.foldername(name))[1] = auth.uid()::text
+      );
+
+      -- Allow users to read their own files
+      CREATE POLICY "Users can read own files"
+      ON storage.objects FOR SELECT
+      TO authenticated
+      USING (
+        bucket_id = 'images' AND
+        (storage.foldername(name))[1] = auth.uid()::text
+      );
+
+  - id: signed-url-expired
+    symptom: "403 Forbidden when accessing file"
+    cause: "Signed URL has expired"
+    solution: |
+      1. Increase expiresIn when generating signed URLs
+      2. Implement automatic refresh before expiry
+      3. For permanent access, use public buckets
+
+      // Generate new signed URL when needed
+      const url = await getSignedUrl(bucket, path, 86400); // 24 hours
+
+  - id: file-size-limit
+    symptom: "413 Request Entity Too Large"
+    cause: "File exceeds Supabase's default limit"
+    solution: |
+      1. In Supabase dashboard, go to Storage > Settings
+      2. Increase "Upload file size limit"
+      3. Update your client-side validation to match
+
+  - id: cors-issues
+    symptom: "CORS error when uploading from client"
+    cause: "Missing CORS configuration"
+    solution: |
+      1. Go to Storage > Policies in Supabase dashboard
+      2. Ensure your domain is in the allowed origins
+      3. For development, add localhost:3000
+
+validation:
+  manual_test:
+    - "Create storage bucket in Supabase dashboard"
+    - "Upload file through API endpoint"
+    - "Verify file appears in Supabase Storage"
+    - "Generate and test signed URL"
+    - "Test image upload component"
+    - "Verify RLS policies work correctly"
+    - "Test file deletion"

@@ -1,0 +1,757 @@
+id: file-validation
+version: "1.0.0"
+updated_at: "2026-01-31"
+author: "nyko-team"
+status: beta
+
+name: "Server-Side File Validation"
+description: "Comprehensive file validation including type, size, magic bytes, and content scanning"
+
+category: storage
+tags:
+  - validation
+  - security
+  - file-upload
+  - mime-type
+  - magic-bytes
+
+difficulty: intermediate
+time_estimate: "20-25 min"
+
+stack:
+  required:
+    - name: "next"
+      version: "^15.1.0"
+      reason: "App Router"
+    - name: "file-type"
+      version: "^20.0.0"
+      reason: "Magic bytes detection"
+    - name: "zod"
+      version: "^4.3.6"
+      reason: "Schema validation"
+
+requires: []
+
+enables: []
+
+env_vars:
+  required: []
+  optional:
+    - key: MAX_FILE_SIZE_MB
+      description: "Maximum file size in MB"
+      format: "10"
+      where_to_find: "Configure based on your needs"
+
+external_setup: []
+
+files:
+  - path: "lib/validation/file-validator.ts"
+    action: create
+    description: "Core file validation utilities"
+    priority: 1
+
+  - path: "lib/validation/file-schemas.ts"
+    action: create
+    description: "Zod schemas for file validation"
+    priority: 2
+
+  - path: "lib/validation/mime-types.ts"
+    action: create
+    description: "MIME type configurations"
+    priority: 3
+
+  - path: "app/api/upload/validate/route.ts"
+    action: create
+    description: "Validation endpoint"
+    priority: 4
+
+  - path: "hooks/use-file-validation.ts"
+    action: create
+    description: "Client-side validation hook"
+    priority: 5
+
+code:
+  lib/validation/file-validator.ts: |
+    import { fileTypeFromBuffer } from "file-type";
+    import {
+      ALLOWED_MIME_TYPES,
+      MIME_TYPE_EXTENSIONS,
+      type AllowedMimeType,
+    } from "./mime-types";
+
+    export interface ValidationResult {
+      valid: boolean;
+      errors: string[];
+      file?: {
+        name: string;
+        size: number;
+        mimeType: string;
+        extension: string;
+      };
+    }
+
+    export interface ValidationOptions {
+      maxSizeBytes?: number;
+      allowedTypes?: AllowedMimeType[];
+      requireMagicBytes?: boolean;
+      allowedExtensions?: string[];
+    }
+
+    const DEFAULT_MAX_SIZE = 10 * 1024 * 1024; // 10MB
+
+    /**
+     * Validate file with comprehensive checks
+     */
+    export async function validateFile(
+      file: File | Blob,
+      fileName: string,
+      options: ValidationOptions = {}
+    ): Promise<ValidationResult> {
+      const errors: string[] = [];
+      const {
+        maxSizeBytes = DEFAULT_MAX_SIZE,
+        allowedTypes = Object.keys(ALLOWED_MIME_TYPES) as AllowedMimeType[],
+        requireMagicBytes = true,
+        allowedExtensions,
+      } = options;
+
+      // 1. Size validation
+      if (file.size > maxSizeBytes) {
+        const maxMB = (maxSizeBytes / (1024 * 1024)).toFixed(1);
+        errors.push(`File size exceeds ${maxMB}MB limit`);
+      }
+
+      if (file.size === 0) {
+        errors.push("File is empty");
+      }
+
+      // 2. Extension validation
+      const extension = fileName.split(".").pop()?.toLowerCase() || "";
+      if (allowedExtensions && !allowedExtensions.includes(extension)) {
+        errors.push(`Extension .${extension} is not allowed`);
+      }
+
+      // 3. MIME type from file header (magic bytes)
+      let detectedMimeType: string | undefined;
+      let detectedExtension: string | undefined;
+
+      if (requireMagicBytes) {
+        const buffer = await file.arrayBuffer();
+        const uint8Array = new Uint8Array(buffer);
+        const fileType = await fileTypeFromBuffer(uint8Array);
+
+        if (fileType) {
+          detectedMimeType = fileType.mime;
+          detectedExtension = fileType.ext;
+        } else {
+          // Some text files don't have magic bytes
+          const textTypes = [
+            "text/plain",
+            "text/csv",
+            "text/html",
+            "text/css",
+            "text/javascript",
+            "application/json",
+            "application/xml",
+          ];
+          const declaredType =
+            file instanceof File ? file.type : "application/octet-stream";
+
+          if (!textTypes.includes(declaredType)) {
+            errors.push("Unable to verify file type from content");
+          } else {
+            detectedMimeType = declaredType;
+          }
+        }
+      }
+
+      // 4. MIME type validation
+      const declaredMimeType = file instanceof File ? file.type : undefined;
+      const effectiveMimeType = detectedMimeType || declaredMimeType;
+
+      if (!effectiveMimeType) {
+        errors.push("Could not determine file type");
+      } else if (!allowedTypes.includes(effectiveMimeType as AllowedMimeType)) {
+        errors.push(`File type ${effectiveMimeType} is not allowed`);
+      }
+
+      // 5. MIME type mismatch detection (potential spoofing)
+      if (detectedMimeType && declaredMimeType) {
+        if (detectedMimeType !== declaredMimeType) {
+          // Allow some variations (e.g., image/jpg vs image/jpeg)
+          const normalized1 = normalizeMimeType(detectedMimeType);
+          const normalized2 = normalizeMimeType(declaredMimeType);
+
+          if (normalized1 !== normalized2) {
+            errors.push(
+              `File content (${detectedMimeType}) doesn't match declared type (${declaredMimeType})`
+            );
+          }
+        }
+      }
+
+      // 6. Extension vs MIME type mismatch
+      if (effectiveMimeType && extension) {
+        const expectedExtensions =
+          MIME_TYPE_EXTENSIONS[effectiveMimeType as AllowedMimeType];
+        if (expectedExtensions && !expectedExtensions.includes(extension)) {
+          errors.push(
+            `Extension .${extension} doesn't match content type ${effectiveMimeType}`
+          );
+        }
+      }
+
+      return {
+        valid: errors.length === 0,
+        errors,
+        file:
+          errors.length === 0
+            ? {
+                name: fileName,
+                size: file.size,
+                mimeType: effectiveMimeType || "application/octet-stream",
+                extension: detectedExtension || extension,
+              }
+            : undefined,
+      };
+    }
+
+    /**
+     * Validate multiple files
+     */
+    export async function validateFiles(
+      files: { file: File | Blob; name: string }[],
+      options: ValidationOptions & { maxFiles?: number } = {}
+    ): Promise<{ results: ValidationResult[]; allValid: boolean }> {
+      const { maxFiles = 10, ...validationOptions } = options;
+
+      if (files.length > maxFiles) {
+        return {
+          results: [
+            {
+              valid: false,
+              errors: [`Too many files. Maximum is ${maxFiles}`],
+            },
+          ],
+          allValid: false,
+        };
+      }
+
+      const results = await Promise.all(
+        files.map(({ file, name }) => validateFile(file, name, validationOptions))
+      );
+
+      return {
+        results,
+        allValid: results.every((r) => r.valid),
+      };
+    }
+
+    /**
+     * Normalize MIME types for comparison
+     */
+    function normalizeMimeType(mimeType: string): string {
+      const normalizations: Record<string, string> = {
+        "image/jpg": "image/jpeg",
+        "audio/mp3": "audio/mpeg",
+        "video/quicktime": "video/mp4",
+      };
+      return normalizations[mimeType] || mimeType;
+    }
+
+    /**
+     * Get human-readable file size
+     */
+    export function formatFileSize(bytes: number): string {
+      if (bytes === 0) return "0 Bytes";
+      const k = 1024;
+      const sizes = ["Bytes", "KB", "MB", "GB"];
+      const i = Math.floor(Math.log(bytes) / Math.log(k));
+      return `${parseFloat((bytes / Math.pow(k, i)).toFixed(2))} ${sizes[i]}`;
+    }
+
+    /**
+     * Check if file is an image
+     */
+    export function isImage(mimeType: string): boolean {
+      return mimeType.startsWith("image/");
+    }
+
+    /**
+     * Check if file is a video
+     */
+    export function isVideo(mimeType: string): boolean {
+      return mimeType.startsWith("video/");
+    }
+
+    /**
+     * Check if file is a document
+     */
+    export function isDocument(mimeType: string): boolean {
+      const documentTypes = [
+        "application/pdf",
+        "application/msword",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "application/vnd.ms-excel",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "text/plain",
+        "text/csv",
+      ];
+      return documentTypes.includes(mimeType);
+    }
+
+  lib/validation/file-schemas.ts: |
+    import { z } from "zod";
+
+    /**
+     * Schema for image uploads
+     */
+    export const imageFileSchema = z.object({
+      file: z.instanceof(File).refine(
+        (file) => file.size <= 5 * 1024 * 1024,
+        "Image must be less than 5MB"
+      ).refine(
+        (file) => ["image/jpeg", "image/png", "image/webp", "image/gif"].includes(file.type),
+        "Only JPEG, PNG, WebP, and GIF images are allowed"
+      ),
+    });
+
+    /**
+     * Schema for document uploads
+     */
+    export const documentFileSchema = z.object({
+      file: z.instanceof(File).refine(
+        (file) => file.size <= 20 * 1024 * 1024,
+        "Document must be less than 20MB"
+      ).refine(
+        (file) =>
+          [
+            "application/pdf",
+            "application/msword",
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            "text/plain",
+          ].includes(file.type),
+        "Only PDF, Word, and text documents are allowed"
+      ),
+    });
+
+    /**
+     * Schema for video uploads
+     */
+    export const videoFileSchema = z.object({
+      file: z.instanceof(File).refine(
+        (file) => file.size <= 100 * 1024 * 1024,
+        "Video must be less than 100MB"
+      ).refine(
+        (file) => ["video/mp4", "video/webm", "video/quicktime"].includes(file.type),
+        "Only MP4, WebM, and MOV videos are allowed"
+      ),
+    });
+
+    /**
+     * Schema for avatar uploads
+     */
+    export const avatarFileSchema = z.object({
+      file: z.instanceof(File).refine(
+        (file) => file.size <= 2 * 1024 * 1024,
+        "Avatar must be less than 2MB"
+      ).refine(
+        (file) => ["image/jpeg", "image/png", "image/webp"].includes(file.type),
+        "Only JPEG, PNG, and WebP images are allowed"
+      ),
+    });
+
+    /**
+     * Generic file schema factory
+     */
+    export function createFileSchema(options: {
+      maxSizeMB: number;
+      allowedTypes: string[];
+      fieldName?: string;
+    }) {
+      const { maxSizeMB, allowedTypes, fieldName = "File" } = options;
+      const maxBytes = maxSizeMB * 1024 * 1024;
+
+      return z.object({
+        file: z.instanceof(File).refine(
+          (file) => file.size <= maxBytes,
+          `${fieldName} must be less than ${maxSizeMB}MB`
+        ).refine(
+          (file) => allowedTypes.includes(file.type),
+          `${fieldName} type not allowed`
+        ),
+      });
+    }
+
+    /**
+     * Multiple files schema factory
+     */
+    export function createMultiFileSchema(options: {
+      maxSizeMB: number;
+      maxFiles: number;
+      allowedTypes: string[];
+    }) {
+      const { maxSizeMB, maxFiles, allowedTypes } = options;
+      const maxBytes = maxSizeMB * 1024 * 1024;
+
+      return z.object({
+        files: z
+          .array(z.instanceof(File))
+          .min(1, "At least one file is required")
+          .max(maxFiles, `Maximum ${maxFiles} files allowed`)
+          .refine(
+            (files) => files.every((file) => file.size <= maxBytes),
+            `Each file must be less than ${maxSizeMB}MB`
+          )
+          .refine(
+            (files) => files.every((file) => allowedTypes.includes(file.type)),
+            "Some files have invalid types"
+          ),
+      });
+    }
+
+  lib/validation/mime-types.ts: |
+    /**
+     * Allowed MIME types configuration
+     */
+    export const ALLOWED_MIME_TYPES = {
+      // Images
+      "image/jpeg": { category: "image", maxSize: 10 * 1024 * 1024 },
+      "image/png": { category: "image", maxSize: 10 * 1024 * 1024 },
+      "image/gif": { category: "image", maxSize: 5 * 1024 * 1024 },
+      "image/webp": { category: "image", maxSize: 10 * 1024 * 1024 },
+      "image/svg+xml": { category: "image", maxSize: 1 * 1024 * 1024 },
+      "image/avif": { category: "image", maxSize: 10 * 1024 * 1024 },
+
+      // Documents
+      "application/pdf": { category: "document", maxSize: 20 * 1024 * 1024 },
+      "application/msword": { category: "document", maxSize: 20 * 1024 * 1024 },
+      "application/vnd.openxmlformats-officedocument.wordprocessingml.document": {
+        category: "document",
+        maxSize: 20 * 1024 * 1024,
+      },
+      "application/vnd.ms-excel": { category: "document", maxSize: 20 * 1024 * 1024 },
+      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": {
+        category: "document",
+        maxSize: 20 * 1024 * 1024,
+      },
+      "text/plain": { category: "document", maxSize: 5 * 1024 * 1024 },
+      "text/csv": { category: "document", maxSize: 10 * 1024 * 1024 },
+
+      // Videos
+      "video/mp4": { category: "video", maxSize: 500 * 1024 * 1024 },
+      "video/webm": { category: "video", maxSize: 500 * 1024 * 1024 },
+      "video/quicktime": { category: "video", maxSize: 500 * 1024 * 1024 },
+
+      // Audio
+      "audio/mpeg": { category: "audio", maxSize: 50 * 1024 * 1024 },
+      "audio/wav": { category: "audio", maxSize: 50 * 1024 * 1024 },
+      "audio/ogg": { category: "audio", maxSize: 50 * 1024 * 1024 },
+      "audio/webm": { category: "audio", maxSize: 50 * 1024 * 1024 },
+
+      // Archives
+      "application/zip": { category: "archive", maxSize: 100 * 1024 * 1024 },
+      "application/gzip": { category: "archive", maxSize: 100 * 1024 * 1024 },
+
+      // JSON
+      "application/json": { category: "data", maxSize: 10 * 1024 * 1024 },
+    } as const;
+
+    export type AllowedMimeType = keyof typeof ALLOWED_MIME_TYPES;
+
+    /**
+     * MIME type to extension mapping
+     */
+    export const MIME_TYPE_EXTENSIONS: Record<AllowedMimeType, string[]> = {
+      "image/jpeg": ["jpg", "jpeg"],
+      "image/png": ["png"],
+      "image/gif": ["gif"],
+      "image/webp": ["webp"],
+      "image/svg+xml": ["svg"],
+      "image/avif": ["avif"],
+      "application/pdf": ["pdf"],
+      "application/msword": ["doc"],
+      "application/vnd.openxmlformats-officedocument.wordprocessingml.document": [
+        "docx",
+      ],
+      "application/vnd.ms-excel": ["xls"],
+      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": ["xlsx"],
+      "text/plain": ["txt"],
+      "text/csv": ["csv"],
+      "video/mp4": ["mp4"],
+      "video/webm": ["webm"],
+      "video/quicktime": ["mov"],
+      "audio/mpeg": ["mp3"],
+      "audio/wav": ["wav"],
+      "audio/ogg": ["ogg"],
+      "audio/webm": ["weba"],
+      "application/zip": ["zip"],
+      "application/gzip": ["gz"],
+      "application/json": ["json"],
+    };
+
+    /**
+     * Get allowed types by category
+     */
+    export function getAllowedTypesByCategory(
+      category: "image" | "document" | "video" | "audio" | "archive" | "data"
+    ): AllowedMimeType[] {
+      return (Object.entries(ALLOWED_MIME_TYPES) as [AllowedMimeType, { category: string }][])
+        .filter(([, config]) => config.category === category)
+        .map(([mimeType]) => mimeType);
+    }
+
+    /**
+     * Get accept string for input elements
+     */
+    export function getAcceptString(
+      categories: ("image" | "document" | "video" | "audio" | "archive")[]
+    ): string {
+      const types = categories.flatMap((cat) => getAllowedTypesByCategory(cat));
+      return types.join(",");
+    }
+
+  app/api/upload/validate/route.ts: |
+    import { NextRequest, NextResponse } from "next/server";
+    import { validateFile, validateFiles } from "@/lib/validation/file-validator";
+    import { getAllowedTypesByCategory } from "@/lib/validation/mime-types";
+    import type { AllowedMimeType } from "@/lib/validation/mime-types";
+
+    export async function POST(request: NextRequest) {
+      try {
+        const formData = await request.formData();
+        const files = formData.getAll("files") as File[];
+        const category = formData.get("category") as string | null;
+        const maxSizeMB = formData.get("maxSizeMB");
+
+        if (files.length === 0) {
+          return NextResponse.json(
+            { error: "No files provided" },
+            { status: 400 }
+          );
+        }
+
+        // Get allowed types based on category
+        let allowedTypes: AllowedMimeType[] | undefined;
+        if (category) {
+          allowedTypes = getAllowedTypesByCategory(
+            category as "image" | "document" | "video" | "audio" | "archive"
+          );
+        }
+
+        // Validate files
+        const { results, allValid } = await validateFiles(
+          files.map((file) => ({ file, name: file.name })),
+          {
+            allowedTypes,
+            maxSizeBytes: maxSizeMB
+              ? parseInt(maxSizeMB as string) * 1024 * 1024
+              : undefined,
+            requireMagicBytes: true,
+            maxFiles: 10,
+          }
+        );
+
+        return NextResponse.json({
+          valid: allValid,
+          results: results.map((result, index) => ({
+            fileName: files[index]?.name,
+            ...result,
+          })),
+        });
+      } catch (error) {
+        console.error("Validation error:", error);
+        return NextResponse.json(
+          { error: "Validation failed" },
+          { status: 500 }
+        );
+      }
+    }
+
+  hooks/use-file-validation.ts: |
+    "use client";
+
+    import { useState, useCallback } from "react";
+    import type { ValidationResult } from "@/lib/validation/file-validator";
+
+    interface UseFileValidationOptions {
+      maxSizeMB?: number;
+      allowedTypes?: string[];
+      maxFiles?: number;
+    }
+
+    interface ValidationState {
+      isValidating: boolean;
+      results: ValidationResult[];
+      allValid: boolean;
+      error: string | null;
+    }
+
+    export function useFileValidation(options: UseFileValidationOptions = {}) {
+      const { maxSizeMB = 10, allowedTypes, maxFiles = 10 } = options;
+      const maxSizeBytes = maxSizeMB * 1024 * 1024;
+
+      const [state, setState] = useState<ValidationState>({
+        isValidating: false,
+        results: [],
+        allValid: false,
+        error: null,
+      });
+
+      /**
+       * Quick client-side validation (before upload)
+       */
+      const validateLocally = useCallback(
+        (files: File[]): { valid: boolean; errors: string[] } => {
+          const errors: string[] = [];
+
+          if (files.length > maxFiles) {
+            errors.push(`Maximum ${maxFiles} files allowed`);
+          }
+
+          files.forEach((file) => {
+            if (file.size > maxSizeBytes) {
+              errors.push(`${file.name} exceeds ${maxSizeMB}MB limit`);
+            }
+
+            if (allowedTypes && !allowedTypes.includes(file.type)) {
+              errors.push(`${file.name} has invalid type`);
+            }
+          });
+
+          return { valid: errors.length === 0, errors };
+        },
+        [maxSizeBytes, maxSizeMB, allowedTypes, maxFiles]
+      );
+
+      /**
+       * Full server-side validation (with magic bytes check)
+       */
+      const validateOnServer = useCallback(
+        async (files: File[], category?: string) => {
+          setState((s) => ({ ...s, isValidating: true, error: null }));
+
+          try {
+            const formData = new FormData();
+            files.forEach((file) => formData.append("files", file));
+            if (category) formData.append("category", category);
+            formData.append("maxSizeMB", maxSizeMB.toString());
+
+            const response = await fetch("/api/upload/validate", {
+              method: "POST",
+              body: formData,
+            });
+
+            if (!response.ok) {
+              throw new Error("Validation request failed");
+            }
+
+            const data = await response.json();
+
+            setState({
+              isValidating: false,
+              results: data.results,
+              allValid: data.valid,
+              error: null,
+            });
+
+            return data;
+          } catch (error) {
+            const message =
+              error instanceof Error ? error.message : "Validation failed";
+            setState({
+              isValidating: false,
+              results: [],
+              allValid: false,
+              error: message,
+            });
+            throw error;
+          }
+        },
+        [maxSizeMB]
+      );
+
+      /**
+       * Reset validation state
+       */
+      const reset = useCallback(() => {
+        setState({
+          isValidating: false,
+          results: [],
+          allValid: false,
+          error: null,
+        });
+      }, []);
+
+      return {
+        ...state,
+        validateLocally,
+        validateOnServer,
+        reset,
+      };
+    }
+
+edge_cases:
+  - id: mime-type-spoofing
+    symptom: "User uploads malicious file with fake extension"
+    cause: "Only checking file extension, not actual content"
+    solution: |
+      Always use magic bytes validation:
+
+      const { fileTypeFromBuffer } = await import("file-type");
+      const buffer = await file.arrayBuffer();
+      const fileType = await fileTypeFromBuffer(new Uint8Array(buffer));
+
+      if (!fileType || fileType.mime !== declaredMimeType) {
+        throw new Error("File content doesn't match declared type");
+      }
+
+  - id: text-files-no-magic-bytes
+    symptom: "Text/CSV/JSON files fail validation"
+    cause: "Text files don't have magic bytes signatures"
+    solution: |
+      Handle text files specially:
+
+      const textTypes = ["text/plain", "text/csv", "application/json"];
+      if (textTypes.includes(declaredType)) {
+        // Trust the extension for text files, but validate content
+        const content = await file.text();
+        if (declaredType === "application/json") {
+          JSON.parse(content); // Validates JSON structure
+        }
+      }
+
+  - id: large-file-memory
+    symptom: "Out of memory error on large file validation"
+    cause: "Loading entire file into memory for magic bytes check"
+    solution: |
+      Only read the first few KB for magic bytes:
+
+      const HEADER_SIZE = 4100; // Enough for most magic bytes
+      const buffer = await file.slice(0, HEADER_SIZE).arrayBuffer();
+      const fileType = await fileTypeFromBuffer(new Uint8Array(buffer));
+
+  - id: svg-security
+    symptom: "XSS attack through SVG file"
+    cause: "SVG can contain JavaScript"
+    solution: |
+      Sanitize SVG files before accepting:
+
+      import DOMPurify from "isomorphic-dompurify";
+
+      if (mimeType === "image/svg+xml") {
+        const svgContent = await file.text();
+        const clean = DOMPurify.sanitize(svgContent, {
+          USE_PROFILES: { svg: true },
+        });
+        // Use sanitized SVG
+      }
+
+validation:
+  manual_test:
+    - "Upload valid image file"
+    - "Try uploading file with wrong extension"
+    - "Test file size limit enforcement"
+    - "Verify magic bytes detection works"
+    - "Test multiple file validation"
+    - "Attempt MIME type spoofing"

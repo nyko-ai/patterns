@@ -1,0 +1,585 @@
+id: uploadthing-setup
+version: "1.0.0"
+updated_at: "2026-01-31"
+author: "nyko-team"
+status: beta
+
+name: "Uploadthing File Uploads"
+description: "Type-safe file uploads with Uploadthing for Next.js with progress, validation, and custom styling"
+
+category: storage
+tags:
+  - uploadthing
+  - file-upload
+  - next.js
+  - typescript
+  - images
+
+difficulty: intermediate
+time_estimate: "20-25 min"
+
+stack:
+  required:
+    - name: "next"
+      version: "^15.1.0"
+      reason: "App Router"
+    - name: "uploadthing"
+      version: "^7.7.4"
+      reason: "File upload service"
+    - name: "@uploadthing/react"
+      version: "^7.3.3"
+      reason: "React components"
+
+requires: []
+
+enables:
+  - file-validation
+
+env_vars:
+  required:
+    - key: UPLOADTHING_TOKEN
+      description: "Uploadthing API token"
+      format: "ut_xxxxx"
+      where_to_find: "Uploadthing Dashboard > API Keys"
+
+external_setup:
+  - service: "Uploadthing"
+    url: "https://uploadthing.com/dashboard"
+    steps:
+      - "Create account at uploadthing.com"
+      - "Create a new app"
+      - "Copy UPLOADTHING_TOKEN from API Keys"
+      - "Configure allowed file types in dashboard"
+
+files:
+  - path: "lib/uploadthing/core.ts"
+    action: create
+    description: "File router configuration"
+    priority: 1
+
+  - path: "app/api/uploadthing/route.ts"
+    action: create
+    description: "API route handler"
+    priority: 2
+
+  - path: "lib/uploadthing/client.ts"
+    action: create
+    description: "Client utilities and hooks"
+    priority: 3
+
+  - path: "components/upload/file-uploader.tsx"
+    action: create
+    description: "Custom file upload component"
+    priority: 4
+
+  - path: "components/upload/upload-dropzone.tsx"
+    action: create
+    description: "Drag and drop upload zone"
+    priority: 5
+
+code:
+  lib/uploadthing/core.ts: |
+    import { createUploadthing, type FileRouter } from "uploadthing/next";
+    import { UploadThingError } from "uploadthing/server";
+
+    const f = createUploadthing();
+
+    /**
+     * Auth function - replace with your auth logic
+     */
+    async function auth(req: Request): Promise<{ userId: string } | null> {
+      // Example: Check session, JWT, etc.
+      // const session = await getServerSession(authOptions);
+      // if (!session?.user?.id) return null;
+      // return { userId: session.user.id };
+
+      // For demo, return a mock user
+      return { userId: "user_123" };
+    }
+
+    /**
+     * File Router - Define upload endpoints and their configurations
+     */
+    export const ourFileRouter = {
+      // Profile image upload
+      profileImage: f({ image: { maxFileSize: "4MB", maxFileCount: 1 } })
+        .middleware(async ({ req }) => {
+          const user = await auth(req);
+          if (!user) throw new UploadThingError("Unauthorized");
+          return { userId: user.userId };
+        })
+        .onUploadComplete(async ({ metadata, file }) => {
+          console.log("Upload complete for userId:", metadata.userId);
+          console.log("File URL:", file.ufsUrl);
+
+          // Save to database
+          // await db.user.update({
+          //   where: { id: metadata.userId },
+          //   data: { avatarUrl: file.ufsUrl },
+          // });
+
+          return { uploadedBy: metadata.userId, url: file.ufsUrl };
+        }),
+
+      // Document upload (PDF, Word, etc.)
+      documentUpload: f({
+        pdf: { maxFileSize: "16MB", maxFileCount: 5 },
+        "application/msword": { maxFileSize: "16MB" },
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document": {
+          maxFileSize: "16MB",
+        },
+      })
+        .middleware(async ({ req }) => {
+          const user = await auth(req);
+          if (!user) throw new UploadThingError("Unauthorized");
+          return { userId: user.userId };
+        })
+        .onUploadComplete(async ({ metadata, file }) => {
+          return {
+            uploadedBy: metadata.userId,
+            url: file.ufsUrl,
+            name: file.name,
+            size: file.size,
+          };
+        }),
+
+      // Multiple images upload
+      imageGallery: f({ image: { maxFileSize: "8MB", maxFileCount: 10 } })
+        .middleware(async ({ req }) => {
+          const user = await auth(req);
+          if (!user) throw new UploadThingError("Unauthorized");
+          return { userId: user.userId };
+        })
+        .onUploadComplete(async ({ metadata, file }) => {
+          return { url: file.ufsUrl, key: file.key };
+        }),
+
+      // Video upload
+      videoUpload: f({ video: { maxFileSize: "256MB", maxFileCount: 1 } })
+        .middleware(async ({ req }) => {
+          const user = await auth(req);
+          if (!user) throw new UploadThingError("Unauthorized");
+          return { userId: user.userId };
+        })
+        .onUploadComplete(async ({ metadata, file }) => {
+          return { url: file.ufsUrl, key: file.key };
+        }),
+    } satisfies FileRouter;
+
+    export type OurFileRouter = typeof ourFileRouter;
+
+  app/api/uploadthing/route.ts: |
+    import { createRouteHandler } from "uploadthing/next";
+    import { ourFileRouter } from "@/lib/uploadthing/core";
+
+    export const { GET, POST } = createRouteHandler({
+      router: ourFileRouter,
+      config: {
+        // Optional: Override callback URL for webhooks
+        // callbackUrl: "https://your-domain.com/api/uploadthing",
+      },
+    });
+
+  lib/uploadthing/client.ts: |
+    import {
+      generateUploadButton,
+      generateUploadDropzone,
+      generateReactHelpers,
+    } from "@uploadthing/react";
+    import type { OurFileRouter } from "./core";
+
+    /**
+     * Pre-built upload button component
+     */
+    export const UploadButton = generateUploadButton<OurFileRouter>();
+
+    /**
+     * Pre-built dropzone component
+     */
+    export const UploadDropzone = generateUploadDropzone<OurFileRouter>();
+
+    /**
+     * React helpers for custom upload UIs
+     */
+    export const { useUploadThing, uploadFiles } =
+      generateReactHelpers<OurFileRouter>();
+
+    /**
+     * File size formatter
+     */
+    export function formatFileSize(bytes: number): string {
+      if (bytes === 0) return "0 Bytes";
+      const k = 1024;
+      const sizes = ["Bytes", "KB", "MB", "GB"];
+      const i = Math.floor(Math.log(bytes) / Math.log(k));
+      return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + " " + sizes[i];
+    }
+
+    /**
+     * Generate image URL with transformations (if using Uploadthing's image optimization)
+     */
+    export function getOptimizedImageUrl(
+      url: string,
+      options?: {
+        width?: number;
+        height?: number;
+        quality?: number;
+      }
+    ): string {
+      if (!url.includes("ufs.sh")) return url;
+
+      const params = new URLSearchParams();
+      if (options?.width) params.set("w", options.width.toString());
+      if (options?.height) params.set("h", options.height.toString());
+      if (options?.quality) params.set("q", options.quality.toString());
+
+      const paramString = params.toString();
+      return paramString ? `${url}?${paramString}` : url;
+    }
+
+  components/upload/file-uploader.tsx: |
+    "use client";
+
+    import { useState, useCallback } from "react";
+    import { useUploadThing, formatFileSize } from "@/lib/uploadthing/client";
+    import type { OurFileRouter } from "@/lib/uploadthing/core";
+
+    interface FileUploaderProps {
+      endpoint: keyof OurFileRouter;
+      onUploadComplete?: (urls: string[]) => void;
+      onUploadError?: (error: Error) => void;
+      maxFiles?: number;
+      accept?: string;
+    }
+
+    interface UploadingFile {
+      name: string;
+      size: number;
+      progress: number;
+    }
+
+    export function FileUploader({
+      endpoint,
+      onUploadComplete,
+      onUploadError,
+      maxFiles = 1,
+      accept,
+    }: FileUploaderProps) {
+      const [uploadingFiles, setUploadingFiles] = useState<UploadingFile[]>([]);
+      const [uploadedUrls, setUploadedUrls] = useState<string[]>([]);
+
+      const { startUpload, isUploading } = useUploadThing(endpoint, {
+        onClientUploadComplete: (res) => {
+          const urls = res.map((file) => file.ufsUrl);
+          setUploadedUrls((prev) => [...prev, ...urls]);
+          setUploadingFiles([]);
+          onUploadComplete?.(urls);
+        },
+        onUploadError: (error) => {
+          setUploadingFiles([]);
+          onUploadError?.(error);
+        },
+        onUploadProgress: (progress) => {
+          setUploadingFiles((prev) =>
+            prev.map((file) => ({ ...file, progress }))
+          );
+        },
+      });
+
+      const handleFileChange = useCallback(
+        async (e: React.ChangeEvent<HTMLInputElement>) => {
+          const files = Array.from(e.target.files || []);
+          if (files.length === 0) return;
+
+          setUploadingFiles(
+            files.map((file) => ({
+              name: file.name,
+              size: file.size,
+              progress: 0,
+            }))
+          );
+
+          await startUpload(files);
+          e.target.value = "";
+        },
+        [startUpload]
+      );
+
+      return (
+        <div className="space-y-4">
+          <label className="flex flex-col items-center justify-center w-full h-32 border-2 border-dashed rounded-lg cursor-pointer bg-gray-50 hover:bg-gray-100 dark:bg-gray-800 dark:hover:bg-gray-700 dark:border-gray-600">
+            <div className="flex flex-col items-center justify-center pt-5 pb-6">
+              <svg
+                className="w-8 h-8 mb-3 text-gray-400"
+                fill="none"
+                stroke="currentColor"
+                viewBox="0 0 24 24"
+              >
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  strokeWidth={2}
+                  d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12"
+                />
+              </svg>
+              <p className="mb-2 text-sm text-gray-500 dark:text-gray-400">
+                <span className="font-semibold">Click to upload</span> or drag
+                and drop
+              </p>
+            </div>
+            <input
+              type="file"
+              className="hidden"
+              onChange={handleFileChange}
+              multiple={maxFiles > 1}
+              accept={accept}
+              disabled={isUploading}
+            />
+          </label>
+
+          {/* Uploading files progress */}
+          {uploadingFiles.length > 0 && (
+            <div className="space-y-2">
+              {uploadingFiles.map((file, index) => (
+                <div
+                  key={index}
+                  className="flex items-center gap-3 p-3 bg-gray-100 dark:bg-gray-800 rounded-lg"
+                >
+                  <div className="flex-1 min-w-0">
+                    <p className="text-sm font-medium truncate">{file.name}</p>
+                    <p className="text-xs text-gray-500">
+                      {formatFileSize(file.size)}
+                    </p>
+                  </div>
+                  <div className="w-24">
+                    <div className="h-2 bg-gray-200 rounded-full overflow-hidden">
+                      <div
+                        className="h-full bg-blue-500 transition-all duration-300"
+                        style={{ width: `${file.progress}%` }}
+                      />
+                    </div>
+                    <p className="text-xs text-center mt-1">{file.progress}%</p>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* Uploaded files */}
+          {uploadedUrls.length > 0 && (
+            <div className="space-y-2">
+              <p className="text-sm font-medium text-green-600">
+                Uploaded successfully:
+              </p>
+              {uploadedUrls.map((url, index) => (
+                <a
+                  key={index}
+                  href={url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="block text-sm text-blue-500 hover:underline truncate"
+                >
+                  {url}
+                </a>
+              ))}
+            </div>
+          )}
+        </div>
+      );
+    }
+
+  components/upload/upload-dropzone.tsx: |
+    "use client";
+
+    import { useState, useCallback } from "react";
+    import { useDropzone } from "react-dropzone";
+    import { useUploadThing, formatFileSize } from "@/lib/uploadthing/client";
+    import type { OurFileRouter } from "@/lib/uploadthing/core";
+
+    interface UploadDropzoneProps {
+      endpoint: keyof OurFileRouter;
+      onUploadComplete?: (urls: string[]) => void;
+      onUploadError?: (error: Error) => void;
+      className?: string;
+    }
+
+    export function CustomUploadDropzone({
+      endpoint,
+      onUploadComplete,
+      onUploadError,
+      className = "",
+    }: UploadDropzoneProps) {
+      const [files, setFiles] = useState<File[]>([]);
+      const [progress, setProgress] = useState(0);
+
+      const { startUpload, isUploading } = useUploadThing(endpoint, {
+        onClientUploadComplete: (res) => {
+          const urls = res.map((file) => file.ufsUrl);
+          setFiles([]);
+          setProgress(0);
+          onUploadComplete?.(urls);
+        },
+        onUploadError: (error) => {
+          setFiles([]);
+          setProgress(0);
+          onUploadError?.(error);
+        },
+        onUploadProgress: setProgress,
+      });
+
+      const onDrop = useCallback(
+        async (acceptedFiles: File[]) => {
+          setFiles(acceptedFiles);
+          await startUpload(acceptedFiles);
+        },
+        [startUpload]
+      );
+
+      const { getRootProps, getInputProps, isDragActive } = useDropzone({
+        onDrop,
+        disabled: isUploading,
+      });
+
+      return (
+        <div
+          {...getRootProps()}
+          className={`
+            relative flex flex-col items-center justify-center
+            w-full min-h-[200px] p-6
+            border-2 border-dashed rounded-xl
+            transition-colors cursor-pointer
+            ${
+              isDragActive
+                ? "border-blue-500 bg-blue-50 dark:bg-blue-900/20"
+                : "border-gray-300 dark:border-gray-600 hover:border-gray-400"
+            }
+            ${isUploading ? "pointer-events-none opacity-60" : ""}
+            ${className}
+          `}
+        >
+          <input {...getInputProps()} />
+
+          {isUploading ? (
+            <div className="text-center">
+              <div className="w-16 h-16 mx-auto mb-4">
+                <svg className="animate-spin" viewBox="0 0 24 24">
+                  <circle
+                    className="opacity-25"
+                    cx="12"
+                    cy="12"
+                    r="10"
+                    stroke="currentColor"
+                    strokeWidth="4"
+                    fill="none"
+                  />
+                  <path
+                    className="opacity-75"
+                    fill="currentColor"
+                    d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"
+                  />
+                </svg>
+              </div>
+              <p className="text-lg font-medium">Uploading... {progress}%</p>
+              <div className="w-48 h-2 mt-2 bg-gray-200 rounded-full overflow-hidden mx-auto">
+                <div
+                  className="h-full bg-blue-500 transition-all"
+                  style={{ width: `${progress}%` }}
+                />
+              </div>
+            </div>
+          ) : (
+            <>
+              <div className="w-16 h-16 mb-4 text-gray-400">
+                <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    strokeWidth={1.5}
+                    d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12"
+                  />
+                </svg>
+              </div>
+              <p className="text-lg font-medium text-gray-700 dark:text-gray-300">
+                {isDragActive ? "Drop files here" : "Drag & drop files here"}
+              </p>
+              <p className="mt-1 text-sm text-gray-500">
+                or click to browse files
+              </p>
+            </>
+          )}
+
+          {/* Preview selected files */}
+          {files.length > 0 && !isUploading && (
+            <div className="mt-4 w-full max-w-md">
+              {files.map((file, index) => (
+                <div
+                  key={index}
+                  className="flex items-center gap-2 p-2 bg-gray-100 dark:bg-gray-800 rounded"
+                >
+                  <span className="text-sm truncate flex-1">{file.name}</span>
+                  <span className="text-xs text-gray-500">
+                    {formatFileSize(file.size)}
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      );
+    }
+
+edge_cases:
+  - id: upload-timeout
+    symptom: "Upload fails with timeout error"
+    cause: "Large files or slow network connection"
+    solution: |
+      1. Increase timeout in uploadthing config
+      2. Show progress indicator to user
+      3. Consider chunked uploads for very large files:
+
+      // In your file router
+      largeFileUpload: f({ blob: { maxFileSize: "512MB" } })
+        .middleware(async ({ req }) => {
+          // ...
+        })
+
+  - id: cors-errors
+    symptom: "CORS error when uploading"
+    cause: "Missing CORS configuration or wrong domain"
+    solution: |
+      1. Ensure your domain is added in Uploadthing dashboard
+      2. Check that the callback URL matches your domain
+      3. For local development, use localhost:3000
+
+  - id: auth-not-working
+    symptom: "Unauthorized error even when logged in"
+    cause: "Auth middleware not correctly implemented"
+    solution: |
+      Ensure your auth function properly reads the session:
+
+      async function auth(req: Request) {
+        const session = await getServerSession(authOptions);
+        if (!session?.user?.id) return null;
+        return { userId: session.user.id };
+      }
+
+  - id: file-type-rejected
+    symptom: "File type not allowed error"
+    cause: "File type not configured in file router"
+    solution: |
+      Add the file type to your endpoint configuration:
+
+      customUpload: f({
+        image: { maxFileSize: "4MB" },
+        pdf: { maxFileSize: "16MB" },
+        "text/csv": { maxFileSize: "8MB" },
+      })
+
+validation:
+  manual_test:
+    - "Upload a single image file"
+    - "Upload multiple files to gallery endpoint"
+    - "Verify progress indicator works"
+    - "Test drag and drop functionality"
+    - "Verify file appears in Uploadthing dashboard"
+    - "Test unauthorized access is rejected"
