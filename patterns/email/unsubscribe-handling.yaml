@@ -1,0 +1,485 @@
+id: unsubscribe-handling
+version: "1.0.0"
+updated_at: "2026-01-31"
+author: "nyko-team"
+status: beta
+
+name: "One-Click Unsubscribe"
+description: "RFC 8058 compliant one-click unsubscribe with List-Unsubscribe headers"
+
+category: email
+tags:
+  - unsubscribe
+  - email
+  - headers
+  - compliance
+  - rfc8058
+
+difficulty: intermediate
+time_estimate: "15-25 min"
+
+stack:
+  required:
+    - name: "next"
+      version: "^15.1.0"
+      reason: "Next.js App Router"
+    - name: "@prisma/client"
+      version: "^7.3.0"
+      reason: "Subscription preferences storage"
+
+requires: []
+
+enables: []
+
+env_vars:
+  required:
+    - key: NEXT_PUBLIC_APP_URL
+      description: "Application base URL"
+      format: "https://example.com"
+      where_to_find: "Your deployment URL"
+    - key: UNSUBSCRIBE_SECRET
+      description: "Secret for signing unsubscribe tokens"
+      format: "32+ character random string"
+      where_to_find: "Generate with: openssl rand -hex 32"
+
+external_setup: []
+
+files:
+  - path: "prisma/schema.prisma"
+    action: modify
+    description: "Add EmailPreferences model"
+    priority: 1
+
+  - path: "lib/email/unsubscribe.ts"
+    action: create
+    description: "Unsubscribe token utilities"
+    priority: 2
+
+  - path: "lib/email/headers.ts"
+    action: create
+    description: "Email header utilities"
+    priority: 3
+
+  - path: "app/api/email/unsubscribe/route.ts"
+    action: create
+    description: "One-click unsubscribe endpoint"
+    priority: 4
+
+  - path: "app/unsubscribe/page.tsx"
+    action: create
+    description: "Unsubscribe confirmation page"
+    priority: 5
+
+code:
+  prisma/schema.prisma: |
+    // Add to existing schema.prisma
+
+    model EmailPreferences {
+      id                    String   @id @default(cuid())
+      userId                String   @unique
+      marketingEmails       Boolean  @default(true)
+      productUpdates        Boolean  @default(true)
+      weeklyDigest          Boolean  @default(true)
+      securityAlerts        Boolean  @default(true)  // Can't unsubscribe from these
+      unsubscribedAll       Boolean  @default(false)
+      unsubscribedAt        DateTime?
+      lastEmailSentAt       DateTime?
+      createdAt             DateTime @default(now())
+      updatedAt             DateTime @updatedAt
+
+      user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+    }
+
+    enum EmailCategory {
+      MARKETING
+      PRODUCT_UPDATES
+      WEEKLY_DIGEST
+      SECURITY
+      TRANSACTIONAL
+    }
+
+  lib/email/unsubscribe.ts: |
+    import crypto from "crypto";
+
+    const UNSUBSCRIBE_SECRET = process.env.UNSUBSCRIBE_SECRET!;
+    const APP_URL = process.env.NEXT_PUBLIC_APP_URL!;
+
+    interface UnsubscribePayload {
+      userId: string;
+      email: string;
+      category?: string;
+      timestamp: number;
+    }
+
+    export function generateUnsubscribeToken(payload: Omit<UnsubscribePayload, "timestamp">): string {
+      const data: UnsubscribePayload = {
+        ...payload,
+        timestamp: Date.now(),
+      };
+
+      const payloadStr = JSON.stringify(data);
+      const payloadBase64 = Buffer.from(payloadStr).toString("base64url");
+
+      const signature = crypto
+        .createHmac("sha256", UNSUBSCRIBE_SECRET)
+        .update(payloadBase64)
+        .digest("base64url");
+
+      return `${payloadBase64}.${signature}`;
+    }
+
+    export function verifyUnsubscribeToken(token: string): UnsubscribePayload | null {
+      try {
+        const [payloadBase64, signature] = token.split(".");
+
+        if (!payloadBase64 || !signature) {
+          return null;
+        }
+
+        const expectedSignature = crypto
+          .createHmac("sha256", UNSUBSCRIBE_SECRET)
+          .update(payloadBase64)
+          .digest("base64url");
+
+        if (signature !== expectedSignature) {
+          return null;
+        }
+
+        const payload: UnsubscribePayload = JSON.parse(
+          Buffer.from(payloadBase64, "base64url").toString()
+        );
+
+        // Token expires after 30 days
+        const maxAge = 30 * 24 * 60 * 60 * 1000;
+        if (Date.now() - payload.timestamp > maxAge) {
+          return null;
+        }
+
+        return payload;
+      } catch {
+        return null;
+      }
+    }
+
+    export function getUnsubscribeUrl(
+      userId: string,
+      email: string,
+      category?: string
+    ): string {
+      const token = generateUnsubscribeToken({ userId, email, category });
+      return `${APP_URL}/api/email/unsubscribe?token=${token}`;
+    }
+
+    export function getUnsubscribeMailtoUrl(
+      userId: string,
+      email: string
+    ): string {
+      // RFC 2369 List-Unsubscribe mailto format
+      const token = generateUnsubscribeToken({ userId, email });
+      return `mailto:unsubscribe@${new URL(APP_URL).hostname}?subject=Unsubscribe&body=${token}`;
+    }
+
+  lib/email/headers.ts: |
+    import { getUnsubscribeUrl, getUnsubscribeMailtoUrl } from "./unsubscribe";
+
+    interface EmailUser {
+      id: string;
+      email: string;
+    }
+
+    interface UnsubscribeHeaders {
+      "List-Unsubscribe": string;
+      "List-Unsubscribe-Post": string;
+    }
+
+    /**
+     * Generate RFC 8058 compliant unsubscribe headers
+     * These headers enable one-click unsubscribe in email clients like Gmail
+     */
+    export function getUnsubscribeHeaders(
+      user: EmailUser,
+      category?: string
+    ): UnsubscribeHeaders {
+      const httpUrl = getUnsubscribeUrl(user.id, user.email, category);
+      const mailtoUrl = getUnsubscribeMailtoUrl(user.id, user.email);
+
+      return {
+        // RFC 2369 - Both mailto and https URLs for compatibility
+        "List-Unsubscribe": `<${mailtoUrl}>, <${httpUrl}>`,
+        // RFC 8058 - Required for one-click unsubscribe
+        "List-Unsubscribe-Post": "List-Unsubscribe=One-Click",
+      };
+    }
+
+    /**
+     * Generate all recommended email headers for marketing emails
+     */
+    export function getMarketingEmailHeaders(
+      user: EmailUser,
+      campaignId?: string
+    ): Record<string, string> {
+      const unsubHeaders = getUnsubscribeHeaders(user, "marketing");
+
+      return {
+        ...unsubHeaders,
+        "X-Entity-Ref-ID": campaignId || crypto.randomUUID(),
+        "X-Mailer": "YourApp/1.0",
+        Precedence: "bulk",
+      };
+    }
+
+    /**
+     * Example usage with Resend
+     */
+    export function createEmailWithUnsubscribe(
+      user: EmailUser,
+      subject: string,
+      react: React.ReactElement
+    ) {
+      const headers = getUnsubscribeHeaders(user);
+
+      return {
+        to: user.email,
+        subject,
+        react,
+        headers,
+      };
+    }
+
+  app/api/email/unsubscribe/route.ts: |
+    import { NextRequest, NextResponse } from "next/server";
+    import { verifyUnsubscribeToken } from "@/lib/email/unsubscribe";
+    import { prisma } from "@/lib/prisma";
+
+    // GET - Render unsubscribe confirmation page
+    export async function GET(request: NextRequest) {
+      const token = request.nextUrl.searchParams.get("token");
+
+      if (!token) {
+        return NextResponse.redirect(
+          new URL("/unsubscribe?error=missing_token", request.url)
+        );
+      }
+
+      const payload = verifyUnsubscribeToken(token);
+
+      if (!payload) {
+        return NextResponse.redirect(
+          new URL("/unsubscribe?error=invalid_token", request.url)
+        );
+      }
+
+      // Redirect to confirmation page with token
+      return NextResponse.redirect(
+        new URL(`/unsubscribe?token=${token}`, request.url)
+      );
+    }
+
+    // POST - RFC 8058 One-Click Unsubscribe
+    export async function POST(request: NextRequest) {
+      try {
+        // RFC 8058: Check for List-Unsubscribe=One-Click in body
+        const formData = await request.formData().catch(() => null);
+        const body = await request.text().catch(() => "");
+
+        // Token can come from query param or form data
+        let token = request.nextUrl.searchParams.get("token");
+
+        if (!token && formData) {
+          token = formData.get("token") as string;
+        }
+
+        if (!token) {
+          return new NextResponse("Token required", { status: 400 });
+        }
+
+        const payload = verifyUnsubscribeToken(token);
+
+        if (!payload) {
+          return new NextResponse("Invalid token", { status: 400 });
+        }
+
+        // Upsert email preferences
+        await prisma.emailPreferences.upsert({
+          where: { userId: payload.userId },
+          update: {
+            ...(payload.category === "marketing" && { marketingEmails: false }),
+            ...(payload.category === "product_updates" && { productUpdates: false }),
+            ...(payload.category === "weekly_digest" && { weeklyDigest: false }),
+            ...(!payload.category && { unsubscribedAll: true }),
+            unsubscribedAt: new Date(),
+          },
+          create: {
+            userId: payload.userId,
+            ...(payload.category === "marketing" && { marketingEmails: false }),
+            ...(payload.category === "product_updates" && { productUpdates: false }),
+            ...(payload.category === "weekly_digest" && { weeklyDigest: false }),
+            ...(!payload.category && { unsubscribedAll: true }),
+            unsubscribedAt: new Date(),
+          },
+        });
+
+        // RFC 8058: Return 200 OK for successful unsubscribe
+        return new NextResponse("Unsubscribed successfully", { status: 200 });
+      } catch (error) {
+        console.error("Unsubscribe error:", error);
+        return new NextResponse("Unsubscribe failed", { status: 500 });
+      }
+    }
+
+  app/unsubscribe/page.tsx: |
+    "use client";
+
+    import { useSearchParams, useRouter } from "next/navigation";
+    import { useState, Suspense } from "react";
+
+    function UnsubscribeContent() {
+      const searchParams = useSearchParams();
+      const router = useRouter();
+      const token = searchParams.get("token");
+      const error = searchParams.get("error");
+
+      const [loading, setLoading] = useState(false);
+      const [unsubscribed, setUnsubscribed] = useState(false);
+
+      const handleUnsubscribe = async () => {
+        if (!token) return;
+
+        setLoading(true);
+
+        try {
+          const response = await fetch(`/api/email/unsubscribe?token=${token}`, {
+            method: "POST",
+          });
+
+          if (response.ok) {
+            setUnsubscribed(true);
+          }
+        } catch (err) {
+          console.error("Unsubscribe failed:", err);
+        } finally {
+          setLoading(false);
+        }
+      };
+
+      if (error) {
+        const errorMessages: Record<string, string> = {
+          missing_token: "No unsubscribe token provided.",
+          invalid_token: "This unsubscribe link is invalid or expired.",
+        };
+
+        return (
+          <div className="max-w-md mx-auto mt-20 p-6 text-center">
+            <h1 className="text-2xl font-bold mb-4 text-red-600">Error</h1>
+            <p className="text-gray-600 mb-6">
+              {errorMessages[error] || "Something went wrong."}
+            </p>
+            <a href="/" className="text-blue-600 hover:underline">
+              Return to homepage
+            </a>
+          </div>
+        );
+      }
+
+      if (unsubscribed) {
+        return (
+          <div className="max-w-md mx-auto mt-20 p-6 text-center">
+            <div className="w-16 h-16 mx-auto mb-4 rounded-full bg-green-100 flex items-center justify-center">
+              <svg
+                className="w-8 h-8 text-green-600"
+                fill="none"
+                stroke="currentColor"
+                viewBox="0 0 24 24"
+              >
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  strokeWidth={2}
+                  d="M5 13l4 4L19 7"
+                />
+              </svg>
+            </div>
+            <h1 className="text-2xl font-bold mb-2">Unsubscribed</h1>
+            <p className="text-gray-600 mb-6">
+              You have been successfully unsubscribed from our emails.
+            </p>
+            <a href="/" className="text-blue-600 hover:underline">
+              Return to homepage
+            </a>
+          </div>
+        );
+      }
+
+      if (!token) {
+        return (
+          <div className="max-w-md mx-auto mt-20 p-6 text-center">
+            <h1 className="text-2xl font-bold mb-4">Unsubscribe</h1>
+            <p className="text-gray-600">
+              No valid unsubscribe token provided.
+            </p>
+          </div>
+        );
+      }
+
+      return (
+        <div className="max-w-md mx-auto mt-20 p-6 text-center">
+          <h1 className="text-2xl font-bold mb-4">Unsubscribe</h1>
+          <p className="text-gray-600 mb-6">
+            Are you sure you want to unsubscribe from our emails?
+          </p>
+          <div className="flex gap-4 justify-center">
+            <button
+              onClick={() => router.push("/")}
+              className="px-6 py-2 border border-gray-300 rounded-md hover:bg-gray-50"
+            >
+              Cancel
+            </button>
+            <button
+              onClick={handleUnsubscribe}
+              disabled={loading}
+              className="px-6 py-2 bg-red-600 text-white rounded-md hover:bg-red-700 disabled:opacity-50"
+            >
+              {loading ? "Unsubscribing..." : "Unsubscribe"}
+            </button>
+          </div>
+        </div>
+      );
+    }
+
+    export default function UnsubscribePage() {
+      return (
+        <Suspense fallback={<div className="text-center mt-20">Loading...</div>}>
+          <UnsubscribeContent />
+        </Suspense>
+      );
+    }
+
+edge_cases:
+  - id: expired-token
+    symptom: "Unsubscribe link doesn't work"
+    cause: "Token older than 30 days"
+    solution: "Show helpful error and link to preferences page"
+
+  - id: already-unsubscribed
+    symptom: "User clicks unsubscribe twice"
+    cause: "Multiple clicks or email clients"
+    solution: "Upsert preferences, show success either way"
+
+  - id: missing-headers
+    symptom: "One-click unsubscribe not working in Gmail"
+    cause: "Missing List-Unsubscribe-Post header"
+    solution: "Ensure both List-Unsubscribe and List-Unsubscribe-Post headers are present"
+
+  - id: security-emails
+    symptom: "User can't receive security alerts"
+    cause: "Accidentally unsubscribed from all"
+    solution: "Never include security alerts in unsubscribe scope"
+
+validation:
+  manual_test:
+    - "Send test email with unsubscribe headers"
+    - "Check Gmail shows unsubscribe button"
+    - "Click unsubscribe link"
+    - "Verify preferences updated"
+    - "Test one-click POST endpoint"
+    - "Verify security emails still work"

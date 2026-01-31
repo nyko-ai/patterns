@@ -1,0 +1,515 @@
+id: resend-react-email
+version: "1.0.0"
+updated_at: "2026-01-31"
+author: "nyko-team"
+status: beta
+
+name: "React Email with Resend"
+description: "Beautiful email templates using React Email and Resend"
+
+category: email
+tags:
+  - resend
+  - react-email
+  - templates
+  - transactional
+  - email
+
+difficulty: intermediate
+time_estimate: "20-30 min"
+
+stack:
+  required:
+    - name: "resend"
+      version: "^6.9.1"
+      reason: "Email delivery API"
+    - name: "@react-email/components"
+      version: "^1.0.6"
+      reason: "React Email components"
+    - name: "next"
+      version: "^15.1.0"
+      reason: "Next.js App Router"
+
+requires: []
+
+enables:
+  - email-verification-token
+  - newsletter-loops
+
+env_vars:
+  required:
+    - key: RESEND_API_KEY
+      description: "Resend API key"
+      format: "re_xxxxxxxxxxxx"
+      where_to_find: "Resend Dashboard > API Keys"
+  optional:
+    - key: EMAIL_FROM
+      description: "Default sender email"
+      default: "onboarding@resend.dev"
+
+external_setup:
+  - service: "Resend"
+    url: "https://resend.com/api-keys"
+    steps:
+      - "Create account at resend.com"
+      - "Verify your domain (or use test domain)"
+      - "Generate API key"
+      - "Copy API key to .env"
+
+files:
+  - path: "lib/email/resend.ts"
+    action: create
+    description: "Resend client configuration"
+    priority: 1
+
+  - path: "emails/welcome.tsx"
+    action: create
+    description: "Welcome email template"
+    priority: 2
+
+  - path: "emails/password-reset.tsx"
+    action: create
+    description: "Password reset email template"
+    priority: 3
+
+  - path: "lib/email/send.ts"
+    action: create
+    description: "Email sending utilities"
+    priority: 4
+
+  - path: "app/api/email/send/route.ts"
+    action: create
+    description: "Email sending endpoint"
+    priority: 5
+
+code:
+  lib/email/resend.ts: |
+    import { Resend } from "resend";
+
+    if (!process.env.RESEND_API_KEY) {
+      throw new Error("RESEND_API_KEY is required");
+    }
+
+    export const resend = new Resend(process.env.RESEND_API_KEY);
+
+    export const EMAIL_FROM = process.env.EMAIL_FROM || "onboarding@resend.dev";
+
+  emails/welcome.tsx: |
+    import {
+      Body,
+      Button,
+      Container,
+      Head,
+      Heading,
+      Hr,
+      Html,
+      Img,
+      Link,
+      Preview,
+      Section,
+      Text,
+    } from "@react-email/components";
+    import * as React from "react";
+
+    interface WelcomeEmailProps {
+      username: string;
+      loginUrl: string;
+    }
+
+    export const WelcomeEmail = ({ username, loginUrl }: WelcomeEmailProps) => {
+      const previewText = `Welcome to our platform, ${username}!`;
+
+      return (
+        <Html>
+          <Head />
+          <Preview>{previewText}</Preview>
+          <Body style={main}>
+            <Container style={container}>
+              <Heading style={heading}>Welcome, {username}!</Heading>
+              <Text style={paragraph}>
+                Thanks for signing up. We're excited to have you on board.
+              </Text>
+              <Section style={buttonContainer}>
+                <Button style={button} href={loginUrl}>
+                  Get Started
+                </Button>
+              </Section>
+              <Hr style={hr} />
+              <Text style={footer}>
+                If you didn't create an account, you can safely ignore this email.
+              </Text>
+            </Container>
+          </Body>
+        </Html>
+      );
+    };
+
+    WelcomeEmail.PreviewProps = {
+      username: "John",
+      loginUrl: "https://example.com/login",
+    } as WelcomeEmailProps;
+
+    export default WelcomeEmail;
+
+    const main = {
+      backgroundColor: "#f6f9fc",
+      fontFamily:
+        '-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Ubuntu,sans-serif',
+    };
+
+    const container = {
+      backgroundColor: "#ffffff",
+      margin: "0 auto",
+      padding: "40px 20px",
+      borderRadius: "8px",
+      maxWidth: "560px",
+    };
+
+    const heading = {
+      fontSize: "24px",
+      letterSpacing: "-0.5px",
+      lineHeight: "1.3",
+      fontWeight: "400",
+      color: "#484848",
+      padding: "17px 0 0",
+    };
+
+    const paragraph = {
+      margin: "0 0 15px",
+      fontSize: "15px",
+      lineHeight: "1.4",
+      color: "#3c4149",
+    };
+
+    const buttonContainer = {
+      padding: "27px 0 27px",
+    };
+
+    const button = {
+      backgroundColor: "#000000",
+      borderRadius: "5px",
+      color: "#fff",
+      fontSize: "15px",
+      textDecoration: "none",
+      textAlign: "center" as const,
+      display: "block",
+      padding: "12px 20px",
+    };
+
+    const hr = {
+      borderColor: "#dfe1e4",
+      margin: "42px 0 26px",
+    };
+
+    const footer = {
+      fontSize: "12px",
+      lineHeight: "1.5",
+      color: "#898989",
+    };
+
+  emails/password-reset.tsx: |
+    import {
+      Body,
+      Button,
+      Container,
+      Head,
+      Heading,
+      Hr,
+      Html,
+      Preview,
+      Section,
+      Text,
+    } from "@react-email/components";
+    import * as React from "react";
+
+    interface PasswordResetEmailProps {
+      resetUrl: string;
+      expiresIn: string;
+    }
+
+    export const PasswordResetEmail = ({
+      resetUrl,
+      expiresIn,
+    }: PasswordResetEmailProps) => {
+      return (
+        <Html>
+          <Head />
+          <Preview>Reset your password</Preview>
+          <Body style={main}>
+            <Container style={container}>
+              <Heading style={heading}>Reset Your Password</Heading>
+              <Text style={paragraph}>
+                We received a request to reset your password. Click the button below
+                to create a new password.
+              </Text>
+              <Section style={buttonContainer}>
+                <Button style={button} href={resetUrl}>
+                  Reset Password
+                </Button>
+              </Section>
+              <Text style={paragraph}>
+                This link will expire in {expiresIn}. If you didn't request a
+                password reset, you can safely ignore this email.
+              </Text>
+              <Hr style={hr} />
+              <Text style={footer}>
+                If the button doesn't work, copy and paste this URL into your
+                browser: {resetUrl}
+              </Text>
+            </Container>
+          </Body>
+        </Html>
+      );
+    };
+
+    PasswordResetEmail.PreviewProps = {
+      resetUrl: "https://example.com/reset-password?token=abc123",
+      expiresIn: "1 hour",
+    } as PasswordResetEmailProps;
+
+    export default PasswordResetEmail;
+
+    const main = {
+      backgroundColor: "#f6f9fc",
+      fontFamily:
+        '-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Ubuntu,sans-serif',
+    };
+
+    const container = {
+      backgroundColor: "#ffffff",
+      margin: "0 auto",
+      padding: "40px 20px",
+      borderRadius: "8px",
+      maxWidth: "560px",
+    };
+
+    const heading = {
+      fontSize: "24px",
+      letterSpacing: "-0.5px",
+      lineHeight: "1.3",
+      fontWeight: "400",
+      color: "#484848",
+      padding: "17px 0 0",
+    };
+
+    const paragraph = {
+      margin: "0 0 15px",
+      fontSize: "15px",
+      lineHeight: "1.4",
+      color: "#3c4149",
+    };
+
+    const buttonContainer = {
+      padding: "27px 0 27px",
+    };
+
+    const button = {
+      backgroundColor: "#dc2626",
+      borderRadius: "5px",
+      color: "#fff",
+      fontSize: "15px",
+      textDecoration: "none",
+      textAlign: "center" as const,
+      display: "block",
+      padding: "12px 20px",
+    };
+
+    const hr = {
+      borderColor: "#dfe1e4",
+      margin: "42px 0 26px",
+    };
+
+    const footer = {
+      fontSize: "12px",
+      lineHeight: "1.5",
+      color: "#898989",
+    };
+
+  lib/email/send.ts: |
+    import { resend, EMAIL_FROM } from "./resend";
+    import { WelcomeEmail } from "@/emails/welcome";
+    import { PasswordResetEmail } from "@/emails/password-reset";
+
+    interface SendEmailResult {
+      success: boolean;
+      id?: string;
+      error?: string;
+    }
+
+    export async function sendWelcomeEmail(
+      to: string,
+      username: string,
+      loginUrl: string
+    ): Promise<SendEmailResult> {
+      try {
+        const { data, error } = await resend.emails.send({
+          from: EMAIL_FROM,
+          to,
+          subject: `Welcome to our platform, ${username}!`,
+          react: WelcomeEmail({ username, loginUrl }),
+        });
+
+        if (error) {
+          return { success: false, error: error.message };
+        }
+
+        return { success: true, id: data?.id };
+      } catch (error) {
+        console.error("Failed to send welcome email:", error);
+        return {
+          success: false,
+          error: error instanceof Error ? error.message : "Unknown error",
+        };
+      }
+    }
+
+    export async function sendPasswordResetEmail(
+      to: string,
+      resetUrl: string,
+      expiresIn: string = "1 hour"
+    ): Promise<SendEmailResult> {
+      try {
+        const { data, error } = await resend.emails.send({
+          from: EMAIL_FROM,
+          to,
+          subject: "Reset your password",
+          react: PasswordResetEmail({ resetUrl, expiresIn }),
+        });
+
+        if (error) {
+          return { success: false, error: error.message };
+        }
+
+        return { success: true, id: data?.id };
+      } catch (error) {
+        console.error("Failed to send password reset email:", error);
+        return {
+          success: false,
+          error: error instanceof Error ? error.message : "Unknown error",
+        };
+      }
+    }
+
+    export async function sendEmail(options: {
+      to: string | string[];
+      subject: string;
+      react: React.ReactElement;
+      from?: string;
+      replyTo?: string;
+      cc?: string | string[];
+      bcc?: string | string[];
+      headers?: Record<string, string>;
+    }): Promise<SendEmailResult> {
+      try {
+        const { data, error } = await resend.emails.send({
+          from: options.from || EMAIL_FROM,
+          to: options.to,
+          subject: options.subject,
+          react: options.react,
+          reply_to: options.replyTo,
+          cc: options.cc,
+          bcc: options.bcc,
+          headers: options.headers,
+        });
+
+        if (error) {
+          return { success: false, error: error.message };
+        }
+
+        return { success: true, id: data?.id };
+      } catch (error) {
+        console.error("Failed to send email:", error);
+        return {
+          success: false,
+          error: error instanceof Error ? error.message : "Unknown error",
+        };
+      }
+    }
+
+  app/api/email/send/route.ts: |
+    import { NextRequest, NextResponse } from "next/server";
+    import { sendWelcomeEmail, sendPasswordResetEmail } from "@/lib/email/send";
+
+    export async function POST(request: NextRequest) {
+      try {
+        const { type, to, ...data } = await request.json();
+
+        if (!type || !to) {
+          return NextResponse.json(
+            { error: "type and to are required" },
+            { status: 400 }
+          );
+        }
+
+        let result;
+
+        switch (type) {
+          case "welcome":
+            if (!data.username || !data.loginUrl) {
+              return NextResponse.json(
+                { error: "username and loginUrl are required for welcome email" },
+                { status: 400 }
+              );
+            }
+            result = await sendWelcomeEmail(to, data.username, data.loginUrl);
+            break;
+
+          case "password-reset":
+            if (!data.resetUrl) {
+              return NextResponse.json(
+                { error: "resetUrl is required for password reset email" },
+                { status: 400 }
+              );
+            }
+            result = await sendPasswordResetEmail(to, data.resetUrl, data.expiresIn);
+            break;
+
+          default:
+            return NextResponse.json(
+              { error: `Unknown email type: ${type}` },
+              { status: 400 }
+            );
+        }
+
+        if (!result.success) {
+          return NextResponse.json({ error: result.error }, { status: 500 });
+        }
+
+        return NextResponse.json({ id: result.id });
+      } catch (error) {
+        console.error("Email API error:", error);
+        return NextResponse.json(
+          { error: "Failed to send email" },
+          { status: 500 }
+        );
+      }
+    }
+
+edge_cases:
+  - id: domain-not-verified
+    symptom: "Emails not delivered"
+    cause: "Sending from unverified domain"
+    solution: "Verify domain in Resend dashboard or use test domain"
+
+  - id: rate-limit
+    symptom: "429 errors from Resend"
+    cause: "Exceeding API rate limits"
+    solution: "Implement queue or use Resend's batch API"
+
+  - id: template-render-error
+    symptom: "Email content missing or malformed"
+    cause: "React Email component error"
+    solution: "Preview templates locally with email dev server"
+
+  - id: spam-folder
+    symptom: "Emails going to spam"
+    cause: "Missing SPF/DKIM/DMARC records"
+    solution: "Configure DNS records as per Resend documentation"
+
+validation:
+  manual_test:
+    - "Send welcome email to test address"
+    - "Verify email renders correctly"
+    - "Check spam folder"
+    - "Test password reset email"
+    - "Preview templates in development"

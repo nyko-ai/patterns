@@ -1,0 +1,495 @@
+id: newsletter-loops
+version: "1.0.0"
+updated_at: "2026-01-31"
+author: "nyko-team"
+status: beta
+
+name: "Newsletter with Loops.so"
+description: "Newsletter subscription and management with Loops.so"
+
+category: email
+tags:
+  - loops
+  - newsletter
+  - subscription
+  - marketing
+  - email
+
+difficulty: beginner
+time_estimate: "15-20 min"
+
+stack:
+  required:
+    - name: "next"
+      version: "^15.1.0"
+      reason: "Next.js App Router"
+
+requires: []
+
+enables: []
+
+env_vars:
+  required:
+    - key: LOOPS_API_KEY
+      description: "Loops.so API key"
+      format: "loops_xxxxxxxxxxxx"
+      where_to_find: "Loops Dashboard > Settings > API"
+
+external_setup:
+  - service: "Loops.so"
+    url: "https://app.loops.so/settings/api"
+    steps:
+      - "Create account at loops.so"
+      - "Set up your audience"
+      - "Generate API key in Settings > API"
+      - "Copy API key to .env"
+      - "Create mailing lists if needed"
+
+files:
+  - path: "lib/loops.ts"
+    action: create
+    description: "Loops.so client"
+    priority: 1
+
+  - path: "app/api/newsletter/subscribe/route.ts"
+    action: create
+    description: "Newsletter subscription endpoint"
+    priority: 2
+
+  - path: "app/api/newsletter/unsubscribe/route.ts"
+    action: create
+    description: "Newsletter unsubscribe endpoint"
+    priority: 3
+
+  - path: "components/newsletter-form.tsx"
+    action: create
+    description: "Newsletter subscription form"
+    priority: 4
+
+code:
+  lib/loops.ts: |
+    const LOOPS_API_KEY = process.env.LOOPS_API_KEY;
+    const LOOPS_API_URL = "https://app.loops.so/api/v1";
+
+    if (!LOOPS_API_KEY) {
+      console.warn("LOOPS_API_KEY is not set");
+    }
+
+    interface LoopsContact {
+      email: string;
+      firstName?: string;
+      lastName?: string;
+      source?: string;
+      subscribed?: boolean;
+      userGroup?: string;
+      mailingLists?: Record<string, boolean>;
+      [key: string]: unknown;
+    }
+
+    interface LoopsResponse {
+      success: boolean;
+      id?: string;
+      message?: string;
+    }
+
+    async function loopsRequest(
+      endpoint: string,
+      method: string,
+      body?: unknown
+    ): Promise<Response> {
+      return fetch(`${LOOPS_API_URL}${endpoint}`, {
+        method,
+        headers: {
+          Authorization: `Bearer ${LOOPS_API_KEY}`,
+          "Content-Type": "application/json",
+        },
+        body: body ? JSON.stringify(body) : undefined,
+      });
+    }
+
+    export async function createContact(
+      contact: LoopsContact
+    ): Promise<LoopsResponse> {
+      try {
+        const response = await loopsRequest("/contacts/create", "POST", contact);
+        const data = await response.json();
+
+        if (!response.ok) {
+          return { success: false, message: data.message || "Failed to create contact" };
+        }
+
+        return { success: true, id: data.id };
+      } catch (error) {
+        console.error("Loops createContact error:", error);
+        return { success: false, message: "Failed to create contact" };
+      }
+    }
+
+    export async function updateContact(
+      email: string,
+      properties: Partial<LoopsContact>
+    ): Promise<LoopsResponse> {
+      try {
+        const response = await loopsRequest("/contacts/update", "PUT", {
+          email,
+          ...properties,
+        });
+        const data = await response.json();
+
+        if (!response.ok) {
+          return { success: false, message: data.message || "Failed to update contact" };
+        }
+
+        return { success: true, id: data.id };
+      } catch (error) {
+        console.error("Loops updateContact error:", error);
+        return { success: false, message: "Failed to update contact" };
+      }
+    }
+
+    export async function deleteContact(email: string): Promise<LoopsResponse> {
+      try {
+        const response = await loopsRequest("/contacts/delete", "POST", { email });
+        const data = await response.json();
+
+        if (!response.ok) {
+          return { success: false, message: data.message || "Failed to delete contact" };
+        }
+
+        return { success: true, message: data.message };
+      } catch (error) {
+        console.error("Loops deleteContact error:", error);
+        return { success: false, message: "Failed to delete contact" };
+      }
+    }
+
+    export async function findContact(
+      email: string
+    ): Promise<LoopsContact | null> {
+      try {
+        const response = await loopsRequest(
+          `/contacts/find?email=${encodeURIComponent(email)}`,
+          "GET"
+        );
+
+        if (!response.ok) {
+          return null;
+        }
+
+        const data = await response.json();
+        return data[0] || null;
+      } catch (error) {
+        console.error("Loops findContact error:", error);
+        return null;
+      }
+    }
+
+    export async function sendEvent(
+      email: string,
+      eventName: string,
+      eventProperties?: Record<string, unknown>
+    ): Promise<LoopsResponse> {
+      try {
+        const response = await loopsRequest("/events/send", "POST", {
+          email,
+          eventName,
+          eventProperties,
+        });
+        const data = await response.json();
+
+        if (!response.ok) {
+          return { success: false, message: data.message || "Failed to send event" };
+        }
+
+        return { success: true };
+      } catch (error) {
+        console.error("Loops sendEvent error:", error);
+        return { success: false, message: "Failed to send event" };
+      }
+    }
+
+    export async function sendTransactionalEmail(
+      email: string,
+      transactionalId: string,
+      dataVariables?: Record<string, string>
+    ): Promise<LoopsResponse> {
+      try {
+        const response = await loopsRequest("/transactional", "POST", {
+          email,
+          transactionalId,
+          dataVariables,
+        });
+        const data = await response.json();
+
+        if (!response.ok) {
+          return { success: false, message: data.message || "Failed to send email" };
+        }
+
+        return { success: true };
+      } catch (error) {
+        console.error("Loops sendTransactionalEmail error:", error);
+        return { success: false, message: "Failed to send email" };
+      }
+    }
+
+  app/api/newsletter/subscribe/route.ts: |
+    import { NextRequest, NextResponse } from "next/server";
+    import { createContact, findContact, updateContact } from "@/lib/loops";
+
+    export async function POST(request: NextRequest) {
+      try {
+        const { email, firstName, lastName, source } = await request.json();
+
+        if (!email || typeof email !== "string") {
+          return NextResponse.json(
+            { error: "Email is required" },
+            { status: 400 }
+          );
+        }
+
+        // Validate email format
+        const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+        if (!emailRegex.test(email)) {
+          return NextResponse.json(
+            { error: "Invalid email format" },
+            { status: 400 }
+          );
+        }
+
+        // Check if contact exists
+        const existing = await findContact(email);
+
+        if (existing) {
+          // Update existing contact
+          const result = await updateContact(email, {
+            firstName,
+            lastName,
+            subscribed: true,
+          });
+
+          if (!result.success) {
+            return NextResponse.json(
+              { error: result.message },
+              { status: 500 }
+            );
+          }
+
+          return NextResponse.json({
+            message: "Successfully resubscribed",
+            status: "resubscribed",
+          });
+        }
+
+        // Create new contact
+        const result = await createContact({
+          email: email.toLowerCase(),
+          firstName,
+          lastName,
+          source: source || "website",
+          subscribed: true,
+        });
+
+        if (!result.success) {
+          return NextResponse.json(
+            { error: result.message },
+            { status: 500 }
+          );
+        }
+
+        return NextResponse.json({
+          message: "Successfully subscribed",
+          status: "subscribed",
+        });
+      } catch (error) {
+        console.error("Newsletter subscribe error:", error);
+        return NextResponse.json(
+          { error: "Failed to subscribe" },
+          { status: 500 }
+        );
+      }
+    }
+
+  app/api/newsletter/unsubscribe/route.ts: |
+    import { NextRequest, NextResponse } from "next/server";
+    import { updateContact } from "@/lib/loops";
+
+    export async function POST(request: NextRequest) {
+      try {
+        const { email } = await request.json();
+
+        if (!email || typeof email !== "string") {
+          return NextResponse.json(
+            { error: "Email is required" },
+            { status: 400 }
+          );
+        }
+
+        const result = await updateContact(email, {
+          subscribed: false,
+        });
+
+        if (!result.success) {
+          return NextResponse.json(
+            { error: result.message },
+            { status: 500 }
+          );
+        }
+
+        return NextResponse.json({
+          message: "Successfully unsubscribed",
+        });
+      } catch (error) {
+        console.error("Newsletter unsubscribe error:", error);
+        return NextResponse.json(
+          { error: "Failed to unsubscribe" },
+          { status: 500 }
+        );
+      }
+    }
+
+    // Support GET for one-click unsubscribe
+    export async function GET(request: NextRequest) {
+      const email = request.nextUrl.searchParams.get("email");
+      const token = request.nextUrl.searchParams.get("token");
+
+      if (!email) {
+        return new NextResponse("Email is required", { status: 400 });
+      }
+
+      // TODO: Validate token for security
+
+      const result = await updateContact(email, {
+        subscribed: false,
+      });
+
+      if (!result.success) {
+        return new NextResponse("Failed to unsubscribe", { status: 500 });
+      }
+
+      // Redirect to confirmation page
+      return NextResponse.redirect(new URL("/unsubscribed", request.url));
+    }
+
+  components/newsletter-form.tsx: |
+    "use client";
+
+    import { useState, FormEvent } from "react";
+
+    interface NewsletterFormProps {
+      source?: string;
+      onSuccess?: () => void;
+      onError?: (error: string) => void;
+    }
+
+    export function NewsletterForm({
+      source = "website",
+      onSuccess,
+      onError,
+    }: NewsletterFormProps) {
+      const [email, setEmail] = useState("");
+      const [firstName, setFirstName] = useState("");
+      const [loading, setLoading] = useState(false);
+      const [status, setStatus] = useState<"idle" | "success" | "error">("idle");
+      const [message, setMessage] = useState("");
+
+      const handleSubmit = async (e: FormEvent) => {
+        e.preventDefault();
+        setLoading(true);
+        setStatus("idle");
+
+        try {
+          const response = await fetch("/api/newsletter/subscribe", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ email, firstName, source }),
+          });
+
+          const data = await response.json();
+
+          if (!response.ok) {
+            throw new Error(data.error || "Subscription failed");
+          }
+
+          setStatus("success");
+          setMessage("Thanks for subscribing!");
+          setEmail("");
+          setFirstName("");
+          onSuccess?.();
+        } catch (error) {
+          setStatus("error");
+          const errorMessage =
+            error instanceof Error ? error.message : "Something went wrong";
+          setMessage(errorMessage);
+          onError?.(errorMessage);
+        } finally {
+          setLoading(false);
+        }
+      };
+
+      return (
+        <form onSubmit={handleSubmit} className="space-y-4">
+          <div className="flex flex-col sm:flex-row gap-2">
+            <input
+              type="text"
+              value={firstName}
+              onChange={(e) => setFirstName(e.target.value)}
+              placeholder="First name (optional)"
+              className="flex-1 px-4 py-2 border rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+            />
+            <input
+              type="email"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              placeholder="Email address"
+              required
+              className="flex-1 px-4 py-2 border rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+            />
+            <button
+              type="submit"
+              disabled={loading}
+              className="px-6 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 disabled:opacity-50 transition-colors"
+            >
+              {loading ? "Subscribing..." : "Subscribe"}
+            </button>
+          </div>
+          {status !== "idle" && (
+            <p
+              className={`text-sm ${
+                status === "success" ? "text-green-600" : "text-red-600"
+              }`}
+            >
+              {message}
+            </p>
+          )}
+        </form>
+      );
+    }
+
+edge_cases:
+  - id: duplicate-subscription
+    symptom: "User already subscribed"
+    cause: "Email already in Loops"
+    solution: "Check existing contact and update instead of create"
+
+  - id: invalid-email
+    symptom: "Subscription fails"
+    cause: "Malformed email address"
+    solution: "Validate email format before API call"
+
+  - id: api-key-invalid
+    symptom: "401 unauthorized errors"
+    cause: "Invalid or expired API key"
+    solution: "Regenerate API key in Loops dashboard"
+
+  - id: rate-limit
+    symptom: "429 errors"
+    cause: "Too many API requests"
+    solution: "Implement rate limiting on subscription endpoint"
+
+validation:
+  manual_test:
+    - "Subscribe with valid email"
+    - "Check contact appears in Loops"
+    - "Unsubscribe via API"
+    - "Verify contact status updated"
+    - "Test duplicate subscription handling"
