@@ -1,0 +1,564 @@
+id: token-counting
+version: "1.0.0"
+updated_at: "2026-01-31"
+author: "nyko-team"
+status: beta
+
+name: "Token Counting with Tiktoken"
+description: "Accurate token counting for OpenAI models using tiktoken"
+
+category: ai
+tags:
+  - tokens
+  - tiktoken
+  - openai
+  - limits
+  - optimization
+
+difficulty: intermediate
+time_estimate: "15-20 min"
+
+stack:
+  required:
+    - name: "tiktoken"
+      version: "^1.0.0"
+      reason: "OpenAI tokenizer library"
+
+requires: []
+
+enables: []
+
+env_vars:
+  required: []
+
+external_setup: []
+
+files:
+  - path: "lib/ai/tokenizer.ts"
+    action: create
+    description: "Token counting utilities"
+    priority: 1
+
+  - path: "lib/ai/context-manager.ts"
+    action: create
+    description: "Context window management"
+    priority: 2
+
+  - path: "hooks/use-token-count.ts"
+    action: create
+    description: "React hook for token counting"
+    priority: 3
+
+code:
+  lib/ai/tokenizer.ts: |
+    import { encoding_for_model, type TiktokenModel } from "tiktoken";
+
+    // Cache encoders to avoid repeated initialization
+    const encoderCache = new Map<string, ReturnType<typeof encoding_for_model>>();
+
+    /**
+     * Model context windows and pricing
+     */
+    export const MODEL_INFO = {
+      // OpenAI models
+      "gpt-4o": { contextWindow: 128000, encoder: "o200k_base" as const },
+      "gpt-4o-mini": { contextWindow: 128000, encoder: "o200k_base" as const },
+      "gpt-4-turbo": { contextWindow: 128000, encoder: "cl100k_base" as const },
+      "gpt-4": { contextWindow: 8192, encoder: "cl100k_base" as const },
+      "gpt-3.5-turbo": { contextWindow: 16385, encoder: "cl100k_base" as const },
+
+      // Claude models (approximate - use for estimation only)
+      "claude-3-opus": { contextWindow: 200000, encoder: "cl100k_base" as const },
+      "claude-3-sonnet": { contextWindow: 200000, encoder: "cl100k_base" as const },
+      "claude-3-haiku": { contextWindow: 200000, encoder: "cl100k_base" as const },
+    } as const;
+
+    export type SupportedModel = keyof typeof MODEL_INFO;
+
+    /**
+     * Get encoder for a model
+     */
+    function getEncoder(model: SupportedModel) {
+      const modelInfo = MODEL_INFO[model];
+      if (!modelInfo) {
+        throw new Error(`Unknown model: ${model}`);
+      }
+
+      const encoderName = modelInfo.encoder;
+
+      if (!encoderCache.has(encoderName)) {
+        // For tiktoken, we need to use a compatible model name
+        const tiktokenModel = model.startsWith("gpt-4o")
+          ? "gpt-4o"
+          : model.startsWith("gpt-4")
+          ? "gpt-4"
+          : "gpt-3.5-turbo";
+
+        encoderCache.set(
+          encoderName,
+          encoding_for_model(tiktokenModel as TiktokenModel)
+        );
+      }
+
+      return encoderCache.get(encoderName)!;
+    }
+
+    /**
+     * Count tokens in a string
+     */
+    export function countTokens(text: string, model: SupportedModel = "gpt-4o"): number {
+      const encoder = getEncoder(model);
+      return encoder.encode(text).length;
+    }
+
+    /**
+     * Count tokens in a chat message
+     */
+    export function countMessageTokens(
+      messages: Array<{ role: string; content: string; name?: string }>,
+      model: SupportedModel = "gpt-4o"
+    ): number {
+      const encoder = getEncoder(model);
+
+      // Token overhead per message varies by model
+      // GPT-4o and GPT-4 use ~4 tokens per message overhead
+      const tokensPerMessage = 4;
+      const tokensPerName = 1;
+
+      let totalTokens = 0;
+
+      for (const message of messages) {
+        totalTokens += tokensPerMessage;
+        totalTokens += encoder.encode(message.content).length;
+        totalTokens += encoder.encode(message.role).length;
+
+        if (message.name) {
+          totalTokens += encoder.encode(message.name).length;
+          totalTokens += tokensPerName;
+        }
+      }
+
+      // Add 3 tokens for the assistant's reply priming
+      totalTokens += 3;
+
+      return totalTokens;
+    }
+
+    /**
+     * Estimate cost based on tokens
+     */
+    export function estimateCost(
+      inputTokens: number,
+      outputTokens: number,
+      model: SupportedModel = "gpt-4o"
+    ): { inputCost: number; outputCost: number; totalCost: number } {
+      const pricing: Record<SupportedModel, { input: number; output: number }> = {
+        "gpt-4o": { input: 0.005, output: 0.015 },
+        "gpt-4o-mini": { input: 0.00015, output: 0.0006 },
+        "gpt-4-turbo": { input: 0.01, output: 0.03 },
+        "gpt-4": { input: 0.03, output: 0.06 },
+        "gpt-3.5-turbo": { input: 0.0005, output: 0.0015 },
+        "claude-3-opus": { input: 0.015, output: 0.075 },
+        "claude-3-sonnet": { input: 0.003, output: 0.015 },
+        "claude-3-haiku": { input: 0.00025, output: 0.00125 },
+      };
+
+      const price = pricing[model] || pricing["gpt-4o"];
+
+      const inputCost = (inputTokens / 1000) * price.input;
+      const outputCost = (outputTokens / 1000) * price.output;
+
+      return {
+        inputCost,
+        outputCost,
+        totalCost: inputCost + outputCost,
+      };
+    }
+
+    /**
+     * Truncate text to fit within token limit
+     */
+    export function truncateToTokenLimit(
+      text: string,
+      maxTokens: number,
+      model: SupportedModel = "gpt-4o"
+    ): string {
+      const encoder = getEncoder(model);
+      const tokens = encoder.encode(text);
+
+      if (tokens.length <= maxTokens) {
+        return text;
+      }
+
+      const truncatedTokens = tokens.slice(0, maxTokens);
+      return encoder.decode(truncatedTokens);
+    }
+
+    /**
+     * Split text into chunks by token count
+     */
+    export function splitByTokens(
+      text: string,
+      maxTokensPerChunk: number,
+      model: SupportedModel = "gpt-4o"
+    ): string[] {
+      const encoder = getEncoder(model);
+      const tokens = encoder.encode(text);
+      const chunks: string[] = [];
+
+      for (let i = 0; i < tokens.length; i += maxTokensPerChunk) {
+        const chunkTokens = tokens.slice(i, i + maxTokensPerChunk);
+        chunks.push(encoder.decode(chunkTokens));
+      }
+
+      return chunks;
+    }
+
+    /**
+     * Check if content fits within context window
+     */
+    export function fitsInContext(
+      messages: Array<{ role: string; content: string }>,
+      model: SupportedModel = "gpt-4o",
+      reserveForOutput: number = 4096
+    ): { fits: boolean; used: number; available: number; limit: number } {
+      const modelInfo = MODEL_INFO[model];
+      const limit = modelInfo.contextWindow;
+      const used = countMessageTokens(messages, model);
+      const available = limit - used - reserveForOutput;
+
+      return {
+        fits: available > 0,
+        used,
+        available: Math.max(0, available),
+        limit,
+      };
+    }
+
+  lib/ai/context-manager.ts: |
+    import {
+      countMessageTokens,
+      fitsInContext,
+      truncateToTokenLimit,
+      type SupportedModel,
+      MODEL_INFO,
+    } from "./tokenizer";
+
+    interface Message {
+      role: "system" | "user" | "assistant";
+      content: string;
+    }
+
+    interface ContextManagerOptions {
+      model: SupportedModel;
+      /** Reserve tokens for model output */
+      reserveForOutput?: number;
+      /** Maximum tokens for system prompt */
+      maxSystemTokens?: number;
+      /** Minimum messages to keep (excluding system) */
+      minMessages?: number;
+    }
+
+    /**
+     * Manage conversation context to fit within token limits
+     */
+    export class ContextManager {
+      private model: SupportedModel;
+      private reserveForOutput: number;
+      private maxSystemTokens: number;
+      private minMessages: number;
+      private contextWindow: number;
+
+      constructor(options: ContextManagerOptions) {
+        this.model = options.model;
+        this.reserveForOutput = options.reserveForOutput ?? 4096;
+        this.maxSystemTokens = options.maxSystemTokens ?? 2000;
+        this.minMessages = options.minMessages ?? 2;
+        this.contextWindow = MODEL_INFO[this.model].contextWindow;
+      }
+
+      /**
+       * Fit messages into context window
+       */
+      fitMessages(
+        systemPrompt: string,
+        messages: Message[]
+      ): { system: string; messages: Message[]; truncated: boolean } {
+        // Truncate system prompt if needed
+        const system = truncateToTokenLimit(
+          systemPrompt,
+          this.maxSystemTokens,
+          this.model
+        );
+
+        const systemMessage: Message = { role: "system", content: system };
+        const allMessages = [systemMessage, ...messages];
+
+        // Check if everything fits
+        const { fits, used, available } = fitsInContext(
+          allMessages,
+          this.model,
+          this.reserveForOutput
+        );
+
+        if (fits) {
+          return { system, messages, truncated: false };
+        }
+
+        // Need to truncate messages
+        return this.truncateMessages(system, messages);
+      }
+
+      private truncateMessages(
+        system: string,
+        messages: Message[]
+      ): { system: string; messages: Message[]; truncated: boolean } {
+        const availableTokens =
+          this.contextWindow - this.reserveForOutput - countMessageTokens(
+            [{ role: "system", content: system }],
+            this.model
+          );
+
+        // Keep last N messages minimum
+        let keptMessages = messages.slice(-this.minMessages);
+        let currentTokens = countMessageTokens(
+          keptMessages.map((m) => ({ role: m.role, content: m.content })),
+          this.model
+        );
+
+        // Try to add more messages from history
+        for (let i = messages.length - this.minMessages - 1; i >= 0; i--) {
+          const message = messages[i];
+          const messageTokens = countMessageTokens(
+            [{ role: message.role, content: message.content }],
+            this.model
+          );
+
+          if (currentTokens + messageTokens <= availableTokens) {
+            keptMessages = [message, ...keptMessages];
+            currentTokens += messageTokens;
+          } else {
+            break;
+          }
+        }
+
+        return {
+          system,
+          messages: keptMessages,
+          truncated: keptMessages.length < messages.length,
+        };
+      }
+
+      /**
+       * Summarize old messages to compress history
+       */
+      async summarizeHistory(
+        messages: Message[],
+        summarizer: (text: string) => Promise<string>
+      ): Promise<Message[]> {
+        if (messages.length <= this.minMessages * 2) {
+          return messages;
+        }
+
+        // Keep last few messages, summarize the rest
+        const toSummarize = messages.slice(0, -this.minMessages);
+        const toKeep = messages.slice(-this.minMessages);
+
+        const historyText = toSummarize
+          .map((m) => `${m.role}: ${m.content}`)
+          .join("\n\n");
+
+        const summary = await summarizer(historyText);
+
+        return [
+          {
+            role: "system" as const,
+            content: `Previous conversation summary:\n${summary}`,
+          },
+          ...toKeep,
+        ];
+      }
+
+      /**
+       * Get context usage stats
+       */
+      getStats(
+        systemPrompt: string,
+        messages: Message[]
+      ): {
+        used: number;
+        available: number;
+        percentUsed: number;
+        canAddMore: boolean;
+      } {
+        const allMessages = [
+          { role: "system" as const, content: systemPrompt },
+          ...messages,
+        ];
+
+        const { used, available, limit } = fitsInContext(
+          allMessages,
+          this.model,
+          this.reserveForOutput
+        );
+
+        return {
+          used,
+          available,
+          percentUsed: (used / limit) * 100,
+          canAddMore: available > 500, // At least 500 tokens for new message
+        };
+      }
+    }
+
+  hooks/use-token-count.ts: |
+    "use client";
+
+    import { useState, useEffect, useMemo, useCallback } from "react";
+    import { countTokens, countMessageTokens, estimateCost, type SupportedModel } from "@/lib/ai/tokenizer";
+
+    interface UseTokenCountOptions {
+      model?: SupportedModel;
+      debounceMs?: number;
+    }
+
+    /**
+     * Hook for counting tokens in real-time
+     */
+    export function useTokenCount(
+      text: string,
+      options: UseTokenCountOptions = {}
+    ) {
+      const { model = "gpt-4o", debounceMs = 150 } = options;
+      const [count, setCount] = useState(0);
+      const [isCalculating, setIsCalculating] = useState(false);
+
+      useEffect(() => {
+        setIsCalculating(true);
+
+        const timeoutId = setTimeout(() => {
+          try {
+            const tokens = countTokens(text, model);
+            setCount(tokens);
+          } catch (error) {
+            console.error("Token counting error:", error);
+            setCount(0);
+          }
+          setIsCalculating(false);
+        }, debounceMs);
+
+        return () => clearTimeout(timeoutId);
+      }, [text, model, debounceMs]);
+
+      return { count, isCalculating };
+    }
+
+    /**
+     * Hook for tracking conversation token usage
+     */
+    export function useConversationTokens(
+      messages: Array<{ role: string; content: string }>,
+      model: SupportedModel = "gpt-4o"
+    ) {
+      const tokenCount = useMemo(
+        () => countMessageTokens(messages, model),
+        [messages, model]
+      );
+
+      const cost = useMemo(
+        () => estimateCost(tokenCount, 0, model),
+        [tokenCount, model]
+      );
+
+      return {
+        tokens: tokenCount,
+        estimatedInputCost: cost.inputCost,
+        formattedCost: `$${cost.inputCost.toFixed(4)}`,
+      };
+    }
+
+    /**
+     * Hook for real-time cost estimation
+     */
+    export function useTokenCostEstimate(
+      inputText: string,
+      expectedOutputTokens: number = 500,
+      model: SupportedModel = "gpt-4o"
+    ) {
+      const { count: inputTokens, isCalculating } = useTokenCount(inputText, { model });
+
+      const estimate = useMemo(() => {
+        return estimateCost(inputTokens, expectedOutputTokens, model);
+      }, [inputTokens, expectedOutputTokens, model]);
+
+      return {
+        inputTokens,
+        outputTokens: expectedOutputTokens,
+        ...estimate,
+        formatted: {
+          input: `$${estimate.inputCost.toFixed(4)}`,
+          output: `$${estimate.outputCost.toFixed(4)}`,
+          total: `$${estimate.totalCost.toFixed(4)}`,
+        },
+        isCalculating,
+      };
+    }
+
+edge_cases:
+  - id: encoder-mismatch
+    symptom: "Token count doesn't match OpenAI's count"
+    cause: "Using wrong encoder for model"
+    solution: |
+      Ensure correct encoder for each model:
+      - gpt-4o, gpt-4o-mini: o200k_base
+      - gpt-4, gpt-3.5-turbo: cl100k_base
+
+      For Claude models, tiktoken is an approximation.
+      Use Anthropic's count_tokens API for accuracy.
+
+  - id: wasm-not-loading
+    symptom: "tiktoken fails to initialize"
+    cause: "WASM module not loading"
+    solution: |
+      Ensure tiktoken is properly bundled:
+      // next.config.js
+      webpack: (config) => {
+        config.experiments = { ...config.experiments, asyncWebAssembly: true };
+        return config;
+      }
+
+      Or use server-side only token counting.
+
+  - id: special-tokens
+    symptom: "Unexpected token count"
+    cause: "Special tokens in content"
+    solution: |
+      Handle special tokens explicitly:
+      const encoder = encoding_for_model("gpt-4");
+      const tokens = encoder.encode(text, {
+        disallowed_special: new Set(), // or specific set
+      });
+
+  - id: memory-leak
+    symptom: "Memory usage grows over time"
+    cause: "Creating new encoders repeatedly"
+    solution: |
+      Use cached encoders (implemented in this pattern):
+      const encoderCache = new Map();
+
+      function getEncoder(model) {
+        if (!encoderCache.has(model)) {
+          encoderCache.set(model, encoding_for_model(model));
+        }
+        return encoderCache.get(model);
+      }
+
+validation:
+  manual_test:
+    - "Install tiktoken: npm install tiktoken"
+    - "Count tokens in sample text"
+    - "Compare with OpenAI tokenizer (platform.openai.com/tokenizer)"
+    - "Test message token counting"
+    - "Verify cost estimation accuracy"
+    - "Test truncation function"
+    - "Test context window fitting"

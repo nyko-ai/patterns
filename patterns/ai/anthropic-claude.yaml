@@ -1,0 +1,440 @@
+id: anthropic-claude
+version: "1.0.0"
+updated_at: "2026-01-31"
+author: "nyko-team"
+status: beta
+
+name: "Claude API Integration"
+description: "Anthropic Claude integration with streaming and tool use"
+
+category: ai
+tags:
+  - anthropic
+  - claude
+  - ai-sdk
+  - streaming
+  - nextjs
+
+difficulty: intermediate
+time_estimate: "25-30 min"
+
+stack:
+  required:
+    - name: "next"
+      version: "^15.1.0"
+      reason: "App Router with streaming support"
+    - name: "ai"
+      version: "^6.0.0"
+      reason: "Vercel AI SDK"
+    - name: "@anthropic-ai/sdk"
+      version: "^0.72.0"
+      reason: "Anthropic SDK (for direct API access)"
+
+requires: []
+
+enables:
+  - ai-response-cache
+
+env_vars:
+  required:
+    - key: ANTHROPIC_API_KEY
+      description: "Anthropic API key"
+      format: "sk-ant-..."
+      where_to_find: "Anthropic Console > API Keys"
+
+external_setup:
+  - service: "Anthropic"
+    url: "https://console.anthropic.com"
+    steps:
+      - "Create an Anthropic account"
+      - "Go to API Keys section"
+      - "Create a new API key"
+      - "Add ANTHROPIC_API_KEY to .env.local"
+      - "Set up billing"
+
+files:
+  - path: "lib/ai/anthropic.ts"
+    action: create
+    description: "Anthropic client configuration"
+    priority: 1
+
+  - path: "app/api/claude/route.ts"
+    action: create
+    description: "Claude API endpoint"
+    priority: 2
+
+  - path: "app/api/claude/tools/route.ts"
+    action: create
+    description: "Claude with tool use endpoint"
+    priority: 3
+
+  - path: "lib/ai/tools.ts"
+    action: create
+    description: "Tool definitions for Claude"
+    priority: 4
+
+code:
+  lib/ai/anthropic.ts: |
+    import { createAnthropic } from "@ai-sdk/anthropic";
+    import Anthropic from "@anthropic-ai/sdk";
+
+    // Lazy initialization for Vercel AI SDK
+    let anthropicAISDK: ReturnType<typeof createAnthropic> | null = null;
+
+    export function getAnthropicAISDK() {
+      if (!process.env.ANTHROPIC_API_KEY) {
+        throw new Error("Missing ANTHROPIC_API_KEY environment variable");
+      }
+
+      if (!anthropicAISDK) {
+        anthropicAISDK = createAnthropic({
+          apiKey: process.env.ANTHROPIC_API_KEY,
+        });
+      }
+
+      return anthropicAISDK;
+    }
+
+    // Lazy initialization for direct SDK
+    let anthropicDirect: Anthropic | null = null;
+
+    export function getAnthropicDirect() {
+      if (!process.env.ANTHROPIC_API_KEY) {
+        throw new Error("Missing ANTHROPIC_API_KEY environment variable");
+      }
+
+      if (!anthropicDirect) {
+        anthropicDirect = new Anthropic({
+          apiKey: process.env.ANTHROPIC_API_KEY,
+        });
+      }
+
+      return anthropicDirect;
+    }
+
+    /**
+     * Available Claude models
+     */
+    export const CLAUDE_MODELS = {
+      "claude-sonnet-4-20250514": {
+        name: "Claude Sonnet 4",
+        contextWindow: 200000,
+        costPer1kInput: 0.003,
+        costPer1kOutput: 0.015,
+        bestFor: "Best balance of intelligence and speed",
+      },
+      "claude-3-5-sonnet-20241022": {
+        name: "Claude 3.5 Sonnet",
+        contextWindow: 200000,
+        costPer1kInput: 0.003,
+        costPer1kOutput: 0.015,
+        bestFor: "Previous generation, very capable",
+      },
+      "claude-3-5-haiku-20241022": {
+        name: "Claude 3.5 Haiku",
+        contextWindow: 200000,
+        costPer1kInput: 0.0008,
+        costPer1kOutput: 0.004,
+        bestFor: "Fast, cost-effective tasks",
+      },
+      "claude-3-opus-20240229": {
+        name: "Claude 3 Opus",
+        contextWindow: 200000,
+        costPer1kInput: 0.015,
+        costPer1kOutput: 0.075,
+        bestFor: "Most capable, complex reasoning",
+      },
+    } as const;
+
+    export type ClaudeModel = keyof typeof CLAUDE_MODELS;
+
+    /**
+     * System prompts for Claude
+     */
+    export const CLAUDE_SYSTEM_PROMPTS = {
+      assistant: `You are Claude, a helpful AI assistant created by Anthropic. Be direct, helpful, and honest in your responses.`,
+
+      coder: `You are an expert software engineer. Write clean, well-documented code.
+Use best practices and explain your reasoning. Always consider edge cases and error handling.`,
+
+      analyst: `You are a thoughtful analyst. Provide balanced, well-reasoned analysis.
+Consider multiple perspectives and cite your reasoning.`,
+
+      creative: `You are a creative writing assistant. Help with storytelling, brainstorming, and creative projects.
+Be imaginative while maintaining coherence.`,
+    } as const;
+
+  app/api/claude/route.ts: |
+    import { streamText, convertToCoreMessages } from "ai";
+    import { getAnthropicAISDK, CLAUDE_MODELS, CLAUDE_SYSTEM_PROMPTS, type ClaudeModel } from "@/lib/ai/anthropic";
+    import { NextRequest } from "next/server";
+
+    export const runtime = "edge";
+
+    interface ClaudeRequest {
+      messages: Array<{ role: "user" | "assistant"; content: string }>;
+      model?: ClaudeModel;
+      systemPrompt?: keyof typeof CLAUDE_SYSTEM_PROMPTS | string;
+      temperature?: number;
+      maxTokens?: number;
+    }
+
+    export async function POST(request: NextRequest) {
+      try {
+        const body: ClaudeRequest = await request.json();
+        const {
+          messages,
+          model = "claude-sonnet-4-20250514",
+          systemPrompt = "assistant",
+          temperature = 0.7,
+          maxTokens = 4096,
+        } = body;
+
+        // Validate model
+        if (!CLAUDE_MODELS[model]) {
+          return new Response(
+            JSON.stringify({ error: `Invalid model: ${model}` }),
+            { status: 400, headers: { "Content-Type": "application/json" } }
+          );
+        }
+
+        // Get system prompt
+        const system =
+          CLAUDE_SYSTEM_PROMPTS[systemPrompt as keyof typeof CLAUDE_SYSTEM_PROMPTS] ||
+          systemPrompt;
+
+        const anthropic = getAnthropicAISDK();
+
+        const result = await streamText({
+          model: anthropic(model),
+          system,
+          messages: convertToCoreMessages(messages),
+          temperature,
+          maxTokens,
+        });
+
+        return result.toDataStreamResponse();
+      } catch (error) {
+        console.error("Claude API error:", error);
+
+        if (error instanceof Error) {
+          if (error.message.includes("rate_limit")) {
+            return new Response(
+              JSON.stringify({ error: "Rate limit exceeded" }),
+              { status: 429, headers: { "Content-Type": "application/json" } }
+            );
+          }
+
+          if (error.message.includes("authentication")) {
+            return new Response(
+              JSON.stringify({ error: "Invalid API key" }),
+              { status: 401, headers: { "Content-Type": "application/json" } }
+            );
+          }
+        }
+
+        return new Response(
+          JSON.stringify({ error: "Internal server error" }),
+          { status: 500, headers: { "Content-Type": "application/json" } }
+        );
+      }
+    }
+
+  lib/ai/tools.ts: |
+    import { tool } from "ai";
+    import { z } from "zod";
+
+    /**
+     * Weather tool - example of external API call
+     */
+    export const weatherTool = tool({
+      description: "Get the current weather for a location",
+      parameters: z.object({
+        location: z.string().describe("City name or location"),
+        unit: z.enum(["celsius", "fahrenheit"]).default("celsius"),
+      }),
+      execute: async ({ location, unit }) => {
+        // In production, call a real weather API
+        // This is a mock response
+        const mockWeather = {
+          location,
+          temperature: unit === "celsius" ? 22 : 72,
+          unit,
+          condition: "partly cloudy",
+          humidity: 65,
+          wind: "10 km/h",
+        };
+
+        return mockWeather;
+      },
+    });
+
+    /**
+     * Calculator tool
+     */
+    export const calculatorTool = tool({
+      description: "Perform mathematical calculations",
+      parameters: z.object({
+        expression: z.string().describe("Mathematical expression to evaluate"),
+      }),
+      execute: async ({ expression }) => {
+        try {
+          // Use Function constructor for safe(r) evaluation
+          // In production, use a proper math parser like mathjs
+          const sanitized = expression.replace(/[^0-9+\-*/().%\s]/g, "");
+          const result = new Function(`return ${sanitized}`)();
+          return { expression, result, success: true };
+        } catch (error) {
+          return { expression, error: "Invalid expression", success: false };
+        }
+      },
+    });
+
+    /**
+     * Search tool - mock web search
+     */
+    export const searchTool = tool({
+      description: "Search the web for information",
+      parameters: z.object({
+        query: z.string().describe("Search query"),
+        numResults: z.number().default(3).describe("Number of results"),
+      }),
+      execute: async ({ query, numResults }) => {
+        // In production, call a real search API (Bing, Google, etc.)
+        return {
+          query,
+          results: [
+            { title: "Result 1", snippet: `Information about ${query}...`, url: "https://example.com/1" },
+            { title: "Result 2", snippet: `More about ${query}...`, url: "https://example.com/2" },
+            { title: "Result 3", snippet: `Related to ${query}...`, url: "https://example.com/3" },
+          ].slice(0, numResults),
+        };
+      },
+    });
+
+    /**
+     * All available tools
+     */
+    export const tools = {
+      weather: weatherTool,
+      calculator: calculatorTool,
+      search: searchTool,
+    };
+
+  app/api/claude/tools/route.ts: |
+    import { streamText, convertToCoreMessages } from "ai";
+    import { getAnthropicAISDK, type ClaudeModel } from "@/lib/ai/anthropic";
+    import { tools } from "@/lib/ai/tools";
+    import { NextRequest } from "next/server";
+
+    export const runtime = "edge";
+
+    interface ToolRequest {
+      messages: Array<{ role: "user" | "assistant"; content: string }>;
+      model?: ClaudeModel;
+      enabledTools?: (keyof typeof tools)[];
+    }
+
+    export async function POST(request: NextRequest) {
+      try {
+        const body: ToolRequest = await request.json();
+        const {
+          messages,
+          model = "claude-sonnet-4-20250514",
+          enabledTools = ["weather", "calculator", "search"],
+        } = body;
+
+        const anthropic = getAnthropicAISDK();
+
+        // Filter enabled tools
+        const activeTools = Object.fromEntries(
+          Object.entries(tools).filter(([key]) =>
+            enabledTools.includes(key as keyof typeof tools)
+          )
+        );
+
+        const result = await streamText({
+          model: anthropic(model),
+          system: `You are a helpful assistant with access to tools.
+Use tools when they would help answer the user's question.
+Always explain what you're doing when using tools.`,
+          messages: convertToCoreMessages(messages),
+          tools: activeTools,
+          maxSteps: 5, // Allow up to 5 tool calls in a conversation turn
+        });
+
+        return result.toDataStreamResponse();
+      } catch (error) {
+        console.error("Claude Tools API error:", error);
+        return new Response(
+          JSON.stringify({ error: "Internal server error" }),
+          { status: 500, headers: { "Content-Type": "application/json" } }
+        );
+      }
+    }
+
+edge_cases:
+  - id: context-limit
+    symptom: "Error: prompt is too long"
+    cause: "Exceeded model's context window"
+    solution: |
+      Claude models have 200K context, but still need management:
+      1. Summarize old messages
+      2. Use sliding window for conversation history
+      3. Estimate tokens before sending:
+
+      function estimateTokens(text: string): number {
+        return Math.ceil(text.length / 4);
+      }
+
+  - id: tool-loop
+    symptom: "Model keeps calling tools indefinitely"
+    cause: "No maxSteps limit or tool returning ambiguous results"
+    solution: |
+      Set maxSteps limit:
+      streamText({
+        maxSteps: 5, // Limit tool call iterations
+        ...
+      })
+
+      And ensure tools return definitive results.
+
+  - id: streaming-with-tools
+    symptom: "Response not streaming during tool use"
+    cause: "Tool execution blocks streaming"
+    solution: |
+      This is expected behavior. During tool execution:
+      1. Model decides to use tool (streamed)
+      2. Tool executes (not streamed)
+      3. Model responds with result (streamed)
+
+      Show loading state during tool execution.
+
+  - id: anthropic-api-differences
+    symptom: "Response format different from OpenAI"
+    cause: "Different API structures"
+    solution: |
+      Vercel AI SDK normalizes the responses.
+      If using direct Anthropic SDK:
+
+      const response = await anthropic.messages.create({
+        model: "claude-sonnet-4-20250514",
+        messages: [...],
+        stream: true,
+      });
+
+      // Handle streaming differently
+      for await (const event of response) {
+        // Process events
+      }
+
+validation:
+  manual_test:
+    - "Add ANTHROPIC_API_KEY to .env.local"
+    - "Start dev server"
+    - "POST to /api/claude with message"
+    - "Verify streaming response works"
+    - "Test tool use endpoint"
+    - "Ask 'What's the weather in Paris?'"
+    - "Verify tool is called and response includes weather"
+    - "Test error handling with invalid API key"

@@ -1,0 +1,573 @@
+id: openai-streaming
+version: "1.0.0"
+updated_at: "2026-01-31"
+author: "nyko-team"
+status: beta
+
+name: "OpenAI Streaming with Vercel AI SDK"
+description: "Real-time streaming responses from OpenAI using Vercel AI SDK"
+
+category: ai
+tags:
+  - openai
+  - streaming
+  - ai-sdk
+  - chat
+  - nextjs
+
+difficulty: intermediate
+time_estimate: "20-25 min"
+
+stack:
+  required:
+    - name: "next"
+      version: "^15.1.0"
+      reason: "App Router with streaming support"
+    - name: "ai"
+      version: "^6.0.0"
+      reason: "Vercel AI SDK"
+    - name: "openai"
+      version: "^6.17.0"
+      reason: "OpenAI API client"
+
+requires: []
+
+enables:
+  - ai-response-cache
+
+env_vars:
+  required:
+    - key: OPENAI_API_KEY
+      description: "OpenAI API key"
+      format: "sk-..."
+      where_to_find: "OpenAI Dashboard > API Keys"
+
+external_setup:
+  - service: "OpenAI"
+    url: "https://platform.openai.com"
+    steps:
+      - "Create an OpenAI account"
+      - "Go to API Keys section"
+      - "Create a new secret key"
+      - "Add OPENAI_API_KEY to .env.local"
+      - "Set up billing/usage limits"
+
+files:
+  - path: "lib/ai/openai.ts"
+    action: create
+    description: "OpenAI client configuration"
+    priority: 1
+
+  - path: "app/api/chat/route.ts"
+    action: create
+    description: "Chat streaming API endpoint"
+    priority: 2
+
+  - path: "hooks/use-chat-stream.ts"
+    action: create
+    description: "Chat streaming hook"
+    priority: 3
+
+  - path: "components/chat/chat-interface.tsx"
+    action: create
+    description: "Chat UI component"
+    priority: 4
+
+code:
+  lib/ai/openai.ts: |
+    import { createOpenAI } from "@ai-sdk/openai";
+
+    // Lazy initialization to prevent build-time crashes
+    let openaiInstance: ReturnType<typeof createOpenAI> | null = null;
+
+    export function getOpenAI() {
+      if (!process.env.OPENAI_API_KEY) {
+        throw new Error("Missing OPENAI_API_KEY environment variable");
+      }
+
+      if (!openaiInstance) {
+        openaiInstance = createOpenAI({
+          apiKey: process.env.OPENAI_API_KEY,
+          compatibility: "strict",
+        });
+      }
+
+      return openaiInstance;
+    }
+
+    /**
+     * Available models with their characteristics
+     */
+    export const OPENAI_MODELS = {
+      // GPT-4 models
+      "gpt-4o": {
+        name: "GPT-4o",
+        contextWindow: 128000,
+        costPer1kInput: 0.005,
+        costPer1kOutput: 0.015,
+        bestFor: "Complex reasoning, creative tasks",
+      },
+      "gpt-4o-mini": {
+        name: "GPT-4o Mini",
+        contextWindow: 128000,
+        costPer1kInput: 0.00015,
+        costPer1kOutput: 0.0006,
+        bestFor: "Fast, cost-effective tasks",
+      },
+      "gpt-4-turbo": {
+        name: "GPT-4 Turbo",
+        contextWindow: 128000,
+        costPer1kInput: 0.01,
+        costPer1kOutput: 0.03,
+        bestFor: "Most capable, vision support",
+      },
+      // GPT-3.5 models
+      "gpt-3.5-turbo": {
+        name: "GPT-3.5 Turbo",
+        contextWindow: 16385,
+        costPer1kInput: 0.0005,
+        costPer1kOutput: 0.0015,
+        bestFor: "Simple tasks, high throughput",
+      },
+    } as const;
+
+    export type OpenAIModel = keyof typeof OPENAI_MODELS;
+
+    /**
+     * System prompts for different use cases
+     */
+    export const SYSTEM_PROMPTS = {
+      assistant: `You are a helpful AI assistant. Be concise and accurate in your responses.`,
+
+      coder: `You are an expert software engineer. Provide clean, well-documented code examples.
+Always explain your reasoning and consider edge cases.`,
+
+      writer: `You are a professional writer. Help with writing, editing, and improving text.
+Focus on clarity, grammar, and tone appropriate for the context.`,
+
+      analyst: `You are a data analyst. Help analyze data, explain trends, and provide insights.
+Be precise with numbers and explain your methodology.`,
+    } as const;
+
+  app/api/chat/route.ts: |
+    import { streamText, convertToCoreMessages } from "ai";
+    import { getOpenAI, OPENAI_MODELS, SYSTEM_PROMPTS, type OpenAIModel } from "@/lib/ai/openai";
+    import { NextRequest } from "next/server";
+
+    export const runtime = "edge"; // Use edge runtime for streaming
+
+    interface ChatRequest {
+      messages: Array<{ role: "user" | "assistant"; content: string }>;
+      model?: OpenAIModel;
+      systemPrompt?: keyof typeof SYSTEM_PROMPTS | string;
+      temperature?: number;
+      maxTokens?: number;
+    }
+
+    export async function POST(request: NextRequest) {
+      try {
+        const body: ChatRequest = await request.json();
+        const {
+          messages,
+          model = "gpt-4o-mini",
+          systemPrompt = "assistant",
+          temperature = 0.7,
+          maxTokens = 2000,
+        } = body;
+
+        // Validate model
+        if (!OPENAI_MODELS[model]) {
+          return new Response(
+            JSON.stringify({ error: `Invalid model: ${model}` }),
+            { status: 400, headers: { "Content-Type": "application/json" } }
+          );
+        }
+
+        // Get system prompt
+        const system =
+          SYSTEM_PROMPTS[systemPrompt as keyof typeof SYSTEM_PROMPTS] ||
+          systemPrompt;
+
+        const openai = getOpenAI();
+
+        // Stream the response
+        const result = await streamText({
+          model: openai(model),
+          system,
+          messages: convertToCoreMessages(messages),
+          temperature,
+          maxTokens,
+        });
+
+        // Return streaming response
+        return result.toDataStreamResponse();
+      } catch (error) {
+        console.error("Chat API error:", error);
+
+        if (error instanceof Error) {
+          // Handle specific OpenAI errors
+          if (error.message.includes("rate_limit")) {
+            return new Response(
+              JSON.stringify({ error: "Rate limit exceeded. Please try again." }),
+              { status: 429, headers: { "Content-Type": "application/json" } }
+            );
+          }
+
+          if (error.message.includes("invalid_api_key")) {
+            return new Response(
+              JSON.stringify({ error: "Invalid API key" }),
+              { status: 401, headers: { "Content-Type": "application/json" } }
+            );
+          }
+        }
+
+        return new Response(
+          JSON.stringify({ error: "Internal server error" }),
+          { status: 500, headers: { "Content-Type": "application/json" } }
+        );
+      }
+    }
+
+  hooks/use-chat-stream.ts: |
+    "use client";
+
+    import { useChat, type Message } from "ai/react";
+    import { useCallback, useState } from "react";
+    import type { OpenAIModel } from "@/lib/ai/openai";
+
+    interface UseChatStreamOptions {
+      /** API endpoint */
+      api?: string;
+      /** Model to use */
+      model?: OpenAIModel;
+      /** System prompt key or custom prompt */
+      systemPrompt?: string;
+      /** Initial messages */
+      initialMessages?: Message[];
+      /** Callback when response completes */
+      onFinish?: (message: Message) => void;
+      /** Callback on error */
+      onError?: (error: Error) => void;
+    }
+
+    export function useChatStream(options: UseChatStreamOptions = {}) {
+      const {
+        api = "/api/chat",
+        model = "gpt-4o-mini",
+        systemPrompt = "assistant",
+        initialMessages = [],
+        onFinish,
+        onError,
+      } = options;
+
+      const [isStreaming, setIsStreaming] = useState(false);
+
+      const {
+        messages,
+        input,
+        handleInputChange,
+        handleSubmit: originalSubmit,
+        isLoading,
+        error,
+        reload,
+        stop,
+        setMessages,
+        append,
+      } = useChat({
+        api,
+        body: {
+          model,
+          systemPrompt,
+        },
+        initialMessages,
+        onResponse: () => {
+          setIsStreaming(true);
+        },
+        onFinish: (message) => {
+          setIsStreaming(false);
+          onFinish?.(message);
+        },
+        onError: (error) => {
+          setIsStreaming(false);
+          onError?.(error);
+        },
+      });
+
+      // Custom submit with options
+      const handleSubmit = useCallback(
+        (e?: React.FormEvent<HTMLFormElement>) => {
+          e?.preventDefault();
+          if (!input.trim()) return;
+          originalSubmit(e);
+        },
+        [input, originalSubmit]
+      );
+
+      // Send message programmatically
+      const sendMessage = useCallback(
+        async (content: string) => {
+          return append({
+            role: "user",
+            content,
+          });
+        },
+        [append]
+      );
+
+      // Clear conversation
+      const clearMessages = useCallback(() => {
+        setMessages([]);
+      }, [setMessages]);
+
+      // Regenerate last response
+      const regenerate = useCallback(() => {
+        reload();
+      }, [reload]);
+
+      return {
+        // State
+        messages,
+        input,
+        isLoading,
+        isStreaming,
+        error,
+
+        // Actions
+        handleInputChange,
+        handleSubmit,
+        sendMessage,
+        clearMessages,
+        regenerate,
+        stop,
+        setMessages,
+      };
+    }
+
+  components/chat/chat-interface.tsx: |
+    "use client";
+
+    import { useRef, useEffect, useState } from "react";
+    import { useChatStream } from "@/hooks/use-chat-stream";
+    import { OPENAI_MODELS, type OpenAIModel } from "@/lib/ai/openai";
+
+    interface ChatInterfaceProps {
+      /** Initial system prompt */
+      systemPrompt?: string;
+      /** Allow model selection */
+      showModelSelector?: boolean;
+      /** Placeholder text */
+      placeholder?: string;
+    }
+
+    export function ChatInterface({
+      systemPrompt = "assistant",
+      showModelSelector = true,
+      placeholder = "Type your message...",
+    }: ChatInterfaceProps) {
+      const [model, setModel] = useState<OpenAIModel>("gpt-4o-mini");
+      const messagesEndRef = useRef<HTMLDivElement>(null);
+
+      const {
+        messages,
+        input,
+        isLoading,
+        isStreaming,
+        error,
+        handleInputChange,
+        handleSubmit,
+        clearMessages,
+        regenerate,
+        stop,
+      } = useChatStream({
+        model,
+        systemPrompt,
+        onError: (error) => {
+          console.error("Chat error:", error);
+        },
+      });
+
+      // Auto-scroll to bottom
+      useEffect(() => {
+        messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+      }, [messages]);
+
+      return (
+        <div className="flex flex-col h-full max-h-screen">
+          {/* Header */}
+          <div className="flex items-center justify-between border-b p-4">
+            <h1 className="text-lg font-semibold">AI Chat</h1>
+
+            <div className="flex items-center gap-2">
+              {showModelSelector && (
+                <select
+                  value={model}
+                  onChange={(e) => setModel(e.target.value as OpenAIModel)}
+                  className="rounded border px-2 py-1 text-sm"
+                  disabled={isLoading}
+                >
+                  {Object.entries(OPENAI_MODELS).map(([key, info]) => (
+                    <option key={key} value={key}>
+                      {info.name}
+                    </option>
+                  ))}
+                </select>
+              )}
+
+              <button
+                onClick={clearMessages}
+                disabled={messages.length === 0}
+                className="rounded px-3 py-1 text-sm text-gray-600 hover:bg-gray-100 disabled:opacity-50"
+              >
+                Clear
+              </button>
+            </div>
+          </div>
+
+          {/* Messages */}
+          <div className="flex-1 overflow-y-auto p-4 space-y-4">
+            {messages.length === 0 && (
+              <div className="text-center text-gray-400 py-8">
+                Start a conversation
+              </div>
+            )}
+
+            {messages.map((message) => (
+              <div
+                key={message.id}
+                className={`flex ${
+                  message.role === "user" ? "justify-end" : "justify-start"
+                }`}
+              >
+                <div
+                  className={`max-w-[80%] rounded-lg px-4 py-2 ${
+                    message.role === "user"
+                      ? "bg-blue-500 text-white"
+                      : "bg-gray-100 dark:bg-gray-800"
+                  }`}
+                >
+                  <div className="whitespace-pre-wrap">{message.content}</div>
+                </div>
+              </div>
+            ))}
+
+            {isStreaming && (
+              <div className="flex justify-start">
+                <div className="bg-gray-100 dark:bg-gray-800 rounded-lg px-4 py-2">
+                  <div className="flex gap-1">
+                    <span className="animate-bounce">.</span>
+                    <span className="animate-bounce delay-100">.</span>
+                    <span className="animate-bounce delay-200">.</span>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {error && (
+              <div className="text-center">
+                <p className="text-red-500 text-sm mb-2">{error.message}</p>
+                <button
+                  onClick={regenerate}
+                  className="text-sm text-blue-500 hover:underline"
+                >
+                  Retry
+                </button>
+              </div>
+            )}
+
+            <div ref={messagesEndRef} />
+          </div>
+
+          {/* Input */}
+          <form onSubmit={handleSubmit} className="border-t p-4">
+            <div className="flex gap-2">
+              <input
+                type="text"
+                value={input}
+                onChange={handleInputChange}
+                placeholder={placeholder}
+                disabled={isLoading}
+                className="flex-1 rounded-lg border px-4 py-2 focus:border-blue-500 focus:outline-none disabled:opacity-50"
+              />
+
+              {isLoading ? (
+                <button
+                  type="button"
+                  onClick={stop}
+                  className="rounded-lg bg-red-500 px-4 py-2 text-white hover:bg-red-600"
+                >
+                  Stop
+                </button>
+              ) : (
+                <button
+                  type="submit"
+                  disabled={!input.trim()}
+                  className="rounded-lg bg-blue-500 px-4 py-2 text-white hover:bg-blue-600 disabled:opacity-50"
+                >
+                  Send
+                </button>
+              )}
+            </div>
+          </form>
+        </div>
+      );
+    }
+
+edge_cases:
+  - id: rate-limiting
+    symptom: "429 Too Many Requests error"
+    cause: "OpenAI rate limit exceeded"
+    solution: |
+      Implement exponential backoff:
+      const delay = Math.min(1000 * 2 ** retryCount, 30000);
+      await new Promise(r => setTimeout(r, delay));
+
+      Or use tier-appropriate rate limits:
+      - Free tier: 3 RPM, 200 RPD
+      - Tier 1: 500 RPM
+
+  - id: stream-interruption
+    symptom: "Response cuts off mid-stream"
+    cause: "Connection timeout or network issue"
+    solution: |
+      Handle stream errors gracefully:
+      onError: (error) => {
+        if (error.message.includes('network')) {
+          // Show retry option
+        }
+      }
+
+      Use the stop() function to cleanly abort.
+
+  - id: context-window-exceeded
+    symptom: "Error: maximum context length exceeded"
+    cause: "Conversation too long for model"
+    solution: |
+      Implement context window management:
+      const maxTokens = OPENAI_MODELS[model].contextWindow;
+
+      // Trim old messages when approaching limit
+      const trimmedMessages = messages.slice(-10);
+
+      Or summarize old conversation.
+
+  - id: cost-runaway
+    symptom: "Unexpected high OpenAI bill"
+    cause: "No usage limits set"
+    solution: |
+      1. Set usage limits in OpenAI dashboard
+      2. Implement server-side rate limiting
+      3. Track token usage:
+         const { usage } = response;
+         await logUsage(userId, usage.total_tokens);
+      4. Use cheaper models for simple tasks
+
+validation:
+  manual_test:
+    - "Add OPENAI_API_KEY to .env.local"
+    - "Start dev server"
+    - "Open chat interface"
+    - "Send a message - verify streaming response"
+    - "Click Stop - verify stream stops"
+    - "Send multiple messages - verify context maintained"
+    - "Switch models - verify different responses"
+    - "Test error handling with invalid API key"

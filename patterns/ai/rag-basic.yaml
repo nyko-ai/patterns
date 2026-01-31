@@ -1,0 +1,646 @@
+id: rag-basic
+version: "1.0.0"
+updated_at: "2026-01-31"
+author: "nyko-team"
+status: beta
+
+name: "Basic RAG with Vector Search"
+description: "Retrieval-Augmented Generation using embeddings and vector search"
+
+category: ai
+tags:
+  - rag
+  - embeddings
+  - vector-search
+  - ai
+  - retrieval
+
+difficulty: advanced
+time_estimate: "40-50 min"
+
+stack:
+  required:
+    - name: "next"
+      version: "^15.1.0"
+      reason: "App Router"
+    - name: "ai"
+      version: "^6.0.0"
+      reason: "Vercel AI SDK for embeddings"
+    - name: "openai"
+      version: "^6.17.0"
+      reason: "OpenAI embeddings"
+    - name: "@upstash/vector"
+      version: "^1.2.0"
+      reason: "Serverless vector database"
+
+requires: []
+
+enables: []
+
+env_vars:
+  required:
+    - key: OPENAI_API_KEY
+      description: "OpenAI API key for embeddings"
+      format: "sk-..."
+      where_to_find: "OpenAI Dashboard > API Keys"
+    - key: UPSTASH_VECTOR_REST_URL
+      description: "Upstash Vector REST URL"
+      format: "https://xxx.upstash.io"
+      where_to_find: "Upstash Console > Vector > REST API"
+    - key: UPSTASH_VECTOR_REST_TOKEN
+      description: "Upstash Vector REST token"
+      format: "xxx..."
+      where_to_find: "Upstash Console > Vector > REST API"
+
+external_setup:
+  - service: "Upstash Vector"
+    url: "https://console.upstash.com"
+    steps:
+      - "Create Upstash account"
+      - "Go to Vector section"
+      - "Create new index with dimension 1536 (for OpenAI embeddings)"
+      - "Copy REST URL and Token"
+      - "Add credentials to .env.local"
+
+  - service: "OpenAI"
+    url: "https://platform.openai.com"
+    steps:
+      - "Create OpenAI account"
+      - "Get API key"
+      - "Add OPENAI_API_KEY to .env.local"
+
+files:
+  - path: "lib/ai/embeddings.ts"
+    action: create
+    description: "Embedding generation utilities"
+    priority: 1
+
+  - path: "lib/ai/vector-store.ts"
+    action: create
+    description: "Vector store client"
+    priority: 2
+
+  - path: "lib/ai/rag.ts"
+    action: create
+    description: "RAG implementation"
+    priority: 3
+
+  - path: "app/api/rag/index/route.ts"
+    action: create
+    description: "Document indexing endpoint"
+    priority: 4
+
+  - path: "app/api/rag/query/route.ts"
+    action: create
+    description: "RAG query endpoint"
+    priority: 5
+
+code:
+  lib/ai/embeddings.ts: |
+    import { embed, embedMany } from "ai";
+    import { createOpenAI } from "@ai-sdk/openai";
+
+    let openaiInstance: ReturnType<typeof createOpenAI> | null = null;
+
+    function getOpenAI() {
+      if (!process.env.OPENAI_API_KEY) {
+        throw new Error("Missing OPENAI_API_KEY");
+      }
+
+      if (!openaiInstance) {
+        openaiInstance = createOpenAI({
+          apiKey: process.env.OPENAI_API_KEY,
+        });
+      }
+
+      return openaiInstance;
+    }
+
+    const EMBEDDING_MODEL = "text-embedding-3-small";
+    const EMBEDDING_DIMENSIONS = 1536;
+
+    /**
+     * Generate embedding for a single text
+     */
+    export async function generateEmbedding(text: string): Promise<number[]> {
+      const openai = getOpenAI();
+
+      const { embedding } = await embed({
+        model: openai.embedding(EMBEDDING_MODEL),
+        value: text,
+      });
+
+      return embedding;
+    }
+
+    /**
+     * Generate embeddings for multiple texts
+     */
+    export async function generateEmbeddings(
+      texts: string[]
+    ): Promise<number[][]> {
+      const openai = getOpenAI();
+
+      const { embeddings } = await embedMany({
+        model: openai.embedding(EMBEDDING_MODEL),
+        values: texts,
+      });
+
+      return embeddings;
+    }
+
+    /**
+     * Chunk text into smaller pieces for embedding
+     */
+    export function chunkText(
+      text: string,
+      options: {
+        maxChunkSize?: number;
+        overlap?: number;
+        separator?: string;
+      } = {}
+    ): string[] {
+      const { maxChunkSize = 1000, overlap = 200, separator = "\n\n" } = options;
+
+      // First, split by separator
+      const paragraphs = text.split(separator);
+      const chunks: string[] = [];
+      let currentChunk = "";
+
+      for (const paragraph of paragraphs) {
+        if ((currentChunk + paragraph).length > maxChunkSize) {
+          if (currentChunk) {
+            chunks.push(currentChunk.trim());
+          }
+
+          // If paragraph itself is too long, split it
+          if (paragraph.length > maxChunkSize) {
+            const sentences = paragraph.match(/[^.!?]+[.!?]+/g) || [paragraph];
+            let sentenceChunk = "";
+
+            for (const sentence of sentences) {
+              if ((sentenceChunk + sentence).length > maxChunkSize) {
+                if (sentenceChunk) {
+                  chunks.push(sentenceChunk.trim());
+                }
+                sentenceChunk = sentence;
+              } else {
+                sentenceChunk += sentence;
+              }
+            }
+
+            if (sentenceChunk) {
+              currentChunk = sentenceChunk;
+            }
+          } else {
+            currentChunk = paragraph;
+          }
+        } else {
+          currentChunk += (currentChunk ? separator : "") + paragraph;
+        }
+      }
+
+      if (currentChunk) {
+        chunks.push(currentChunk.trim());
+      }
+
+      // Add overlap between chunks
+      if (overlap > 0 && chunks.length > 1) {
+        return chunks.map((chunk, i) => {
+          if (i === 0) return chunk;
+
+          const prevChunk = chunks[i - 1];
+          const overlapText = prevChunk.slice(-overlap);
+          return overlapText + " " + chunk;
+        });
+      }
+
+      return chunks;
+    }
+
+    export { EMBEDDING_DIMENSIONS };
+
+  lib/ai/vector-store.ts: |
+    import { Index } from "@upstash/vector";
+
+    interface VectorMetadata {
+      text: string;
+      source?: string;
+      title?: string;
+      chunkIndex?: number;
+      createdAt?: string;
+      [key: string]: unknown;
+    }
+
+    // Lazy initialization
+    let vectorIndex: Index<VectorMetadata> | null = null;
+
+    export function getVectorIndex(): Index<VectorMetadata> {
+      if (!process.env.UPSTASH_VECTOR_REST_URL) {
+        throw new Error("Missing UPSTASH_VECTOR_REST_URL");
+      }
+      if (!process.env.UPSTASH_VECTOR_REST_TOKEN) {
+        throw new Error("Missing UPSTASH_VECTOR_REST_TOKEN");
+      }
+
+      if (!vectorIndex) {
+        vectorIndex = new Index<VectorMetadata>({
+          url: process.env.UPSTASH_VECTOR_REST_URL,
+          token: process.env.UPSTASH_VECTOR_REST_TOKEN,
+        });
+      }
+
+      return vectorIndex;
+    }
+
+    /**
+     * Upsert vectors into the index
+     */
+    export async function upsertVectors(
+      vectors: Array<{
+        id: string;
+        values: number[];
+        metadata: VectorMetadata;
+      }>
+    ): Promise<void> {
+      const index = getVectorIndex();
+      await index.upsert(vectors);
+    }
+
+    /**
+     * Query similar vectors
+     */
+    export async function querySimilar(
+      queryVector: number[],
+      options: {
+        topK?: number;
+        filter?: Record<string, unknown>;
+        includeMetadata?: boolean;
+        includeVectors?: boolean;
+        minScore?: number;
+      } = {}
+    ) {
+      const {
+        topK = 5,
+        filter,
+        includeMetadata = true,
+        includeVectors = false,
+        minScore = 0.7,
+      } = options;
+
+      const index = getVectorIndex();
+
+      const results = await index.query({
+        vector: queryVector,
+        topK,
+        filter,
+        includeMetadata,
+        includeVectors,
+      });
+
+      // Filter by minimum score
+      return results.filter((r) => r.score >= minScore);
+    }
+
+    /**
+     * Delete vectors by ID
+     */
+    export async function deleteVectors(ids: string[]): Promise<void> {
+      const index = getVectorIndex();
+      await index.delete(ids);
+    }
+
+    /**
+     * Get index stats
+     */
+    export async function getIndexStats() {
+      const index = getVectorIndex();
+      return index.info();
+    }
+
+  lib/ai/rag.ts: |
+    import { streamText, convertToCoreMessages } from "ai";
+    import { createOpenAI } from "@ai-sdk/openai";
+    import { generateEmbedding, chunkText, EMBEDDING_DIMENSIONS } from "./embeddings";
+    import { upsertVectors, querySimilar } from "./vector-store";
+    import { randomUUID } from "crypto";
+
+    interface Document {
+      id?: string;
+      content: string;
+      title?: string;
+      source?: string;
+      metadata?: Record<string, unknown>;
+    }
+
+    interface IndexedDocument {
+      documentId: string;
+      chunks: number;
+    }
+
+    /**
+     * Index a document for RAG
+     */
+    export async function indexDocument(
+      document: Document
+    ): Promise<IndexedDocument> {
+      const documentId = document.id || randomUUID();
+
+      // Chunk the document
+      const chunks = chunkText(document.content, {
+        maxChunkSize: 1000,
+        overlap: 200,
+      });
+
+      // Generate embeddings for all chunks
+      const embeddings = await Promise.all(
+        chunks.map((chunk) => generateEmbedding(chunk))
+      );
+
+      // Prepare vectors for upsert
+      const vectors = embeddings.map((embedding, index) => ({
+        id: `${documentId}-chunk-${index}`,
+        values: embedding,
+        metadata: {
+          text: chunks[index],
+          documentId,
+          title: document.title,
+          source: document.source,
+          chunkIndex: index,
+          createdAt: new Date().toISOString(),
+          ...document.metadata,
+        },
+      }));
+
+      // Upsert to vector store
+      await upsertVectors(vectors);
+
+      return {
+        documentId,
+        chunks: chunks.length,
+      };
+    }
+
+    /**
+     * Index multiple documents
+     */
+    export async function indexDocuments(
+      documents: Document[]
+    ): Promise<IndexedDocument[]> {
+      return Promise.all(documents.map(indexDocument));
+    }
+
+    interface RetrievedContext {
+      text: string;
+      score: number;
+      source?: string;
+      title?: string;
+    }
+
+    /**
+     * Retrieve relevant context for a query
+     */
+    export async function retrieveContext(
+      query: string,
+      options: {
+        topK?: number;
+        minScore?: number;
+        filter?: Record<string, unknown>;
+      } = {}
+    ): Promise<RetrievedContext[]> {
+      const { topK = 5, minScore = 0.7, filter } = options;
+
+      // Generate query embedding
+      const queryEmbedding = await generateEmbedding(query);
+
+      // Search for similar vectors
+      const results = await querySimilar(queryEmbedding, {
+        topK,
+        minScore,
+        filter,
+        includeMetadata: true,
+      });
+
+      return results.map((result) => ({
+        text: result.metadata?.text || "",
+        score: result.score,
+        source: result.metadata?.source,
+        title: result.metadata?.title,
+      }));
+    }
+
+    /**
+     * Generate RAG response
+     */
+    export async function generateRAGResponse(
+      query: string,
+      options: {
+        topK?: number;
+        minScore?: number;
+        model?: string;
+        systemPrompt?: string;
+      } = {}
+    ) {
+      const {
+        topK = 5,
+        minScore = 0.7,
+        model = "gpt-4o-mini",
+        systemPrompt,
+      } = options;
+
+      // Retrieve relevant context
+      const contexts = await retrieveContext(query, { topK, minScore });
+
+      if (contexts.length === 0) {
+        return {
+          response: "I couldn't find relevant information to answer your question.",
+          contexts: [],
+          hasContext: false,
+        };
+      }
+
+      // Build context string
+      const contextString = contexts
+        .map((ctx, i) => `[${i + 1}] ${ctx.title ? `${ctx.title}: ` : ""}${ctx.text}`)
+        .join("\n\n");
+
+      // Build system prompt with context
+      const system =
+        systemPrompt ||
+        `You are a helpful assistant that answers questions based on the provided context.
+Use the context below to answer the user's question. If the context doesn't contain
+relevant information, say so. Always cite your sources using [1], [2], etc.
+
+Context:
+${contextString}`;
+
+      // Generate response
+      const openai = createOpenAI({
+        apiKey: process.env.OPENAI_API_KEY!,
+      });
+
+      const result = await streamText({
+        model: openai(model),
+        system,
+        messages: [{ role: "user", content: query }],
+      });
+
+      return {
+        response: result,
+        contexts,
+        hasContext: true,
+      };
+    }
+
+  app/api/rag/index/route.ts: |
+    import { NextRequest, NextResponse } from "next/server";
+    import { indexDocument, indexDocuments } from "@/lib/ai/rag";
+
+    export async function POST(request: NextRequest) {
+      try {
+        const body = await request.json();
+
+        // Handle single document or array
+        if (Array.isArray(body.documents)) {
+          const results = await indexDocuments(body.documents);
+          return NextResponse.json({
+            success: true,
+            indexed: results.length,
+            documents: results,
+          });
+        }
+
+        const { content, title, source, metadata } = body;
+
+        if (!content) {
+          return NextResponse.json(
+            { error: "Content is required" },
+            { status: 400 }
+          );
+        }
+
+        const result = await indexDocument({
+          content,
+          title,
+          source,
+          metadata,
+        });
+
+        return NextResponse.json({
+          success: true,
+          ...result,
+        });
+      } catch (error) {
+        console.error("Indexing error:", error);
+        return NextResponse.json(
+          { error: error instanceof Error ? error.message : "Indexing failed" },
+          { status: 500 }
+        );
+      }
+    }
+
+  app/api/rag/query/route.ts: |
+    import { NextRequest } from "next/server";
+    import { generateRAGResponse } from "@/lib/ai/rag";
+
+    export const runtime = "edge";
+
+    export async function POST(request: NextRequest) {
+      try {
+        const body = await request.json();
+        const { query, topK, minScore, model } = body;
+
+        if (!query) {
+          return new Response(
+            JSON.stringify({ error: "Query is required" }),
+            { status: 400, headers: { "Content-Type": "application/json" } }
+          );
+        }
+
+        const { response, contexts, hasContext } = await generateRAGResponse(
+          query,
+          { topK, minScore, model }
+        );
+
+        if (!hasContext) {
+          return new Response(
+            JSON.stringify({ response: response as string, contexts: [] }),
+            { headers: { "Content-Type": "application/json" } }
+          );
+        }
+
+        // Return streaming response with contexts in header
+        const streamResponse = (response as Awaited<ReturnType<typeof generateRAGResponse>>["response"]).toDataStreamResponse();
+
+        // Add contexts as custom header
+        streamResponse.headers.set(
+          "X-RAG-Contexts",
+          JSON.stringify(contexts.map((c) => ({
+            title: c.title,
+            source: c.source,
+            score: c.score.toFixed(3),
+          })))
+        );
+
+        return streamResponse;
+      } catch (error) {
+        console.error("RAG query error:", error);
+        return new Response(
+          JSON.stringify({ error: "Query failed" }),
+          { status: 500, headers: { "Content-Type": "application/json" } }
+        );
+      }
+    }
+
+edge_cases:
+  - id: no-relevant-results
+    symptom: "Always says 'I couldn't find relevant information'"
+    cause: "No documents indexed or minScore too high"
+    solution: |
+      1. Check if documents are indexed:
+         GET /api/rag/stats
+
+      2. Lower minScore threshold:
+         { topK: 10, minScore: 0.5 }
+
+      3. Verify embedding dimensions match index:
+         Index should be 1536 for text-embedding-3-small
+
+  - id: hallucination
+    symptom: "Model makes up information not in context"
+    cause: "Context not restrictive enough"
+    solution: |
+      Strengthen system prompt:
+      "Answer ONLY based on the provided context.
+       If the answer is not in the context, say
+       'I don't have information about that.'
+       Never make up information."
+
+  - id: slow-indexing
+    symptom: "Indexing large documents is slow"
+    cause: "Sequential embedding generation"
+    solution: |
+      Batch embeddings and use parallelization:
+      const batchSize = 100;
+      for (let i = 0; i < chunks.length; i += batchSize) {
+        const batch = chunks.slice(i, i + batchSize);
+        await embedMany({ values: batch });
+      }
+
+  - id: duplicate-content
+    symptom: "Same content returned multiple times"
+    cause: "Overlapping chunks or re-indexed documents"
+    solution: |
+      1. Use document IDs to prevent duplicates
+      2. Delete old vectors before re-indexing
+      3. Deduplicate results by documentId
+
+validation:
+  manual_test:
+    - "Set up Upstash Vector index (dimension: 1536)"
+    - "Add all API keys to .env.local"
+    - "POST to /api/rag/index with sample document"
+    - "POST to /api/rag/query with related question"
+    - "Verify response cites the document"
+    - "Test with unrelated question"
+    - "Verify 'no information' response"

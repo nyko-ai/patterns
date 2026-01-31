@@ -1,0 +1,623 @@
+id: ai-response-cache
+version: "1.0.0"
+updated_at: "2026-01-31"
+author: "nyko-team"
+status: beta
+
+name: "AI Response Caching"
+description: "Cache AI responses using content hashing and Redis for cost optimization"
+
+category: ai
+tags:
+  - cache
+  - ai
+  - redis
+  - optimization
+  - cost-saving
+
+difficulty: intermediate
+time_estimate: "20-25 min"
+
+stack:
+  required:
+    - name: "next"
+      version: "^15.1.0"
+      reason: "App Router"
+    - name: "@upstash/redis"
+      version: "^1.36.0"
+      reason: "Serverless Redis for caching"
+
+requires:
+  - redis-upstash-cache
+
+enables: []
+
+env_vars:
+  required:
+    - key: UPSTASH_REDIS_REST_URL
+      description: "Upstash Redis REST URL"
+      format: "https://xxx.upstash.io"
+      where_to_find: "Upstash Console > Redis > REST API"
+    - key: UPSTASH_REDIS_REST_TOKEN
+      description: "Upstash Redis REST token"
+      format: "xxx..."
+      where_to_find: "Upstash Console > Redis > REST API"
+
+external_setup:
+  - service: "Upstash Redis"
+    url: "https://console.upstash.com"
+    steps:
+      - "Create Upstash account"
+      - "Create Redis database"
+      - "Copy REST URL and Token"
+      - "Add to .env.local"
+
+files:
+  - path: "lib/ai/cache.ts"
+    action: create
+    description: "AI response caching utilities"
+    priority: 1
+
+  - path: "lib/ai/cached-completion.ts"
+    action: create
+    description: "Cached completion wrapper"
+    priority: 2
+
+  - path: "app/api/ai/cached/route.ts"
+    action: create
+    description: "Cached AI endpoint"
+    priority: 3
+
+code:
+  lib/ai/cache.ts: |
+    import { Redis } from "@upstash/redis";
+    import crypto from "crypto";
+
+    // Lazy initialization
+    let redisInstance: Redis | null = null;
+
+    function getRedis(): Redis {
+      if (!process.env.UPSTASH_REDIS_REST_URL) {
+        throw new Error("Missing UPSTASH_REDIS_REST_URL");
+      }
+      if (!process.env.UPSTASH_REDIS_REST_TOKEN) {
+        throw new Error("Missing UPSTASH_REDIS_REST_TOKEN");
+      }
+
+      if (!redisInstance) {
+        redisInstance = new Redis({
+          url: process.env.UPSTASH_REDIS_REST_URL,
+          token: process.env.UPSTASH_REDIS_REST_TOKEN,
+        });
+      }
+
+      return redisInstance;
+    }
+
+    interface CacheEntry {
+      response: string;
+      model: string;
+      tokens: {
+        input: number;
+        output: number;
+      };
+      createdAt: string;
+      hits: number;
+    }
+
+    const CACHE_PREFIX = "ai:cache:";
+    const STATS_KEY = "ai:cache:stats";
+
+    /**
+     * Generate a deterministic hash for cache key
+     */
+    export function generateCacheKey(params: {
+      model: string;
+      messages: Array<{ role: string; content: string }>;
+      temperature?: number;
+      systemPrompt?: string;
+    }): string {
+      // Normalize parameters
+      const normalized = {
+        model: params.model,
+        messages: params.messages.map((m) => ({
+          role: m.role,
+          content: m.content.trim(),
+        })),
+        temperature: params.temperature ?? 0.7,
+        systemPrompt: params.systemPrompt?.trim() ?? "",
+      };
+
+      // Create deterministic hash
+      const content = JSON.stringify(normalized);
+      const hash = crypto.createHash("sha256").update(content).digest("hex");
+
+      return `${CACHE_PREFIX}${hash.slice(0, 32)}`;
+    }
+
+    /**
+     * Get cached response
+     */
+    export async function getCachedResponse(
+      cacheKey: string
+    ): Promise<CacheEntry | null> {
+      const redis = getRedis();
+      const cached = await redis.get<CacheEntry>(cacheKey);
+
+      if (cached) {
+        // Increment hit count
+        await redis.hincrby(cacheKey, "hits", 1);
+        await incrementStats("hits");
+      }
+
+      return cached;
+    }
+
+    /**
+     * Cache a response
+     */
+    export async function cacheResponse(
+      cacheKey: string,
+      entry: Omit<CacheEntry, "hits" | "createdAt">,
+      ttlSeconds: number = 86400 // 24 hours default
+    ): Promise<void> {
+      const redis = getRedis();
+
+      const fullEntry: CacheEntry = {
+        ...entry,
+        createdAt: new Date().toISOString(),
+        hits: 0,
+      };
+
+      await redis.set(cacheKey, fullEntry, { ex: ttlSeconds });
+      await incrementStats("misses");
+      await incrementStats("cached");
+    }
+
+    /**
+     * Invalidate cache by key pattern
+     */
+    export async function invalidateCache(pattern?: string): Promise<number> {
+      const redis = getRedis();
+
+      if (!pattern) {
+        // Clear all AI cache
+        const keys = await redis.keys(`${CACHE_PREFIX}*`);
+        if (keys.length > 0) {
+          await redis.del(...keys);
+        }
+        return keys.length;
+      }
+
+      const keys = await redis.keys(`${CACHE_PREFIX}${pattern}*`);
+      if (keys.length > 0) {
+        await redis.del(...keys);
+      }
+      return keys.length;
+    }
+
+    /**
+     * Get cache statistics
+     */
+    export async function getCacheStats(): Promise<{
+      hits: number;
+      misses: number;
+      cached: number;
+      hitRate: number;
+      estimatedSavings: number;
+    }> {
+      const redis = getRedis();
+      const stats = await redis.hgetall<{
+        hits: string;
+        misses: string;
+        cached: string;
+        tokensSaved: string;
+      }>(STATS_KEY);
+
+      const hits = parseInt(stats?.hits ?? "0", 10);
+      const misses = parseInt(stats?.misses ?? "0", 10);
+      const cached = parseInt(stats?.cached ?? "0", 10);
+      const tokensSaved = parseInt(stats?.tokensSaved ?? "0", 10);
+
+      const total = hits + misses;
+      const hitRate = total > 0 ? (hits / total) * 100 : 0;
+
+      // Estimate savings at $0.01 per 1000 tokens
+      const estimatedSavings = (tokensSaved / 1000) * 0.01;
+
+      return {
+        hits,
+        misses,
+        cached,
+        hitRate,
+        estimatedSavings,
+      };
+    }
+
+    async function incrementStats(
+      field: string,
+      amount: number = 1
+    ): Promise<void> {
+      const redis = getRedis();
+      await redis.hincrby(STATS_KEY, field, amount);
+    }
+
+    export async function trackTokensSaved(tokens: number): Promise<void> {
+      await incrementStats("tokensSaved", tokens);
+    }
+
+  lib/ai/cached-completion.ts: |
+    import { streamText, convertToCoreMessages, generateText } from "ai";
+    import { createOpenAI } from "@ai-sdk/openai";
+    import {
+      generateCacheKey,
+      getCachedResponse,
+      cacheResponse,
+      trackTokensSaved,
+    } from "./cache";
+
+    interface CachedCompletionOptions {
+      model: string;
+      messages: Array<{ role: "user" | "assistant"; content: string }>;
+      systemPrompt?: string;
+      temperature?: number;
+      maxTokens?: number;
+      /** Time to live in seconds */
+      cacheTTL?: number;
+      /** Skip cache and always call API */
+      skipCache?: boolean;
+    }
+
+    interface CachedCompletionResult {
+      text: string;
+      cached: boolean;
+      tokens?: {
+        input: number;
+        output: number;
+      };
+    }
+
+    let openaiInstance: ReturnType<typeof createOpenAI> | null = null;
+
+    function getOpenAI() {
+      if (!process.env.OPENAI_API_KEY) {
+        throw new Error("Missing OPENAI_API_KEY");
+      }
+
+      if (!openaiInstance) {
+        openaiInstance = createOpenAI({
+          apiKey: process.env.OPENAI_API_KEY,
+        });
+      }
+
+      return openaiInstance;
+    }
+
+    /**
+     * Get completion with caching (non-streaming)
+     */
+    export async function getCachedCompletion(
+      options: CachedCompletionOptions
+    ): Promise<CachedCompletionResult> {
+      const {
+        model,
+        messages,
+        systemPrompt,
+        temperature = 0.7,
+        maxTokens = 2000,
+        cacheTTL = 86400,
+        skipCache = false,
+      } = options;
+
+      // Generate cache key
+      const cacheKey = generateCacheKey({
+        model,
+        messages,
+        temperature,
+        systemPrompt,
+      });
+
+      // Check cache first (unless skipped)
+      if (!skipCache) {
+        const cached = await getCachedResponse(cacheKey);
+        if (cached) {
+          // Track tokens saved
+          await trackTokensSaved(cached.tokens.input + cached.tokens.output);
+
+          return {
+            text: cached.response,
+            cached: true,
+            tokens: cached.tokens,
+          };
+        }
+      }
+
+      // Call API
+      const openai = getOpenAI();
+
+      const result = await generateText({
+        model: openai(model),
+        system: systemPrompt,
+        messages: convertToCoreMessages(messages),
+        temperature,
+        maxTokens,
+      });
+
+      const responseText = result.text;
+      const tokens = {
+        input: result.usage?.promptTokens ?? 0,
+        output: result.usage?.completionTokens ?? 0,
+      };
+
+      // Cache the response
+      await cacheResponse(
+        cacheKey,
+        {
+          response: responseText,
+          model,
+          tokens,
+        },
+        cacheTTL
+      );
+
+      return {
+        text: responseText,
+        cached: false,
+        tokens,
+      };
+    }
+
+    /**
+     * Stream completion with cache check
+     * If cached, returns full response immediately
+     * Otherwise streams from API
+     */
+    export async function streamCachedCompletion(
+      options: CachedCompletionOptions
+    ) {
+      const {
+        model,
+        messages,
+        systemPrompt,
+        temperature = 0.7,
+        maxTokens = 2000,
+        cacheTTL = 86400,
+        skipCache = false,
+      } = options;
+
+      const cacheKey = generateCacheKey({
+        model,
+        messages,
+        temperature,
+        systemPrompt,
+      });
+
+      // Check cache
+      if (!skipCache) {
+        const cached = await getCachedResponse(cacheKey);
+        if (cached) {
+          await trackTokensSaved(cached.tokens.input + cached.tokens.output);
+
+          // Return cached response as a "stream"
+          return {
+            cached: true,
+            text: cached.response,
+            tokens: cached.tokens,
+            stream: null,
+          };
+        }
+      }
+
+      // Stream from API
+      const openai = getOpenAI();
+
+      const result = await streamText({
+        model: openai(model),
+        system: systemPrompt,
+        messages: convertToCoreMessages(messages),
+        temperature,
+        maxTokens,
+        onFinish: async ({ text, usage }) => {
+          // Cache after streaming completes
+          await cacheResponse(
+            cacheKey,
+            {
+              response: text,
+              model,
+              tokens: {
+                input: usage?.promptTokens ?? 0,
+                output: usage?.completionTokens ?? 0,
+              },
+            },
+            cacheTTL
+          );
+        },
+      });
+
+      return {
+        cached: false,
+        text: null,
+        tokens: null,
+        stream: result,
+      };
+    }
+
+    /**
+     * Cache key generator for semantic caching
+     * Uses embedding similarity for cache lookups
+     */
+    export function generateSemanticCacheKey(
+      query: string,
+      context?: string
+    ): string {
+      // For semantic caching, you'd use embeddings
+      // This is a simplified hash-based approach
+      const content = `${query}|${context ?? ""}`;
+      return generateCacheKey({
+        model: "semantic",
+        messages: [{ role: "user", content }],
+      });
+    }
+
+  app/api/ai/cached/route.ts: |
+    import { NextRequest, NextResponse } from "next/server";
+    import {
+      getCachedCompletion,
+      streamCachedCompletion,
+    } from "@/lib/ai/cached-completion";
+    import { getCacheStats, invalidateCache } from "@/lib/ai/cache";
+
+    export async function POST(request: NextRequest) {
+      try {
+        const body = await request.json();
+        const {
+          messages,
+          model = "gpt-4o-mini",
+          systemPrompt,
+          temperature,
+          maxTokens,
+          stream = false,
+          skipCache = false,
+        } = body;
+
+        if (!messages || !Array.isArray(messages)) {
+          return NextResponse.json(
+            { error: "Messages are required" },
+            { status: 400 }
+          );
+        }
+
+        if (stream) {
+          const result = await streamCachedCompletion({
+            model,
+            messages,
+            systemPrompt,
+            temperature,
+            maxTokens,
+            skipCache,
+          });
+
+          if (result.cached) {
+            // Return cached response with header indicating cache hit
+            return NextResponse.json(
+              { text: result.text, cached: true, tokens: result.tokens },
+              { headers: { "X-Cache": "HIT" } }
+            );
+          }
+
+          // Return streaming response
+          const response = result.stream!.toDataStreamResponse();
+          response.headers.set("X-Cache", "MISS");
+          return response;
+        }
+
+        // Non-streaming
+        const result = await getCachedCompletion({
+          model,
+          messages,
+          systemPrompt,
+          temperature,
+          maxTokens,
+          skipCache,
+        });
+
+        return NextResponse.json(result, {
+          headers: { "X-Cache": result.cached ? "HIT" : "MISS" },
+        });
+      } catch (error) {
+        console.error("Cached AI error:", error);
+        return NextResponse.json(
+          { error: error instanceof Error ? error.message : "Request failed" },
+          { status: 500 }
+        );
+      }
+    }
+
+    // Get cache stats
+    export async function GET() {
+      try {
+        const stats = await getCacheStats();
+        return NextResponse.json(stats);
+      } catch (error) {
+        return NextResponse.json(
+          { error: "Failed to get stats" },
+          { status: 500 }
+        );
+      }
+    }
+
+    // Clear cache
+    export async function DELETE(request: NextRequest) {
+      try {
+        const { searchParams } = new URL(request.url);
+        const pattern = searchParams.get("pattern") || undefined;
+
+        const cleared = await invalidateCache(pattern);
+
+        return NextResponse.json({
+          success: true,
+          cleared,
+        });
+      } catch (error) {
+        return NextResponse.json(
+          { error: "Failed to clear cache" },
+          { status: 500 }
+        );
+      }
+    }
+
+edge_cases:
+  - id: cache-key-collision
+    symptom: "Wrong response returned"
+    cause: "Hash collision (extremely rare)"
+    solution: |
+      Use full SHA-256 hash instead of truncated:
+      const hash = crypto.createHash("sha256").update(content).digest("hex");
+      // Use full hash, not sliced
+
+      Or add a content checksum to the cached entry.
+
+  - id: stale-cache
+    symptom: "Outdated responses after model update"
+    cause: "Cache not invalidated when model behavior changes"
+    solution: |
+      Include model version in cache key:
+      const cacheKey = generateCacheKey({
+        model: `${model}-v${API_VERSION}`,
+        ...
+      });
+
+      Or clear cache on deployment.
+
+  - id: partial-stream-cache
+    symptom: "Incomplete response cached"
+    cause: "Stream interrupted before completion"
+    solution: |
+      Only cache on successful completion:
+      onFinish: async ({ text, finishReason }) => {
+        if (finishReason === "stop") {
+          await cacheResponse(...);
+        }
+      }
+
+  - id: memory-pressure
+    symptom: "Cache evicting entries too quickly"
+    cause: "Redis memory limit reached"
+    solution: |
+      1. Set appropriate TTL for entries
+      2. Use LRU eviction policy in Upstash
+      3. Monitor cache size:
+         const info = await redis.dbsize();
+      4. Consider tiered caching (hot/cold)
+
+validation:
+  manual_test:
+    - "Set up Upstash Redis"
+    - "Add credentials to .env.local"
+    - "POST to /api/ai/cached with message"
+    - "Check X-Cache header (should be MISS)"
+    - "Send same request again"
+    - "Check X-Cache header (should be HIT)"
+    - "GET /api/ai/cached for stats"
+    - "Verify hit rate increases"
+    - "DELETE /api/ai/cached to clear"
