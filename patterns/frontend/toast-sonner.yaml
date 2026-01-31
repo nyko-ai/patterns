@@ -1,0 +1,481 @@
+id: toast-sonner
+version: "1.0.0"
+updated_at: "2026-01-31"
+author: "nyko-team"
+status: beta
+
+name: "Toast Notifications with Sonner"
+description: "Beautiful toast notifications using Sonner with Next.js App Router"
+
+category: frontend
+tags:
+  - toast
+  - notifications
+  - sonner
+  - ui
+  - nextjs
+
+difficulty: beginner
+time_estimate: "10-15 min"
+
+stack:
+  required:
+    - name: "next"
+      version: "^15.1.0"
+      reason: "App Router with client components"
+    - name: "sonner"
+      version: "^2.0.0"
+      reason: "Toast notification library"
+
+requires: []
+
+enables: []
+
+env_vars:
+  required: []
+
+external_setup: []
+
+files:
+  - path: "components/providers/toaster-provider.tsx"
+    action: create
+    description: "Toaster provider component"
+    priority: 1
+
+  - path: "lib/toast.ts"
+    action: create
+    description: "Toast utility functions"
+    priority: 2
+
+  - path: "app/layout.tsx"
+    action: modify
+    description: "Add Toaster to layout"
+    priority: 3
+
+  - path: "components/examples/toast-demo.tsx"
+    action: create
+    description: "Toast demonstration component"
+    priority: 4
+
+code:
+  components/providers/toaster-provider.tsx: |
+    "use client";
+
+    import { Toaster } from "sonner";
+
+    interface ToasterProviderProps {
+      /** Toast position */
+      position?: "top-left" | "top-center" | "top-right" | "bottom-left" | "bottom-center" | "bottom-right";
+      /** Use rich colors for different toast types */
+      richColors?: boolean;
+      /** Show close button on all toasts */
+      closeButton?: boolean;
+      /** Default duration in milliseconds */
+      duration?: number;
+      /** Theme mode */
+      theme?: "light" | "dark" | "system";
+    }
+
+    export function ToasterProvider({
+      position = "bottom-right",
+      richColors = true,
+      closeButton = true,
+      duration = 4000,
+      theme = "system",
+    }: ToasterProviderProps) {
+      return (
+        <Toaster
+          position={position}
+          richColors={richColors}
+          closeButton={closeButton}
+          duration={duration}
+          theme={theme}
+          toastOptions={{
+            style: {
+              // Custom default styling
+            },
+            classNames: {
+              toast: "group",
+              title: "font-semibold",
+              description: "text-sm",
+              actionButton: "bg-primary text-primary-foreground",
+              cancelButton: "bg-muted text-muted-foreground",
+              success: "border-green-500",
+              error: "border-red-500",
+              warning: "border-yellow-500",
+              info: "border-blue-500",
+            },
+          }}
+        />
+      );
+    }
+
+  lib/toast.ts: |
+    import { toast as sonnerToast } from "sonner";
+
+    type ToastType = "success" | "error" | "warning" | "info" | "loading";
+
+    interface ToastOptions {
+      /** Toast description */
+      description?: string;
+      /** Duration in milliseconds (0 = infinite) */
+      duration?: number;
+      /** Action button */
+      action?: {
+        label: string;
+        onClick: () => void;
+      };
+      /** Cancel button */
+      cancel?: {
+        label: string;
+        onClick?: () => void;
+      };
+      /** Callback when toast is dismissed */
+      onDismiss?: () => void;
+      /** Callback when toast auto-closes */
+      onAutoClose?: () => void;
+      /** Custom icon */
+      icon?: React.ReactNode;
+      /** Unique ID for updating */
+      id?: string | number;
+    }
+
+    /**
+     * Toast notification utilities
+     */
+    export const toast = {
+      /**
+       * Show a success toast
+       */
+      success: (message: string, options?: ToastOptions) => {
+        return sonnerToast.success(message, {
+          ...options,
+          action: options?.action
+            ? { label: options.action.label, onClick: options.action.onClick }
+            : undefined,
+          cancel: options?.cancel
+            ? { label: options.cancel.label, onClick: options.cancel.onClick }
+            : undefined,
+        });
+      },
+
+      /**
+       * Show an error toast
+       */
+      error: (message: string, options?: ToastOptions) => {
+        return sonnerToast.error(message, {
+          duration: options?.duration ?? 5000, // Errors stay longer by default
+          ...options,
+        });
+      },
+
+      /**
+       * Show a warning toast
+       */
+      warning: (message: string, options?: ToastOptions) => {
+        return sonnerToast.warning(message, options);
+      },
+
+      /**
+       * Show an info toast
+       */
+      info: (message: string, options?: ToastOptions) => {
+        return sonnerToast.info(message, options);
+      },
+
+      /**
+       * Show a loading toast (returns ID for updating)
+       */
+      loading: (message: string, options?: Omit<ToastOptions, "duration">) => {
+        return sonnerToast.loading(message, {
+          ...options,
+          duration: Infinity, // Loading toasts don't auto-dismiss
+        });
+      },
+
+      /**
+       * Show a promise toast (loading -> success/error)
+       */
+      promise: <T>(
+        promise: Promise<T>,
+        messages: {
+          loading: string;
+          success: string | ((data: T) => string);
+          error: string | ((error: Error) => string);
+        },
+        options?: ToastOptions
+      ) => {
+        return sonnerToast.promise(promise, {
+          loading: messages.loading,
+          success: messages.success,
+          error: messages.error,
+          ...options,
+        });
+      },
+
+      /**
+       * Dismiss a specific toast or all toasts
+       */
+      dismiss: (toastId?: string | number) => {
+        sonnerToast.dismiss(toastId);
+      },
+
+      /**
+       * Update an existing toast
+       */
+      update: (
+        toastId: string | number,
+        message: string,
+        type: ToastType = "success"
+      ) => {
+        sonnerToast.dismiss(toastId);
+        switch (type) {
+          case "success":
+            return sonnerToast.success(message, { id: toastId });
+          case "error":
+            return sonnerToast.error(message, { id: toastId });
+          case "warning":
+            return sonnerToast.warning(message, { id: toastId });
+          case "info":
+            return sonnerToast.info(message, { id: toastId });
+          default:
+            return sonnerToast(message, { id: toastId });
+        }
+      },
+
+      /**
+       * Show a custom toast
+       */
+      custom: (content: React.ReactNode, options?: ToastOptions) => {
+        return sonnerToast.custom(() => content, options);
+      },
+    };
+
+    /**
+     * Pre-built toast patterns
+     */
+    export const toastPatterns = {
+      /** Saved successfully */
+      saved: () => toast.success("Changes saved successfully"),
+
+      /** Deleted successfully */
+      deleted: (item = "Item") =>
+        toast.success(`${item} deleted successfully`, {
+          action: {
+            label: "Undo",
+            onClick: () => console.log("Undo delete"),
+          },
+        }),
+
+      /** Copied to clipboard */
+      copied: () => toast.success("Copied to clipboard"),
+
+      /** Form submitted */
+      formSubmitted: () => toast.success("Form submitted successfully"),
+
+      /** Network error */
+      networkError: () =>
+        toast.error("Network error. Please check your connection.", {
+          action: {
+            label: "Retry",
+            onClick: () => window.location.reload(),
+          },
+        }),
+
+      /** Unauthorized */
+      unauthorized: () =>
+        toast.error("You need to be logged in to do that", {
+          action: {
+            label: "Sign In",
+            onClick: () => (window.location.href = "/login"),
+          },
+        }),
+
+      /** Coming soon */
+      comingSoon: () => toast.info("This feature is coming soon!"),
+    };
+
+  app/layout.tsx: |
+    // Add ToasterProvider to your root layout
+    import { ToasterProvider } from "@/components/providers/toaster-provider";
+
+    export default function RootLayout({
+      children,
+    }: {
+      children: React.ReactNode;
+    }) {
+      return (
+        <html lang="en">
+          <body>
+            {children}
+            <ToasterProvider
+              position="bottom-right"
+              richColors
+              closeButton
+            />
+          </body>
+        </html>
+      );
+    }
+
+  components/examples/toast-demo.tsx: |
+    "use client";
+
+    import { toast, toastPatterns } from "@/lib/toast";
+
+    export function ToastDemo() {
+      const handleAsyncAction = async () => {
+        const promise = new Promise<{ name: string }>((resolve, reject) => {
+          setTimeout(() => {
+            if (Math.random() > 0.3) {
+              resolve({ name: "Example" });
+            } else {
+              reject(new Error("Random failure"));
+            }
+          }, 2000);
+        });
+
+        toast.promise(promise, {
+          loading: "Saving changes...",
+          success: (data) => `${data.name} saved successfully!`,
+          error: (err) => `Failed: ${err.message}`,
+        });
+      };
+
+      return (
+        <div className="space-y-4 p-4">
+          <h2 className="text-xl font-bold">Toast Demo</h2>
+
+          <div className="flex flex-wrap gap-2">
+            <button
+              onClick={() => toast.success("Operation completed!")}
+              className="px-4 py-2 bg-green-500 text-white rounded"
+            >
+              Success
+            </button>
+
+            <button
+              onClick={() => toast.error("Something went wrong")}
+              className="px-4 py-2 bg-red-500 text-white rounded"
+            >
+              Error
+            </button>
+
+            <button
+              onClick={() => toast.warning("Please review your input")}
+              className="px-4 py-2 bg-yellow-500 text-white rounded"
+            >
+              Warning
+            </button>
+
+            <button
+              onClick={() => toast.info("New features available!")}
+              className="px-4 py-2 bg-blue-500 text-white rounded"
+            >
+              Info
+            </button>
+
+            <button
+              onClick={handleAsyncAction}
+              className="px-4 py-2 bg-purple-500 text-white rounded"
+            >
+              Promise Toast
+            </button>
+
+            <button
+              onClick={() =>
+                toast.success("Item deleted", {
+                  action: {
+                    label: "Undo",
+                    onClick: () => toast.info("Undo clicked!"),
+                  },
+                })
+              }
+              className="px-4 py-2 bg-gray-500 text-white rounded"
+            >
+              With Action
+            </button>
+          </div>
+
+          <div className="flex flex-wrap gap-2 border-t pt-4">
+            <button
+              onClick={() => toastPatterns.saved()}
+              className="px-4 py-2 bg-gray-200 rounded"
+            >
+              Saved Pattern
+            </button>
+            <button
+              onClick={() => toastPatterns.copied()}
+              className="px-4 py-2 bg-gray-200 rounded"
+            >
+              Copied Pattern
+            </button>
+            <button
+              onClick={() => toastPatterns.networkError()}
+              className="px-4 py-2 bg-gray-200 rounded"
+            >
+              Network Error
+            </button>
+          </div>
+        </div>
+      );
+    }
+
+edge_cases:
+  - id: toast-stacking
+    symptom: "Too many toasts overlapping"
+    cause: "Multiple rapid toast calls"
+    solution: |
+      Limit visible toasts and use unique IDs:
+      <Toaster visibleToasts={3} />
+
+      // Deduplicate with ID
+      toast.success("Saved", { id: "save-toast" });
+
+  - id: toast-not-showing
+    symptom: "Toasts not appearing"
+    cause: "Toaster not mounted in layout"
+    solution: |
+      Ensure ToasterProvider is in your root layout:
+      // app/layout.tsx
+      <ToasterProvider />
+
+      Make sure it's outside of any conditional rendering.
+
+  - id: hydration-mismatch
+    symptom: "Hydration error with toast"
+    cause: "Server/client mismatch with theme"
+    solution: |
+      Use suppressHydrationWarning or consistent theme:
+      <Toaster theme="system" />
+
+      Or set explicit theme that matches server render.
+
+  - id: toast-in-server-component
+    symptom: "toast() not working in Server Component"
+    cause: "Sonner requires client-side JavaScript"
+    solution: |
+      Call toast from client components only:
+      "use client";
+
+      Or pass callback to server action:
+      // Server action
+      export async function saveData() {
+        // ... save logic
+        return { success: true }; // Return result
+      }
+
+      // Client component
+      const result = await saveData();
+      if (result.success) toast.success("Saved!");
+
+validation:
+  manual_test:
+    - "Install sonner: npm install sonner"
+    - "Add ToasterProvider to layout"
+    - "Import and call toast.success('Test')"
+    - "Verify toast appears in bottom-right"
+    - "Test all toast types (success, error, warning, info)"
+    - "Test promise toast with async action"
+    - "Test action buttons work correctly"
+    - "Test toast.dismiss() clears toasts"

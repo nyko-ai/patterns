@@ -1,0 +1,562 @@
+id: infinite-scroll
+version: "1.0.0"
+updated_at: "2026-01-31"
+author: "nyko-team"
+status: beta
+
+name: "Infinite Scroll with React Query"
+description: "Infinite scrolling pagination using TanStack React Query"
+
+category: frontend
+tags:
+  - infinite-scroll
+  - pagination
+  - react-query
+  - performance
+  - ux
+
+difficulty: intermediate
+time_estimate: "20-25 min"
+
+stack:
+  required:
+    - name: "next"
+      version: "^15.1.0"
+      reason: "App Router with client components"
+    - name: "@tanstack/react-query"
+      version: "^5.90.0"
+      reason: "Data fetching with infinite query support"
+
+requires:
+  - react-query-caching
+
+enables: []
+
+env_vars:
+  required: []
+
+external_setup: []
+
+files:
+  - path: "hooks/use-infinite-scroll.ts"
+    action: create
+    description: "Infinite scroll hook"
+    priority: 1
+
+  - path: "components/ui/infinite-list.tsx"
+    action: create
+    description: "Reusable infinite list component"
+    priority: 2
+
+  - path: "hooks/use-intersection-observer.ts"
+    action: create
+    description: "Intersection observer hook"
+    priority: 3
+
+  - path: "app/api/posts/route.ts"
+    action: create
+    description: "Paginated API example"
+    priority: 4
+
+code:
+  hooks/use-intersection-observer.ts: |
+    "use client";
+
+    import { useEffect, useRef, useState, useCallback } from "react";
+
+    interface UseIntersectionObserverOptions {
+      /** Root element for intersection */
+      root?: Element | null;
+      /** Root margin */
+      rootMargin?: string;
+      /** Intersection threshold */
+      threshold?: number | number[];
+      /** Only trigger once */
+      triggerOnce?: boolean;
+      /** Enable/disable observer */
+      enabled?: boolean;
+    }
+
+    /**
+     * Hook for observing element intersection
+     */
+    export function useIntersectionObserver<T extends Element = Element>(
+      options: UseIntersectionObserverOptions = {}
+    ) {
+      const {
+        root = null,
+        rootMargin = "0px",
+        threshold = 0,
+        triggerOnce = false,
+        enabled = true,
+      } = options;
+
+      const [entry, setEntry] = useState<IntersectionObserverEntry | null>(null);
+      const [isIntersecting, setIsIntersecting] = useState(false);
+      const elementRef = useRef<T | null>(null);
+      const observerRef = useRef<IntersectionObserver | null>(null);
+      const hasTriggered = useRef(false);
+
+      const setRef = useCallback((node: T | null) => {
+        elementRef.current = node;
+      }, []);
+
+      useEffect(() => {
+        if (!enabled || !elementRef.current) return;
+        if (triggerOnce && hasTriggered.current) return;
+
+        observerRef.current = new IntersectionObserver(
+          ([entry]) => {
+            setEntry(entry);
+            setIsIntersecting(entry.isIntersecting);
+
+            if (entry.isIntersecting && triggerOnce) {
+              hasTriggered.current = true;
+              observerRef.current?.disconnect();
+            }
+          },
+          { root, rootMargin, threshold }
+        );
+
+        observerRef.current.observe(elementRef.current);
+
+        return () => {
+          observerRef.current?.disconnect();
+        };
+      }, [enabled, root, rootMargin, threshold, triggerOnce]);
+
+      return { ref: setRef, entry, isIntersecting };
+    }
+
+  hooks/use-infinite-scroll.ts: |
+    "use client";
+
+    import { useEffect, useCallback } from "react";
+    import {
+      useInfiniteQuery,
+      type UseInfiniteQueryOptions,
+      type InfiniteData,
+    } from "@tanstack/react-query";
+    import { useIntersectionObserver } from "./use-intersection-observer";
+
+    interface PageParam {
+      cursor?: string;
+      page?: number;
+    }
+
+    interface PaginatedResponse<T> {
+      items: T[];
+      nextCursor?: string;
+      nextPage?: number;
+      hasMore: boolean;
+      total?: number;
+    }
+
+    interface UseInfiniteScrollOptions<T> {
+      /** Query key */
+      queryKey: readonly unknown[];
+      /** Fetch function */
+      queryFn: (pageParam: PageParam) => Promise<PaginatedResponse<T>>;
+      /** Root margin for intersection observer */
+      rootMargin?: string;
+      /** Enable/disable */
+      enabled?: boolean;
+      /** Initial page param */
+      initialPageParam?: PageParam;
+      /** Stale time */
+      staleTime?: number;
+    }
+
+    /**
+     * Hook for infinite scroll with React Query
+     */
+    export function useInfiniteScroll<T>({
+      queryKey,
+      queryFn,
+      rootMargin = "200px",
+      enabled = true,
+      initialPageParam = {},
+      staleTime = 60 * 1000,
+    }: UseInfiniteScrollOptions<T>) {
+      const {
+        data,
+        error,
+        fetchNextPage,
+        hasNextPage,
+        isFetching,
+        isFetchingNextPage,
+        isLoading,
+        isError,
+        refetch,
+      } = useInfiniteQuery({
+        queryKey,
+        queryFn: ({ pageParam }) => queryFn(pageParam as PageParam),
+        getNextPageParam: (lastPage) => {
+          if (!lastPage.hasMore) return undefined;
+          return {
+            cursor: lastPage.nextCursor,
+            page: lastPage.nextPage,
+          };
+        },
+        initialPageParam,
+        enabled,
+        staleTime,
+      });
+
+      // Intersection observer for loading trigger
+      const { ref: loadMoreRef, isIntersecting } = useIntersectionObserver({
+        rootMargin,
+        enabled: enabled && hasNextPage && !isFetchingNextPage,
+      });
+
+      // Fetch next page when trigger is visible
+      useEffect(() => {
+        if (isIntersecting && hasNextPage && !isFetchingNextPage) {
+          fetchNextPage();
+        }
+      }, [isIntersecting, hasNextPage, isFetchingNextPage, fetchNextPage]);
+
+      // Flatten all pages into single array
+      const items = data?.pages.flatMap((page) => page.items) ?? [];
+      const total = data?.pages[0]?.total;
+
+      return {
+        items,
+        total,
+        loadMoreRef,
+        error,
+        isLoading,
+        isError,
+        isFetching,
+        isFetchingNextPage,
+        hasNextPage,
+        fetchNextPage,
+        refetch,
+      };
+    }
+
+    /**
+     * Hook for virtualized infinite scroll (for large lists)
+     */
+    export function useVirtualizedInfiniteScroll<T>(
+      options: UseInfiniteScrollOptions<T> & {
+        estimatedItemHeight: number;
+        overscan?: number;
+      }
+    ) {
+      const infiniteScroll = useInfiniteScroll(options);
+
+      // Add virtualization logic here if needed
+      // For now, return base infinite scroll
+      return {
+        ...infiniteScroll,
+        estimatedItemHeight: options.estimatedItemHeight,
+        overscan: options.overscan ?? 5,
+      };
+    }
+
+  components/ui/infinite-list.tsx: |
+    "use client";
+
+    import { ReactNode } from "react";
+    import { useInfiniteScroll } from "@/hooks/use-infinite-scroll";
+
+    interface InfiniteListProps<T> {
+      /** Query key for caching */
+      queryKey: readonly unknown[];
+      /** Fetch function */
+      fetchItems: (params: { cursor?: string; page?: number }) => Promise<{
+        items: T[];
+        nextCursor?: string;
+        nextPage?: number;
+        hasMore: boolean;
+        total?: number;
+      }>;
+      /** Render function for each item */
+      renderItem: (item: T, index: number) => ReactNode;
+      /** Key extractor */
+      getItemKey: (item: T) => string | number;
+      /** Loading component */
+      loadingComponent?: ReactNode;
+      /** Error component */
+      errorComponent?: (error: Error, retry: () => void) => ReactNode;
+      /** Empty state component */
+      emptyComponent?: ReactNode;
+      /** End of list component */
+      endComponent?: ReactNode;
+      /** Container class name */
+      className?: string;
+      /** Item wrapper class name */
+      itemClassName?: string;
+      /** Enable/disable */
+      enabled?: boolean;
+    }
+
+    export function InfiniteList<T>({
+      queryKey,
+      fetchItems,
+      renderItem,
+      getItemKey,
+      loadingComponent,
+      errorComponent,
+      emptyComponent,
+      endComponent,
+      className = "",
+      itemClassName = "",
+      enabled = true,
+    }: InfiniteListProps<T>) {
+      const {
+        items,
+        total,
+        loadMoreRef,
+        error,
+        isLoading,
+        isError,
+        isFetchingNextPage,
+        hasNextPage,
+        refetch,
+      } = useInfiniteScroll({
+        queryKey,
+        queryFn: fetchItems,
+        enabled,
+      });
+
+      // Initial loading state
+      if (isLoading) {
+        return (
+          loadingComponent || (
+            <div className="flex justify-center py-8">
+              <LoadingSpinner />
+            </div>
+          )
+        );
+      }
+
+      // Error state
+      if (isError && error) {
+        return (
+          errorComponent?.(error as Error, refetch) || (
+            <div className="text-center py-8">
+              <p className="text-red-500 mb-4">
+                Error: {(error as Error).message}
+              </p>
+              <button
+                onClick={() => refetch()}
+                className="px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600"
+              >
+                Retry
+              </button>
+            </div>
+          )
+        );
+      }
+
+      // Empty state
+      if (items.length === 0) {
+        return (
+          emptyComponent || (
+            <div className="text-center py-8 text-gray-500">
+              No items found
+            </div>
+          )
+        );
+      }
+
+      return (
+        <div className={className}>
+          {total !== undefined && (
+            <p className="text-sm text-gray-500 mb-4">
+              Showing {items.length} of {total} items
+            </p>
+          )}
+
+          <div className="space-y-4">
+            {items.map((item, index) => (
+              <div key={getItemKey(item)} className={itemClassName}>
+                {renderItem(item, index)}
+              </div>
+            ))}
+          </div>
+
+          {/* Load more trigger */}
+          <div ref={loadMoreRef} className="py-4">
+            {isFetchingNextPage && (
+              <div className="flex justify-center">
+                <LoadingSpinner />
+              </div>
+            )}
+          </div>
+
+          {/* End of list */}
+          {!hasNextPage && items.length > 0 && (
+            endComponent || (
+              <div className="text-center py-4 text-gray-400 text-sm">
+                You've reached the end
+              </div>
+            )
+          )}
+        </div>
+      );
+    }
+
+    function LoadingSpinner() {
+      return (
+        <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-500" />
+      );
+    }
+
+    /**
+     * Example usage component
+     */
+    interface Post {
+      id: string;
+      title: string;
+      excerpt: string;
+      author: string;
+      date: string;
+    }
+
+    export function PostList() {
+      const fetchPosts = async ({
+        cursor,
+      }: {
+        cursor?: string;
+        page?: number;
+      }) => {
+        const params = new URLSearchParams();
+        if (cursor) params.set("cursor", cursor);
+        params.set("limit", "10");
+
+        const res = await fetch(`/api/posts?${params}`);
+        if (!res.ok) throw new Error("Failed to fetch posts");
+        return res.json();
+      };
+
+      return (
+        <InfiniteList<Post>
+          queryKey={["posts"]}
+          fetchItems={fetchPosts}
+          getItemKey={(post) => post.id}
+          renderItem={(post) => (
+            <article className="border rounded-lg p-4 hover:shadow-md transition-shadow">
+              <h2 className="text-xl font-semibold mb-2">{post.title}</h2>
+              <p className="text-gray-600 mb-3">{post.excerpt}</p>
+              <div className="flex justify-between text-sm text-gray-400">
+                <span>{post.author}</span>
+                <span>{post.date}</span>
+              </div>
+            </article>
+          )}
+          className="max-w-2xl mx-auto"
+          emptyComponent={
+            <div className="text-center py-12">
+              <p className="text-xl text-gray-500">No posts yet</p>
+              <p className="text-gray-400">Check back later!</p>
+            </div>
+          }
+        />
+      );
+    }
+
+  app/api/posts/route.ts: |
+    import { NextRequest, NextResponse } from "next/server";
+
+    // Simulated database
+    const POSTS = Array.from({ length: 100 }, (_, i) => ({
+      id: `post-${i + 1}`,
+      title: `Post ${i + 1}: Lorem Ipsum`,
+      excerpt: "Lorem ipsum dolor sit amet, consectetur adipiscing elit...",
+      author: `Author ${(i % 10) + 1}`,
+      date: new Date(Date.now() - i * 86400000).toISOString().split("T")[0],
+    }));
+
+    export async function GET(request: NextRequest) {
+      const { searchParams } = new URL(request.url);
+      const cursor = searchParams.get("cursor");
+      const limit = parseInt(searchParams.get("limit") || "10", 10);
+
+      // Simulate network delay
+      await new Promise((resolve) => setTimeout(resolve, 500));
+
+      // Find starting index
+      let startIndex = 0;
+      if (cursor) {
+        const cursorIndex = POSTS.findIndex((p) => p.id === cursor);
+        if (cursorIndex !== -1) {
+          startIndex = cursorIndex + 1;
+        }
+      }
+
+      // Get page of items
+      const items = POSTS.slice(startIndex, startIndex + limit);
+      const hasMore = startIndex + limit < POSTS.length;
+      const nextCursor = hasMore ? items[items.length - 1]?.id : undefined;
+
+      return NextResponse.json({
+        items,
+        nextCursor,
+        hasMore,
+        total: POSTS.length,
+      });
+    }
+
+edge_cases:
+  - id: duplicate-items
+    symptom: "Same items appearing multiple times"
+    cause: "Data changed between page fetches"
+    solution: |
+      Use stable cursor-based pagination:
+      getNextPageParam: (lastPage) => ({
+        cursor: lastPage.items[lastPage.items.length - 1]?.id
+      })
+
+      Or deduplicate in the component:
+      const uniqueItems = [...new Map(items.map(i => [i.id, i])).values()];
+
+  - id: scroll-restoration
+    symptom: "Scroll position lost on navigation"
+    cause: "Component remounting"
+    solution: |
+      Use React Query's cache to preserve data:
+      staleTime: Infinity // Don't refetch on mount
+
+      Or save scroll position:
+      useEffect(() => {
+        const saved = sessionStorage.getItem('scrollPos');
+        if (saved) window.scrollTo(0, parseInt(saved));
+
+        return () => {
+          sessionStorage.setItem('scrollPos', String(window.scrollY));
+        };
+      }, []);
+
+  - id: memory-leak
+    symptom: "Memory usage grows with scroll"
+    cause: "Too many items in DOM"
+    solution: |
+      Implement virtualization for large lists:
+      - Use @tanstack/react-virtual
+      - Only render visible items
+      - Set reasonable page limits
+
+  - id: rapid-scrolling
+    symptom: "Multiple fetches triggered at once"
+    cause: "Intersection observer firing too fast"
+    solution: |
+      Debounce or check fetching state:
+      useEffect(() => {
+        if (isIntersecting && hasNextPage && !isFetchingNextPage) {
+          fetchNextPage();
+        }
+      }, [isIntersecting, hasNextPage, isFetchingNextPage]);
+
+validation:
+  manual_test:
+    - "Create paginated API endpoint"
+    - "Implement InfiniteList component"
+    - "Scroll to bottom - verify next page loads"
+    - "Check network tab - verify single request per page"
+    - "Fast scroll - verify no duplicate requests"
+    - "Navigate away and back - verify cached data shows"
+    - "Test error state - verify retry works"
+    - "Test empty state - verify message shows"

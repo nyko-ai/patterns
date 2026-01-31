@@ -1,0 +1,752 @@
+id: form-rhf-zod
+version: "1.0.0"
+updated_at: "2026-01-31"
+author: "nyko-team"
+status: beta
+
+name: "Forms with React Hook Form and Zod"
+description: "Type-safe form handling with React Hook Form and Zod validation"
+
+category: frontend
+tags:
+  - forms
+  - validation
+  - react-hook-form
+  - zod
+  - typescript
+
+difficulty: intermediate
+time_estimate: "20-25 min"
+
+stack:
+  required:
+    - name: "next"
+      version: "^15.1.0"
+      reason: "App Router with client components"
+    - name: "react-hook-form"
+      version: "^7.71.0"
+      reason: "Performant form library"
+    - name: "@hookform/resolvers"
+      version: "^5.2.0"
+      reason: "Zod resolver for RHF"
+    - name: "zod"
+      version: "^4.3.0"
+      reason: "Schema validation"
+
+requires: []
+
+enables: []
+
+env_vars:
+  required: []
+
+external_setup: []
+
+files:
+  - path: "lib/validations/auth.ts"
+    action: create
+    description: "Auth form schemas"
+    priority: 1
+
+  - path: "components/ui/form.tsx"
+    action: create
+    description: "Reusable form components"
+    priority: 2
+
+  - path: "components/forms/login-form.tsx"
+    action: create
+    description: "Login form example"
+    priority: 3
+
+  - path: "components/forms/register-form.tsx"
+    action: create
+    description: "Registration form example"
+    priority: 4
+
+  - path: "hooks/use-form-persist.ts"
+    action: create
+    description: "Form persistence hook"
+    priority: 5
+
+code:
+  lib/validations/auth.ts: |
+    import { z } from "zod";
+
+    /**
+     * Login form schema
+     */
+    export const loginSchema = z.object({
+      email: z
+        .string()
+        .min(1, "Email is required")
+        .email("Invalid email address"),
+      password: z
+        .string()
+        .min(1, "Password is required")
+        .min(8, "Password must be at least 8 characters"),
+      rememberMe: z.boolean().optional().default(false),
+    });
+
+    export type LoginFormData = z.infer<typeof loginSchema>;
+
+    /**
+     * Registration form schema
+     */
+    export const registerSchema = z
+      .object({
+        name: z
+          .string()
+          .min(1, "Name is required")
+          .min(2, "Name must be at least 2 characters")
+          .max(50, "Name must be less than 50 characters"),
+        email: z
+          .string()
+          .min(1, "Email is required")
+          .email("Invalid email address"),
+        password: z
+          .string()
+          .min(1, "Password is required")
+          .min(8, "Password must be at least 8 characters")
+          .regex(
+            /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)/,
+            "Password must contain at least one uppercase letter, one lowercase letter, and one number"
+          ),
+        confirmPassword: z.string().min(1, "Please confirm your password"),
+        terms: z.literal(true, {
+          errorMap: () => ({ message: "You must accept the terms and conditions" }),
+        }),
+      })
+      .refine((data) => data.password === data.confirmPassword, {
+        message: "Passwords don't match",
+        path: ["confirmPassword"],
+      });
+
+    export type RegisterFormData = z.infer<typeof registerSchema>;
+
+    /**
+     * Profile update schema
+     */
+    export const profileSchema = z.object({
+      name: z.string().min(2, "Name must be at least 2 characters"),
+      email: z.string().email("Invalid email address"),
+      bio: z.string().max(500, "Bio must be less than 500 characters").optional(),
+      website: z.string().url("Invalid URL").optional().or(z.literal("")),
+      avatar: z
+        .custom<File>()
+        .optional()
+        .refine(
+          (file) => !file || file.size <= 5 * 1024 * 1024,
+          "Avatar must be less than 5MB"
+        )
+        .refine(
+          (file) =>
+            !file || ["image/jpeg", "image/png", "image/webp"].includes(file.type),
+          "Avatar must be JPEG, PNG, or WebP"
+        ),
+    });
+
+    export type ProfileFormData = z.infer<typeof profileSchema>;
+
+  components/ui/form.tsx: |
+    "use client";
+
+    import * as React from "react";
+    import {
+      useFormContext,
+      Controller,
+      type ControllerProps,
+      type FieldPath,
+      type FieldValues,
+    } from "react-hook-form";
+
+    // Form context
+    const FormFieldContext = React.createContext<{ name: string }>({ name: "" });
+
+    interface FormFieldProps<
+      TFieldValues extends FieldValues = FieldValues,
+      TName extends FieldPath<TFieldValues> = FieldPath<TFieldValues>
+    > extends Omit<ControllerProps<TFieldValues, TName>, "render"> {
+      children: React.ReactNode;
+    }
+
+    function FormField<
+      TFieldValues extends FieldValues = FieldValues,
+      TName extends FieldPath<TFieldValues> = FieldPath<TFieldValues>
+    >({ name, children, ...props }: FormFieldProps<TFieldValues, TName>) {
+      return (
+        <FormFieldContext.Provider value={{ name }}>
+          <Controller
+            name={name}
+            {...props}
+            render={({ field }) => (
+              <div data-field={name}>{children}</div>
+            )}
+          />
+        </FormFieldContext.Provider>
+      );
+    }
+
+    // Form item wrapper
+    interface FormItemProps extends React.HTMLAttributes<HTMLDivElement> {
+      children: React.ReactNode;
+    }
+
+    function FormItem({ className, children, ...props }: FormItemProps) {
+      return (
+        <div className={`space-y-2 ${className || ""}`} {...props}>
+          {children}
+        </div>
+      );
+    }
+
+    // Form label
+    interface FormLabelProps extends React.LabelHTMLAttributes<HTMLLabelElement> {
+      required?: boolean;
+    }
+
+    function FormLabel({ className, required, children, ...props }: FormLabelProps) {
+      const { name } = React.useContext(FormFieldContext);
+
+      return (
+        <label
+          htmlFor={name}
+          className={`text-sm font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70 ${className || ""}`}
+          {...props}
+        >
+          {children}
+          {required && <span className="text-red-500 ml-1">*</span>}
+        </label>
+      );
+    }
+
+    // Form input wrapper
+    interface FormControlProps {
+      children: React.ReactElement;
+    }
+
+    function FormControl({ children }: FormControlProps) {
+      const { name } = React.useContext(FormFieldContext);
+      const {
+        formState: { errors },
+      } = useFormContext();
+      const error = errors[name];
+
+      return React.cloneElement(children, {
+        id: name,
+        name,
+        "aria-invalid": !!error,
+        "aria-describedby": error ? `${name}-error` : undefined,
+      });
+    }
+
+    // Form description
+    function FormDescription({
+      className,
+      children,
+      ...props
+    }: React.HTMLAttributes<HTMLParagraphElement>) {
+      return (
+        <p
+          className={`text-sm text-gray-500 dark:text-gray-400 ${className || ""}`}
+          {...props}
+        >
+          {children}
+        </p>
+      );
+    }
+
+    // Form error message
+    function FormMessage({
+      className,
+      ...props
+    }: React.HTMLAttributes<HTMLParagraphElement>) {
+      const { name } = React.useContext(FormFieldContext);
+      const {
+        formState: { errors },
+      } = useFormContext();
+      const error = errors[name];
+
+      if (!error?.message) {
+        return null;
+      }
+
+      return (
+        <p
+          id={`${name}-error`}
+          className={`text-sm font-medium text-red-500 ${className || ""}`}
+          role="alert"
+          {...props}
+        >
+          {String(error.message)}
+        </p>
+      );
+    }
+
+    // Input component
+    interface InputProps extends React.InputHTMLAttributes<HTMLInputElement> {
+      error?: boolean;
+    }
+
+    const Input = React.forwardRef<HTMLInputElement, InputProps>(
+      ({ className, error, type, ...props }, ref) => {
+        return (
+          <input
+            type={type}
+            className={`flex h-10 w-full rounded-md border bg-white px-3 py-2 text-sm ring-offset-white file:border-0 file:bg-transparent file:text-sm file:font-medium placeholder:text-gray-500 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-gray-400 focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50 ${
+              error
+                ? "border-red-500 focus-visible:ring-red-500"
+                : "border-gray-200"
+            } ${className || ""}`}
+            ref={ref}
+            {...props}
+          />
+        );
+      }
+    );
+    Input.displayName = "Input";
+
+    export {
+      FormField,
+      FormItem,
+      FormLabel,
+      FormControl,
+      FormDescription,
+      FormMessage,
+      Input,
+    };
+
+  components/forms/login-form.tsx: |
+    "use client";
+
+    import { useForm, FormProvider } from "react-hook-form";
+    import { zodResolver } from "@hookform/resolvers/zod";
+    import { loginSchema, type LoginFormData } from "@/lib/validations/auth";
+    import {
+      FormItem,
+      FormLabel,
+      FormMessage,
+      Input,
+    } from "@/components/ui/form";
+
+    interface LoginFormProps {
+      onSubmit: (data: LoginFormData) => Promise<void>;
+      defaultValues?: Partial<LoginFormData>;
+    }
+
+    export function LoginForm({ onSubmit, defaultValues }: LoginFormProps) {
+      const methods = useForm<LoginFormData>({
+        resolver: zodResolver(loginSchema),
+        defaultValues: {
+          email: "",
+          password: "",
+          rememberMe: false,
+          ...defaultValues,
+        },
+      });
+
+      const {
+        register,
+        handleSubmit,
+        formState: { errors, isSubmitting },
+      } = methods;
+
+      const handleFormSubmit = async (data: LoginFormData) => {
+        try {
+          await onSubmit(data);
+        } catch (error) {
+          methods.setError("root", {
+            message: error instanceof Error ? error.message : "Login failed",
+          });
+        }
+      };
+
+      return (
+        <FormProvider {...methods}>
+          <form onSubmit={handleSubmit(handleFormSubmit)} className="space-y-4">
+            {errors.root && (
+              <div className="p-3 text-sm text-red-500 bg-red-50 rounded-md">
+                {errors.root.message}
+              </div>
+            )}
+
+            <FormItem>
+              <FormLabel htmlFor="email" required>
+                Email
+              </FormLabel>
+              <Input
+                id="email"
+                type="email"
+                placeholder="you@example.com"
+                error={!!errors.email}
+                {...register("email")}
+              />
+              {errors.email && (
+                <FormMessage>{errors.email.message}</FormMessage>
+              )}
+            </FormItem>
+
+            <FormItem>
+              <FormLabel htmlFor="password" required>
+                Password
+              </FormLabel>
+              <Input
+                id="password"
+                type="password"
+                placeholder="••••••••"
+                error={!!errors.password}
+                {...register("password")}
+              />
+              {errors.password && (
+                <FormMessage>{errors.password.message}</FormMessage>
+              )}
+            </FormItem>
+
+            <div className="flex items-center space-x-2">
+              <input
+                id="rememberMe"
+                type="checkbox"
+                className="h-4 w-4 rounded border-gray-300"
+                {...register("rememberMe")}
+              />
+              <label htmlFor="rememberMe" className="text-sm text-gray-600">
+                Remember me
+              </label>
+            </div>
+
+            <button
+              type="submit"
+              disabled={isSubmitting}
+              className="w-full px-4 py-2 text-white bg-blue-600 rounded-md hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {isSubmitting ? "Signing in..." : "Sign in"}
+            </button>
+          </form>
+        </FormProvider>
+      );
+    }
+
+  components/forms/register-form.tsx: |
+    "use client";
+
+    import { useForm, FormProvider } from "react-hook-form";
+    import { zodResolver } from "@hookform/resolvers/zod";
+    import { registerSchema, type RegisterFormData } from "@/lib/validations/auth";
+    import { FormItem, FormLabel, FormMessage, Input } from "@/components/ui/form";
+
+    interface RegisterFormProps {
+      onSubmit: (data: RegisterFormData) => Promise<void>;
+    }
+
+    export function RegisterForm({ onSubmit }: RegisterFormProps) {
+      const methods = useForm<RegisterFormData>({
+        resolver: zodResolver(registerSchema),
+        defaultValues: {
+          name: "",
+          email: "",
+          password: "",
+          confirmPassword: "",
+          terms: false as unknown as true, // Type workaround for literal true
+        },
+        mode: "onBlur", // Validate on blur for better UX
+      });
+
+      const {
+        register,
+        handleSubmit,
+        formState: { errors, isSubmitting },
+        watch,
+      } = methods;
+
+      const password = watch("password");
+
+      const handleFormSubmit = async (data: RegisterFormData) => {
+        try {
+          await onSubmit(data);
+        } catch (error) {
+          methods.setError("root", {
+            message: error instanceof Error ? error.message : "Registration failed",
+          });
+        }
+      };
+
+      // Password strength indicator
+      const getPasswordStrength = (pwd: string): { label: string; color: string } => {
+        if (!pwd) return { label: "", color: "" };
+        if (pwd.length < 8) return { label: "Weak", color: "bg-red-500" };
+        if (!/(?=.*[A-Z])(?=.*[a-z])(?=.*\d)/.test(pwd))
+          return { label: "Medium", color: "bg-yellow-500" };
+        if (pwd.length >= 12) return { label: "Strong", color: "bg-green-500" };
+        return { label: "Good", color: "bg-blue-500" };
+      };
+
+      const strength = getPasswordStrength(password);
+
+      return (
+        <FormProvider {...methods}>
+          <form onSubmit={handleSubmit(handleFormSubmit)} className="space-y-4">
+            {errors.root && (
+              <div className="p-3 text-sm text-red-500 bg-red-50 rounded-md">
+                {errors.root.message}
+              </div>
+            )}
+
+            <FormItem>
+              <FormLabel htmlFor="name" required>
+                Name
+              </FormLabel>
+              <Input
+                id="name"
+                placeholder="John Doe"
+                error={!!errors.name}
+                {...register("name")}
+              />
+              {errors.name && <FormMessage>{errors.name.message}</FormMessage>}
+            </FormItem>
+
+            <FormItem>
+              <FormLabel htmlFor="email" required>
+                Email
+              </FormLabel>
+              <Input
+                id="email"
+                type="email"
+                placeholder="you@example.com"
+                error={!!errors.email}
+                {...register("email")}
+              />
+              {errors.email && <FormMessage>{errors.email.message}</FormMessage>}
+            </FormItem>
+
+            <FormItem>
+              <FormLabel htmlFor="password" required>
+                Password
+              </FormLabel>
+              <Input
+                id="password"
+                type="password"
+                placeholder="••••••••"
+                error={!!errors.password}
+                {...register("password")}
+              />
+              {password && (
+                <div className="flex items-center gap-2 mt-1">
+                  <div className="flex-1 h-1 bg-gray-200 rounded-full overflow-hidden">
+                    <div
+                      className={`h-full ${strength.color} transition-all`}
+                      style={{
+                        width:
+                          strength.label === "Weak"
+                            ? "25%"
+                            : strength.label === "Medium"
+                            ? "50%"
+                            : strength.label === "Good"
+                            ? "75%"
+                            : "100%",
+                      }}
+                    />
+                  </div>
+                  <span className="text-xs text-gray-500">{strength.label}</span>
+                </div>
+              )}
+              {errors.password && (
+                <FormMessage>{errors.password.message}</FormMessage>
+              )}
+            </FormItem>
+
+            <FormItem>
+              <FormLabel htmlFor="confirmPassword" required>
+                Confirm Password
+              </FormLabel>
+              <Input
+                id="confirmPassword"
+                type="password"
+                placeholder="••••••••"
+                error={!!errors.confirmPassword}
+                {...register("confirmPassword")}
+              />
+              {errors.confirmPassword && (
+                <FormMessage>{errors.confirmPassword.message}</FormMessage>
+              )}
+            </FormItem>
+
+            <div className="flex items-start space-x-2">
+              <input
+                id="terms"
+                type="checkbox"
+                className="mt-1 h-4 w-4 rounded border-gray-300"
+                {...register("terms")}
+              />
+              <label htmlFor="terms" className="text-sm text-gray-600">
+                I agree to the{" "}
+                <a href="/terms" className="text-blue-600 hover:underline">
+                  Terms of Service
+                </a>{" "}
+                and{" "}
+                <a href="/privacy" className="text-blue-600 hover:underline">
+                  Privacy Policy
+                </a>
+              </label>
+            </div>
+            {errors.terms && <FormMessage>{errors.terms.message}</FormMessage>}
+
+            <button
+              type="submit"
+              disabled={isSubmitting}
+              className="w-full px-4 py-2 text-white bg-blue-600 rounded-md hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {isSubmitting ? "Creating account..." : "Create account"}
+            </button>
+          </form>
+        </FormProvider>
+      );
+    }
+
+  hooks/use-form-persist.ts: |
+    "use client";
+
+    import { useEffect } from "react";
+    import { UseFormReturn, FieldValues, Path } from "react-hook-form";
+
+    interface UseFormPersistOptions<T extends FieldValues> {
+      /** Storage key */
+      key: string;
+      /** Form methods from useForm */
+      form: UseFormReturn<T>;
+      /** Fields to exclude from persistence */
+      exclude?: Path<T>[];
+      /** Storage type */
+      storage?: "localStorage" | "sessionStorage";
+      /** Debounce delay in ms */
+      debounce?: number;
+    }
+
+    /**
+     * Persist form data to storage
+     */
+    export function useFormPersist<T extends FieldValues>({
+      key,
+      form,
+      exclude = [],
+      storage = "sessionStorage",
+      debounce = 300,
+    }: UseFormPersistOptions<T>) {
+      const { watch, reset, formState } = form;
+
+      // Load saved data on mount
+      useEffect(() => {
+        if (typeof window === "undefined") return;
+
+        const storageApi = storage === "localStorage" ? localStorage : sessionStorage;
+        const saved = storageApi.getItem(key);
+
+        if (saved) {
+          try {
+            const data = JSON.parse(saved);
+            reset(data, { keepDefaultValues: true });
+          } catch {
+            storageApi.removeItem(key);
+          }
+        }
+      }, [key, reset, storage]);
+
+      // Save on change
+      useEffect(() => {
+        if (typeof window === "undefined") return;
+
+        const subscription = watch((data) => {
+          const timeoutId = setTimeout(() => {
+            const storageApi =
+              storage === "localStorage" ? localStorage : sessionStorage;
+
+            // Filter out excluded fields
+            const filteredData = { ...data };
+            for (const field of exclude) {
+              delete filteredData[field as keyof typeof filteredData];
+            }
+
+            storageApi.setItem(key, JSON.stringify(filteredData));
+          }, debounce);
+
+          return () => clearTimeout(timeoutId);
+        });
+
+        return () => subscription.unsubscribe();
+      }, [watch, key, exclude, storage, debounce]);
+
+      // Clear on successful submit
+      useEffect(() => {
+        if (formState.isSubmitSuccessful) {
+          const storageApi =
+            storage === "localStorage" ? localStorage : sessionStorage;
+          storageApi.removeItem(key);
+        }
+      }, [formState.isSubmitSuccessful, key, storage]);
+
+      // Manual clear function
+      const clear = () => {
+        const storageApi =
+          storage === "localStorage" ? localStorage : sessionStorage;
+        storageApi.removeItem(key);
+      };
+
+      return { clear };
+    }
+
+edge_cases:
+  - id: validation-not-triggering
+    symptom: "Form submits without validation"
+    cause: "Missing zodResolver"
+    solution: |
+      Ensure zodResolver is passed to useForm:
+      const methods = useForm({
+        resolver: zodResolver(schema),
+      });
+
+  - id: type-mismatch
+    symptom: "TypeScript errors with form data"
+    cause: "Schema and type not in sync"
+    solution: |
+      Always infer types from schema:
+      const schema = z.object({ ... });
+      type FormData = z.infer<typeof schema>;
+
+      const methods = useForm<FormData>({
+        resolver: zodResolver(schema),
+      });
+
+  - id: async-validation
+    symptom: "Need to validate against API"
+    cause: "Synchronous validation only"
+    solution: |
+      Use refine with async function:
+      const schema = z.object({
+        email: z.string().email(),
+      }).refine(async (data) => {
+        const exists = await checkEmailExists(data.email);
+        return !exists;
+      }, { message: "Email already in use", path: ["email"] });
+
+  - id: file-upload
+    symptom: "File validation not working"
+    cause: "File type not validated correctly"
+    solution: |
+      Use custom File validation:
+      const schema = z.object({
+        file: z.custom<File>()
+          .refine(f => f?.size <= 5 * 1024 * 1024, "Max 5MB")
+          .refine(
+            f => ['image/jpeg', 'image/png'].includes(f?.type),
+            "Only JPEG or PNG"
+          ),
+      });
+
+validation:
+  manual_test:
+    - "Install dependencies: npm install react-hook-form @hookform/resolvers zod"
+    - "Create login form with schema"
+    - "Submit empty form - verify validation errors"
+    - "Enter invalid email - verify error message"
+    - "Enter short password - verify error message"
+    - "Fill valid data - verify form submits"
+    - "Test form persistence across page reload"
+    - "Verify password strength indicator works"

@@ -1,0 +1,620 @@
+id: skeleton-loaders
+version: "1.0.0"
+updated_at: "2026-01-31"
+author: "nyko-team"
+status: beta
+
+name: "Skeleton Loading Components"
+description: "Skeleton loading placeholders for improved perceived performance"
+
+category: frontend
+tags:
+  - skeleton
+  - loading
+  - ui
+  - performance
+  - ux
+
+difficulty: beginner
+time_estimate: "15-20 min"
+
+stack:
+  required:
+    - name: "next"
+      version: "^15.1.0"
+      reason: "App Router with Suspense support"
+
+requires: []
+
+enables: []
+
+env_vars:
+  required: []
+
+external_setup: []
+
+files:
+  - path: "components/ui/skeleton.tsx"
+    action: create
+    description: "Base skeleton component"
+    priority: 1
+
+  - path: "components/skeletons/card-skeleton.tsx"
+    action: create
+    description: "Card skeleton component"
+    priority: 2
+
+  - path: "components/skeletons/list-skeleton.tsx"
+    action: create
+    description: "List skeleton component"
+    priority: 3
+
+  - path: "components/skeletons/profile-skeleton.tsx"
+    action: create
+    description: "Profile skeleton component"
+    priority: 4
+
+  - path: "hooks/use-skeleton.ts"
+    action: create
+    description: "Skeleton utilities hook"
+    priority: 5
+
+code:
+  components/ui/skeleton.tsx: |
+    import { CSSProperties, HTMLAttributes } from "react";
+
+    interface SkeletonProps extends HTMLAttributes<HTMLDivElement> {
+      /** Width of skeleton */
+      width?: string | number;
+      /** Height of skeleton */
+      height?: string | number;
+      /** Border radius */
+      radius?: "none" | "sm" | "md" | "lg" | "full";
+      /** Animation type */
+      animation?: "pulse" | "shimmer" | "none";
+      /** Custom class name */
+      className?: string;
+    }
+
+    const radiusClasses = {
+      none: "rounded-none",
+      sm: "rounded-sm",
+      md: "rounded-md",
+      lg: "rounded-lg",
+      full: "rounded-full",
+    };
+
+    /**
+     * Base skeleton component
+     */
+    export function Skeleton({
+      width,
+      height,
+      radius = "md",
+      animation = "pulse",
+      className = "",
+      style,
+      ...props
+    }: SkeletonProps) {
+      const animationClass =
+        animation === "pulse"
+          ? "animate-pulse"
+          : animation === "shimmer"
+          ? "animate-shimmer"
+          : "";
+
+      const combinedStyle: CSSProperties = {
+        width: typeof width === "number" ? `${width}px` : width,
+        height: typeof height === "number" ? `${height}px` : height,
+        ...style,
+      };
+
+      return (
+        <div
+          className={`bg-gray-200 dark:bg-gray-700 ${radiusClasses[radius]} ${animationClass} ${className}`}
+          style={combinedStyle}
+          aria-hidden="true"
+          {...props}
+        />
+      );
+    }
+
+    /**
+     * Text skeleton - mimics a line of text
+     */
+    export function SkeletonText({
+      lines = 1,
+      width = "100%",
+      className = "",
+    }: {
+      lines?: number;
+      width?: string | number | (string | number)[];
+      className?: string;
+    }) {
+      const widths = Array.isArray(width)
+        ? width
+        : Array(lines).fill(width);
+
+      return (
+        <div className={`space-y-2 ${className}`}>
+          {Array.from({ length: lines }).map((_, i) => (
+            <Skeleton
+              key={i}
+              width={widths[i] || widths[widths.length - 1]}
+              height={16}
+              radius="sm"
+            />
+          ))}
+        </div>
+      );
+    }
+
+    /**
+     * Circle skeleton - for avatars
+     */
+    export function SkeletonCircle({
+      size = 40,
+      className = "",
+    }: {
+      size?: number;
+      className?: string;
+    }) {
+      return (
+        <Skeleton
+          width={size}
+          height={size}
+          radius="full"
+          className={className}
+        />
+      );
+    }
+
+    /**
+     * Image skeleton - for images and thumbnails
+     */
+    export function SkeletonImage({
+      width = "100%",
+      height = 200,
+      aspectRatio,
+      className = "",
+    }: {
+      width?: string | number;
+      height?: string | number;
+      aspectRatio?: string;
+      className?: string;
+    }) {
+      return (
+        <Skeleton
+          width={width}
+          height={aspectRatio ? undefined : height}
+          radius="lg"
+          className={className}
+          style={aspectRatio ? { aspectRatio } : undefined}
+        />
+      );
+    }
+
+    /**
+     * Button skeleton
+     */
+    export function SkeletonButton({
+      width = 100,
+      size = "md",
+      className = "",
+    }: {
+      width?: string | number;
+      size?: "sm" | "md" | "lg";
+      className?: string;
+    }) {
+      const heights = { sm: 32, md: 40, lg: 48 };
+
+      return (
+        <Skeleton
+          width={width}
+          height={heights[size]}
+          radius="md"
+          className={className}
+        />
+      );
+    }
+
+  components/skeletons/card-skeleton.tsx: |
+    import {
+      Skeleton,
+      SkeletonText,
+      SkeletonImage,
+      SkeletonCircle,
+    } from "@/components/ui/skeleton";
+
+    interface CardSkeletonProps {
+      /** Show image placeholder */
+      showImage?: boolean;
+      /** Show avatar */
+      showAvatar?: boolean;
+      /** Number of text lines */
+      textLines?: number;
+      /** Card class name */
+      className?: string;
+    }
+
+    /**
+     * Card skeleton component
+     */
+    export function CardSkeleton({
+      showImage = true,
+      showAvatar = false,
+      textLines = 3,
+      className = "",
+    }: CardSkeletonProps) {
+      return (
+        <div
+          className={`border rounded-lg overflow-hidden bg-white dark:bg-gray-900 ${className}`}
+        >
+          {showImage && <SkeletonImage height={200} />}
+
+          <div className="p-4 space-y-4">
+            {showAvatar && (
+              <div className="flex items-center gap-3">
+                <SkeletonCircle size={40} />
+                <div className="flex-1">
+                  <Skeleton width="60%" height={16} className="mb-2" />
+                  <Skeleton width="40%" height={12} />
+                </div>
+              </div>
+            )}
+
+            <Skeleton width="80%" height={20} /> {/* Title */}
+            <SkeletonText lines={textLines} width={["100%", "100%", "60%"]} />
+
+            <div className="flex gap-2 pt-2">
+              <Skeleton width={80} height={32} radius="md" />
+              <Skeleton width={80} height={32} radius="md" />
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    /**
+     * Grid of card skeletons
+     */
+    export function CardSkeletonGrid({
+      count = 6,
+      columns = 3,
+      ...props
+    }: CardSkeletonProps & { count?: number; columns?: 1 | 2 | 3 | 4 }) {
+      const gridClasses = {
+        1: "grid-cols-1",
+        2: "grid-cols-1 md:grid-cols-2",
+        3: "grid-cols-1 md:grid-cols-2 lg:grid-cols-3",
+        4: "grid-cols-1 md:grid-cols-2 lg:grid-cols-4",
+      };
+
+      return (
+        <div className={`grid gap-4 ${gridClasses[columns]}`}>
+          {Array.from({ length: count }).map((_, i) => (
+            <CardSkeleton key={i} {...props} />
+          ))}
+        </div>
+      );
+    }
+
+  components/skeletons/list-skeleton.tsx: |
+    import {
+      Skeleton,
+      SkeletonText,
+      SkeletonCircle,
+    } from "@/components/ui/skeleton";
+
+    interface ListItemSkeletonProps {
+      /** Show leading icon/avatar */
+      showLeading?: boolean;
+      /** Leading type */
+      leadingType?: "avatar" | "icon" | "checkbox";
+      /** Show trailing element */
+      showTrailing?: boolean;
+      /** Number of description lines */
+      descriptionLines?: number;
+    }
+
+    /**
+     * Single list item skeleton
+     */
+    export function ListItemSkeleton({
+      showLeading = true,
+      leadingType = "avatar",
+      showTrailing = false,
+      descriptionLines = 1,
+    }: ListItemSkeletonProps) {
+      return (
+        <div className="flex items-center gap-4 p-4 border-b last:border-b-0">
+          {showLeading && (
+            <>
+              {leadingType === "avatar" && <SkeletonCircle size={40} />}
+              {leadingType === "icon" && (
+                <Skeleton width={24} height={24} radius="sm" />
+              )}
+              {leadingType === "checkbox" && (
+                <Skeleton width={20} height={20} radius="sm" />
+              )}
+            </>
+          )}
+
+          <div className="flex-1 min-w-0">
+            <Skeleton width="60%" height={16} className="mb-2" />
+            <SkeletonText lines={descriptionLines} width="80%" />
+          </div>
+
+          {showTrailing && <Skeleton width={60} height={32} radius="md" />}
+        </div>
+      );
+    }
+
+    /**
+     * List skeleton with multiple items
+     */
+    export function ListSkeleton({
+      count = 5,
+      ...props
+    }: ListItemSkeletonProps & { count?: number }) {
+      return (
+        <div className="border rounded-lg overflow-hidden bg-white dark:bg-gray-900">
+          {Array.from({ length: count }).map((_, i) => (
+            <ListItemSkeleton key={i} {...props} />
+          ))}
+        </div>
+      );
+    }
+
+    /**
+     * Table skeleton
+     */
+    export function TableSkeleton({
+      rows = 5,
+      columns = 4,
+      showHeader = true,
+    }: {
+      rows?: number;
+      columns?: number;
+      showHeader?: boolean;
+    }) {
+      return (
+        <div className="border rounded-lg overflow-hidden">
+          {showHeader && (
+            <div className="flex gap-4 p-4 bg-gray-50 dark:bg-gray-800 border-b">
+              {Array.from({ length: columns }).map((_, i) => (
+                <Skeleton
+                  key={i}
+                  width={`${100 / columns}%`}
+                  height={16}
+                  radius="sm"
+                />
+              ))}
+            </div>
+          )}
+
+          {Array.from({ length: rows }).map((_, rowIndex) => (
+            <div
+              key={rowIndex}
+              className="flex gap-4 p-4 border-b last:border-b-0"
+            >
+              {Array.from({ length: columns }).map((_, colIndex) => (
+                <Skeleton
+                  key={colIndex}
+                  width={`${100 / columns}%`}
+                  height={14}
+                  radius="sm"
+                />
+              ))}
+            </div>
+          ))}
+        </div>
+      );
+    }
+
+  components/skeletons/profile-skeleton.tsx: |
+    import {
+      Skeleton,
+      SkeletonText,
+      SkeletonCircle,
+      SkeletonButton,
+    } from "@/components/ui/skeleton";
+
+    /**
+     * Profile header skeleton
+     */
+    export function ProfileHeaderSkeleton() {
+      return (
+        <div className="relative">
+          {/* Cover image */}
+          <Skeleton width="100%" height={200} radius="none" />
+
+          {/* Profile info */}
+          <div className="px-6 pb-6">
+            {/* Avatar */}
+            <div className="-mt-16 mb-4">
+              <SkeletonCircle size={128} className="border-4 border-white" />
+            </div>
+
+            {/* Name and bio */}
+            <div className="space-y-3">
+              <Skeleton width={200} height={28} /> {/* Name */}
+              <Skeleton width={120} height={16} /> {/* Username */}
+              <SkeletonText lines={2} width={["100%", "80%"]} />
+            </div>
+
+            {/* Stats */}
+            <div className="flex gap-6 mt-4">
+              <div>
+                <Skeleton width={40} height={20} className="mb-1" />
+                <Skeleton width={60} height={14} />
+              </div>
+              <div>
+                <Skeleton width={40} height={20} className="mb-1" />
+                <Skeleton width={60} height={14} />
+              </div>
+              <div>
+                <Skeleton width={40} height={20} className="mb-1" />
+                <Skeleton width={60} height={14} />
+              </div>
+            </div>
+
+            {/* Action buttons */}
+            <div className="flex gap-2 mt-4">
+              <SkeletonButton width={100} />
+              <SkeletonButton width={100} />
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    /**
+     * Profile card skeleton (compact)
+     */
+    export function ProfileCardSkeleton() {
+      return (
+        <div className="flex items-center gap-4 p-4 border rounded-lg">
+          <SkeletonCircle size={48} />
+          <div className="flex-1">
+            <Skeleton width={120} height={16} className="mb-2" />
+            <Skeleton width={80} height={14} />
+          </div>
+          <SkeletonButton width={80} size="sm" />
+        </div>
+      );
+    }
+
+  hooks/use-skeleton.ts: |
+    "use client";
+
+    import { useState, useEffect, useTransition } from "react";
+
+    interface UseSkeletonOptions {
+      /** Minimum loading time in ms */
+      minLoadingTime?: number;
+      /** Delay before showing skeleton */
+      delay?: number;
+    }
+
+    /**
+     * Hook for managing skeleton loading state
+     */
+    export function useSkeleton(
+      isLoading: boolean,
+      options: UseSkeletonOptions = {}
+    ) {
+      const { minLoadingTime = 0, delay = 0 } = options;
+      const [showSkeleton, setShowSkeleton] = useState(false);
+      const [loadStartTime, setLoadStartTime] = useState<number | null>(null);
+
+      useEffect(() => {
+        let delayTimeout: NodeJS.Timeout;
+        let minTimeTimeout: NodeJS.Timeout;
+
+        if (isLoading) {
+          setLoadStartTime(Date.now());
+
+          if (delay > 0) {
+            delayTimeout = setTimeout(() => {
+              setShowSkeleton(true);
+            }, delay);
+          } else {
+            setShowSkeleton(true);
+          }
+        } else if (loadStartTime) {
+          const elapsed = Date.now() - loadStartTime;
+          const remaining = minLoadingTime - elapsed;
+
+          if (remaining > 0) {
+            minTimeTimeout = setTimeout(() => {
+              setShowSkeleton(false);
+              setLoadStartTime(null);
+            }, remaining);
+          } else {
+            setShowSkeleton(false);
+            setLoadStartTime(null);
+          }
+        }
+
+        return () => {
+          clearTimeout(delayTimeout);
+          clearTimeout(minTimeTimeout);
+        };
+      }, [isLoading, delay, minLoadingTime, loadStartTime]);
+
+      return showSkeleton;
+    }
+
+    /**
+     * Hook for skeleton with transition
+     */
+    export function useSkeletonTransition() {
+      const [isPending, startTransition] = useTransition();
+
+      const withSkeleton = <T,>(fn: () => Promise<T>) => {
+        return new Promise<T>((resolve) => {
+          startTransition(async () => {
+            const result = await fn();
+            resolve(result);
+          });
+        });
+      };
+
+      return { isLoading: isPending, withSkeleton };
+    }
+
+edge_cases:
+  - id: layout-shift
+    symptom: "Content jumps when skeleton replaced"
+    cause: "Skeleton size doesn't match content"
+    solution: |
+      Match skeleton dimensions to actual content:
+      <Skeleton
+        width={actualContentWidth}
+        height={actualContentHeight}
+      />
+
+      Or use fixed containers:
+      <div style={{ minHeight: 200 }}>
+        {loading ? <Skeleton /> : <Content />}
+      </div>
+
+  - id: flash-of-skeleton
+    symptom: "Skeleton flashes briefly on fast loads"
+    cause: "Loading too fast for skeleton to be useful"
+    solution: |
+      Use delay before showing skeleton:
+      const showSkeleton = useSkeleton(isLoading, { delay: 200 });
+
+      {showSkeleton ? <Skeleton /> : <Content />}
+
+  - id: skeleton-in-dark-mode
+    symptom: "Skeleton not visible in dark mode"
+    cause: "Missing dark mode colors"
+    solution: |
+      Add dark mode variants:
+      className="bg-gray-200 dark:bg-gray-700"
+
+  - id: animation-performance
+    symptom: "Skeleton animation janky"
+    cause: "Too many animated elements"
+    solution: |
+      Use transform-based animation:
+      @keyframes shimmer {
+        0% { transform: translateX(-100%); }
+        100% { transform: translateX(100%); }
+      }
+
+      Or reduce number of animated skeletons on screen.
+
+validation:
+  manual_test:
+    - "Create Skeleton component"
+    - "Add to loading state"
+    - "Verify skeleton matches content layout"
+    - "Test in dark mode"
+    - "Verify smooth transition to content"
+    - "Test with Suspense boundary"
+    - "Check for layout shift"
+    - "Test animation performance"

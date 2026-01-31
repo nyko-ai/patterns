@@ -1,0 +1,415 @@
+id: dark-mode-toggle
+version: "1.0.0"
+updated_at: "2026-01-31"
+author: "nyko-team"
+status: beta
+
+name: "Dark Mode with next-themes"
+description: "Theme switching with next-themes and system preference detection"
+
+category: frontend
+tags:
+  - dark-mode
+  - themes
+  - next-themes
+  - ui
+  - accessibility
+
+difficulty: beginner
+time_estimate: "10-15 min"
+
+stack:
+  required:
+    - name: "next"
+      version: "^15.1.0"
+      reason: "App Router with client components"
+    - name: "next-themes"
+      version: "^0.4.0"
+      reason: "Theme management library"
+
+requires: []
+
+enables: []
+
+env_vars:
+  required: []
+
+external_setup: []
+
+files:
+  - path: "components/providers/theme-provider.tsx"
+    action: create
+    description: "Theme provider component"
+    priority: 1
+
+  - path: "components/ui/theme-toggle.tsx"
+    action: create
+    description: "Theme toggle button"
+    priority: 2
+
+  - path: "app/layout.tsx"
+    action: modify
+    description: "Add ThemeProvider to layout"
+    priority: 3
+
+  - path: "app/globals.css"
+    action: modify
+    description: "Add dark mode CSS variables"
+    priority: 4
+
+code:
+  components/providers/theme-provider.tsx: |
+    "use client";
+
+    import { ThemeProvider as NextThemesProvider } from "next-themes";
+    import { type ThemeProviderProps } from "next-themes";
+
+    export function ThemeProvider({ children, ...props }: ThemeProviderProps) {
+      return (
+        <NextThemesProvider
+          attribute="class"
+          defaultTheme="system"
+          enableSystem
+          disableTransitionOnChange
+          {...props}
+        >
+          {children}
+        </NextThemesProvider>
+      );
+    }
+
+  components/ui/theme-toggle.tsx: |
+    "use client";
+
+    import { useTheme } from "next-themes";
+    import { useEffect, useState } from "react";
+
+    interface ThemeToggleProps {
+      /** Button size */
+      size?: "sm" | "md" | "lg";
+      /** Show label */
+      showLabel?: boolean;
+      /** Custom class name */
+      className?: string;
+    }
+
+    export function ThemeToggle({
+      size = "md",
+      showLabel = false,
+      className = "",
+    }: ThemeToggleProps) {
+      const [mounted, setMounted] = useState(false);
+      const { theme, setTheme, resolvedTheme } = useTheme();
+
+      // Prevent hydration mismatch
+      useEffect(() => {
+        setMounted(true);
+      }, []);
+
+      if (!mounted) {
+        // Return placeholder to prevent layout shift
+        return (
+          <button
+            className={`rounded-md p-2 ${className}`}
+            aria-label="Toggle theme"
+            disabled
+          >
+            <span className={`block ${sizeClasses[size]}`} />
+          </button>
+        );
+      }
+
+      const sizeClasses = {
+        sm: "h-4 w-4",
+        md: "h-5 w-5",
+        lg: "h-6 w-6",
+      };
+
+      const iconSize = sizeClasses[size];
+
+      const toggleTheme = () => {
+        setTheme(resolvedTheme === "dark" ? "light" : "dark");
+      };
+
+      return (
+        <button
+          onClick={toggleTheme}
+          className={`inline-flex items-center justify-center rounded-md p-2 hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors ${className}`}
+          aria-label={`Switch to ${resolvedTheme === "dark" ? "light" : "dark"} mode`}
+        >
+          {resolvedTheme === "dark" ? (
+            <SunIcon className={iconSize} />
+          ) : (
+            <MoonIcon className={iconSize} />
+          )}
+          {showLabel && (
+            <span className="ml-2 text-sm">
+              {resolvedTheme === "dark" ? "Light" : "Dark"}
+            </span>
+          )}
+        </button>
+      );
+    }
+
+    /**
+     * Theme selector with all options
+     */
+    export function ThemeSelector({ className = "" }: { className?: string }) {
+      const [mounted, setMounted] = useState(false);
+      const { theme, setTheme } = useTheme();
+
+      useEffect(() => {
+        setMounted(true);
+      }, []);
+
+      if (!mounted) {
+        return null;
+      }
+
+      return (
+        <div className={`flex items-center gap-1 ${className}`}>
+          <button
+            onClick={() => setTheme("light")}
+            className={`p-2 rounded-md transition-colors ${
+              theme === "light"
+                ? "bg-gray-200 dark:bg-gray-700"
+                : "hover:bg-gray-100 dark:hover:bg-gray-800"
+            }`}
+            aria-label="Light mode"
+            aria-pressed={theme === "light"}
+          >
+            <SunIcon className="h-5 w-5" />
+          </button>
+          <button
+            onClick={() => setTheme("dark")}
+            className={`p-2 rounded-md transition-colors ${
+              theme === "dark"
+                ? "bg-gray-200 dark:bg-gray-700"
+                : "hover:bg-gray-100 dark:hover:bg-gray-800"
+            }`}
+            aria-label="Dark mode"
+            aria-pressed={theme === "dark"}
+          >
+            <MoonIcon className="h-5 w-5" />
+          </button>
+          <button
+            onClick={() => setTheme("system")}
+            className={`p-2 rounded-md transition-colors ${
+              theme === "system"
+                ? "bg-gray-200 dark:bg-gray-700"
+                : "hover:bg-gray-100 dark:hover:bg-gray-800"
+            }`}
+            aria-label="System theme"
+            aria-pressed={theme === "system"}
+          >
+            <SystemIcon className="h-5 w-5" />
+          </button>
+        </div>
+      );
+    }
+
+    // Icons
+    function SunIcon({ className }: { className?: string }) {
+      return (
+        <svg
+          xmlns="http://www.w3.org/2000/svg"
+          fill="none"
+          viewBox="0 0 24 24"
+          strokeWidth={1.5}
+          stroke="currentColor"
+          className={className}
+        >
+          <path
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            d="M12 3v2.25m6.364.386-1.591 1.591M21 12h-2.25m-.386 6.364-1.591-1.591M12 18.75V21m-4.773-4.227-1.591 1.591M5.25 12H3m4.227-4.773L5.636 5.636M15.75 12a3.75 3.75 0 1 1-7.5 0 3.75 3.75 0 0 1 7.5 0Z"
+          />
+        </svg>
+      );
+    }
+
+    function MoonIcon({ className }: { className?: string }) {
+      return (
+        <svg
+          xmlns="http://www.w3.org/2000/svg"
+          fill="none"
+          viewBox="0 0 24 24"
+          strokeWidth={1.5}
+          stroke="currentColor"
+          className={className}
+        >
+          <path
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            d="M21.752 15.002A9.72 9.72 0 0 1 18 15.75c-5.385 0-9.75-4.365-9.75-9.75 0-1.33.266-2.597.748-3.752A9.753 9.753 0 0 0 3 11.25C3 16.635 7.365 21 12.75 21a9.753 9.753 0 0 0 9.002-5.998Z"
+          />
+        </svg>
+      );
+    }
+
+    function SystemIcon({ className }: { className?: string }) {
+      return (
+        <svg
+          xmlns="http://www.w3.org/2000/svg"
+          fill="none"
+          viewBox="0 0 24 24"
+          strokeWidth={1.5}
+          stroke="currentColor"
+          className={className}
+        >
+          <path
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            d="M9 17.25v1.007a3 3 0 0 1-.879 2.122L7.5 21h9l-.621-.621A3 3 0 0 1 15 18.257V17.25m6-12V15a2.25 2.25 0 0 1-2.25 2.25H5.25A2.25 2.25 0 0 1 3 15V5.25m18 0A2.25 2.25 0 0 0 18.75 3H5.25A2.25 2.25 0 0 0 3 5.25m18 0V12a2.25 2.25 0 0 1-2.25 2.25H5.25A2.25 2.25 0 0 1 3 12V5.25"
+          />
+        </svg>
+      );
+    }
+
+  app/layout.tsx: |
+    import { ThemeProvider } from "@/components/providers/theme-provider";
+
+    export default function RootLayout({
+      children,
+    }: {
+      children: React.ReactNode;
+    }) {
+      return (
+        <html lang="en" suppressHydrationWarning>
+          <body>
+            <ThemeProvider
+              attribute="class"
+              defaultTheme="system"
+              enableSystem
+              disableTransitionOnChange
+            >
+              {children}
+            </ThemeProvider>
+          </body>
+        </html>
+      );
+    }
+
+  app/globals.css: |
+    @tailwind base;
+    @tailwind components;
+    @tailwind utilities;
+
+    @layer base {
+      :root {
+        --background: 0 0% 100%;
+        --foreground: 222.2 84% 4.9%;
+        --card: 0 0% 100%;
+        --card-foreground: 222.2 84% 4.9%;
+        --popover: 0 0% 100%;
+        --popover-foreground: 222.2 84% 4.9%;
+        --primary: 222.2 47.4% 11.2%;
+        --primary-foreground: 210 40% 98%;
+        --secondary: 210 40% 96.1%;
+        --secondary-foreground: 222.2 47.4% 11.2%;
+        --muted: 210 40% 96.1%;
+        --muted-foreground: 215.4 16.3% 46.9%;
+        --accent: 210 40% 96.1%;
+        --accent-foreground: 222.2 47.4% 11.2%;
+        --destructive: 0 84.2% 60.2%;
+        --destructive-foreground: 210 40% 98%;
+        --border: 214.3 31.8% 91.4%;
+        --input: 214.3 31.8% 91.4%;
+        --ring: 222.2 84% 4.9%;
+        --radius: 0.5rem;
+      }
+
+      .dark {
+        --background: 222.2 84% 4.9%;
+        --foreground: 210 40% 98%;
+        --card: 222.2 84% 4.9%;
+        --card-foreground: 210 40% 98%;
+        --popover: 222.2 84% 4.9%;
+        --popover-foreground: 210 40% 98%;
+        --primary: 210 40% 98%;
+        --primary-foreground: 222.2 47.4% 11.2%;
+        --secondary: 217.2 32.6% 17.5%;
+        --secondary-foreground: 210 40% 98%;
+        --muted: 217.2 32.6% 17.5%;
+        --muted-foreground: 215 20.2% 65.1%;
+        --accent: 217.2 32.6% 17.5%;
+        --accent-foreground: 210 40% 98%;
+        --destructive: 0 62.8% 30.6%;
+        --destructive-foreground: 210 40% 98%;
+        --border: 217.2 32.6% 17.5%;
+        --input: 217.2 32.6% 17.5%;
+        --ring: 212.7 26.8% 83.9%;
+      }
+    }
+
+    @layer base {
+      * {
+        @apply border-border;
+      }
+
+      body {
+        @apply bg-background text-foreground;
+      }
+    }
+
+edge_cases:
+  - id: hydration-mismatch
+    symptom: "Hydration error on page load"
+    cause: "Server and client theme mismatch"
+    solution: |
+      Add suppressHydrationWarning to html tag:
+      <html lang="en" suppressHydrationWarning>
+
+      And wait for mount in components:
+      const [mounted, setMounted] = useState(false);
+      useEffect(() => setMounted(true), []);
+      if (!mounted) return null;
+
+  - id: flash-of-incorrect-theme
+    symptom: "Brief flash of wrong theme on load"
+    cause: "Theme not applied before hydration"
+    solution: |
+      Add inline script to head (blocks render):
+      // In layout.tsx or a script tag
+      <script
+        dangerouslySetInnerHTML={{
+          __html: `
+            (function() {
+              const theme = localStorage.getItem('theme') || 'system';
+              const systemDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+              const isDark = theme === 'dark' || (theme === 'system' && systemDark);
+              document.documentElement.classList.toggle('dark', isDark);
+            })();
+          `,
+        }}
+      />
+
+  - id: theme-not-persisting
+    symptom: "Theme resets on page refresh"
+    cause: "Storage not configured correctly"
+    solution: |
+      next-themes stores in localStorage by default.
+      Check if localStorage is being cleared.
+      Verify storageKey prop if customized:
+      <ThemeProvider storageKey="my-app-theme">
+
+  - id: system-theme-not-updating
+    symptom: "Theme doesn't change with system preference"
+    cause: "enableSystem not set"
+    solution: |
+      Ensure enableSystem is true:
+      <ThemeProvider enableSystem>
+
+      And use resolvedTheme for actual theme:
+      const { resolvedTheme } = useTheme();
+
+validation:
+  manual_test:
+    - "Install next-themes: npm install next-themes"
+    - "Add ThemeProvider to layout"
+    - "Add ThemeToggle to header"
+    - "Click toggle - verify theme changes"
+    - "Refresh page - verify theme persists"
+    - "Change system preference - verify theme updates (if system)"
+    - "No hydration warnings in console"
+    - "No flash of wrong theme on load"

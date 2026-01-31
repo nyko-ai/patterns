@@ -1,0 +1,565 @@
+id: command-palette
+version: "1.0.0"
+updated_at: "2026-01-31"
+author: "nyko-team"
+status: beta
+
+name: "Command Palette with cmdk"
+description: "Keyboard-driven command palette using cmdk library"
+
+category: frontend
+tags:
+  - command-palette
+  - cmdk
+  - keyboard
+  - navigation
+  - search
+
+difficulty: intermediate
+time_estimate: "20-25 min"
+
+stack:
+  required:
+    - name: "next"
+      version: "^15.1.0"
+      reason: "App Router with client components"
+    - name: "cmdk"
+      version: "^1.1.0"
+      reason: "Command palette library"
+
+requires: []
+
+enables: []
+
+env_vars:
+  required: []
+
+external_setup: []
+
+files:
+  - path: "components/command-palette.tsx"
+    action: create
+    description: "Command palette component"
+    priority: 1
+
+  - path: "hooks/use-command-palette.ts"
+    action: create
+    description: "Command palette state hook"
+    priority: 2
+
+  - path: "lib/commands.ts"
+    action: create
+    description: "Command definitions"
+    priority: 3
+
+  - path: "app/layout.tsx"
+    action: modify
+    description: "Add CommandPalette to layout"
+    priority: 4
+
+code:
+  lib/commands.ts: |
+    import { ReactNode } from "react";
+
+    export interface Command {
+      id: string;
+      label: string;
+      description?: string;
+      icon?: ReactNode;
+      shortcut?: string[];
+      keywords?: string[];
+      group?: string;
+      action: () => void | Promise<void>;
+      disabled?: boolean;
+    }
+
+    export interface CommandGroup {
+      id: string;
+      label: string;
+      commands: Command[];
+    }
+
+    /**
+     * Create navigation commands
+     */
+    export function createNavigationCommands(
+      router: { push: (path: string) => void }
+    ): CommandGroup {
+      return {
+        id: "navigation",
+        label: "Navigation",
+        commands: [
+          {
+            id: "nav-home",
+            label: "Go to Home",
+            keywords: ["home", "dashboard", "main"],
+            shortcut: ["g", "h"],
+            action: () => router.push("/"),
+          },
+          {
+            id: "nav-settings",
+            label: "Go to Settings",
+            keywords: ["settings", "preferences", "config"],
+            shortcut: ["g", "s"],
+            action: () => router.push("/settings"),
+          },
+          {
+            id: "nav-profile",
+            label: "Go to Profile",
+            keywords: ["profile", "account", "user"],
+            shortcut: ["g", "p"],
+            action: () => router.push("/profile"),
+          },
+        ],
+      };
+    }
+
+    /**
+     * Create action commands
+     */
+    export function createActionCommands(actions: {
+      toggleTheme?: () => void;
+      logout?: () => void;
+      openHelp?: () => void;
+    }): CommandGroup {
+      const commands: Command[] = [];
+
+      if (actions.toggleTheme) {
+        commands.push({
+          id: "toggle-theme",
+          label: "Toggle Theme",
+          description: "Switch between light and dark mode",
+          keywords: ["theme", "dark", "light", "mode"],
+          shortcut: ["t"],
+          action: actions.toggleTheme,
+        });
+      }
+
+      if (actions.logout) {
+        commands.push({
+          id: "logout",
+          label: "Sign Out",
+          description: "Sign out of your account",
+          keywords: ["logout", "signout", "exit"],
+          action: actions.logout,
+        });
+      }
+
+      if (actions.openHelp) {
+        commands.push({
+          id: "help",
+          label: "Help & Support",
+          description: "Get help and documentation",
+          keywords: ["help", "support", "docs"],
+          shortcut: ["?"],
+          action: actions.openHelp,
+        });
+      }
+
+      return {
+        id: "actions",
+        label: "Actions",
+        commands,
+      };
+    }
+
+    /**
+     * Filter commands by search query
+     */
+    export function filterCommands(
+      groups: CommandGroup[],
+      query: string
+    ): CommandGroup[] {
+      if (!query) return groups;
+
+      const lowerQuery = query.toLowerCase();
+
+      return groups
+        .map((group) => ({
+          ...group,
+          commands: group.commands.filter((command) => {
+            const searchText = [
+              command.label,
+              command.description,
+              ...(command.keywords || []),
+            ]
+              .filter(Boolean)
+              .join(" ")
+              .toLowerCase();
+
+            return searchText.includes(lowerQuery);
+          }),
+        }))
+        .filter((group) => group.commands.length > 0);
+    }
+
+  hooks/use-command-palette.ts: |
+    "use client";
+
+    import { useEffect, useState, useCallback } from "react";
+
+    interface UseCommandPaletteOptions {
+      /** Keyboard shortcut to open (default: cmd/ctrl + k) */
+      shortcut?: string;
+    }
+
+    /**
+     * Hook for managing command palette state
+     */
+    export function useCommandPalette(options: UseCommandPaletteOptions = {}) {
+      const { shortcut = "k" } = options;
+      const [isOpen, setIsOpen] = useState(false);
+
+      const open = useCallback(() => setIsOpen(true), []);
+      const close = useCallback(() => setIsOpen(false), []);
+      const toggle = useCallback(() => setIsOpen((prev) => !prev), []);
+
+      // Keyboard shortcut handler
+      useEffect(() => {
+        const handleKeyDown = (e: KeyboardEvent) => {
+          // cmd/ctrl + k
+          if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === shortcut) {
+            e.preventDefault();
+            toggle();
+          }
+
+          // Escape to close
+          if (e.key === "Escape" && isOpen) {
+            close();
+          }
+        };
+
+        document.addEventListener("keydown", handleKeyDown);
+        return () => document.removeEventListener("keydown", handleKeyDown);
+      }, [shortcut, toggle, close, isOpen]);
+
+      return {
+        isOpen,
+        open,
+        close,
+        toggle,
+        setIsOpen,
+      };
+    }
+
+    /**
+     * Hook for keyboard navigation sequences (e.g., g then h for home)
+     */
+    export function useKeySequence(
+      sequences: Record<string, () => void>,
+      timeout = 1000
+    ) {
+      const [buffer, setBuffer] = useState<string[]>([]);
+
+      useEffect(() => {
+        const handleKeyDown = (e: KeyboardEvent) => {
+          // Ignore if in input
+          if (
+            e.target instanceof HTMLInputElement ||
+            e.target instanceof HTMLTextAreaElement
+          ) {
+            return;
+          }
+
+          // Ignore modifier keys
+          if (e.metaKey || e.ctrlKey || e.altKey) {
+            return;
+          }
+
+          setBuffer((prev) => [...prev, e.key.toLowerCase()]);
+        };
+
+        document.addEventListener("keydown", handleKeyDown);
+        return () => document.removeEventListener("keydown", handleKeyDown);
+      }, []);
+
+      // Clear buffer after timeout
+      useEffect(() => {
+        if (buffer.length === 0) return;
+
+        const timeoutId = setTimeout(() => {
+          setBuffer([]);
+        }, timeout);
+
+        return () => clearTimeout(timeoutId);
+      }, [buffer, timeout]);
+
+      // Check for matching sequence
+      useEffect(() => {
+        const sequence = buffer.join("");
+
+        for (const [key, action] of Object.entries(sequences)) {
+          if (sequence === key) {
+            action();
+            setBuffer([]);
+            break;
+          }
+        }
+      }, [buffer, sequences]);
+    }
+
+  components/command-palette.tsx: |
+    "use client";
+
+    import { useEffect, useState, useCallback, useMemo } from "react";
+    import { Command as CommandPrimitive } from "cmdk";
+    import { useRouter } from "next/navigation";
+    import { useTheme } from "next-themes";
+    import { useCommandPalette } from "@/hooks/use-command-palette";
+    import {
+      createNavigationCommands,
+      createActionCommands,
+      type CommandGroup,
+    } from "@/lib/commands";
+
+    interface CommandPaletteProps {
+      /** Additional command groups */
+      customGroups?: CommandGroup[];
+      /** Placeholder text */
+      placeholder?: string;
+    }
+
+    export function CommandPalette({
+      customGroups = [],
+      placeholder = "Type a command or search...",
+    }: CommandPaletteProps) {
+      const router = useRouter();
+      const { setTheme, resolvedTheme } = useTheme();
+      const { isOpen, setIsOpen, close } = useCommandPalette();
+      const [search, setSearch] = useState("");
+
+      // Reset search when closed
+      useEffect(() => {
+        if (!isOpen) {
+          setSearch("");
+        }
+      }, [isOpen]);
+
+      // Build command groups
+      const groups = useMemo(() => {
+        const navigationGroup = createNavigationCommands(router);
+        const actionGroup = createActionCommands({
+          toggleTheme: () => {
+            setTheme(resolvedTheme === "dark" ? "light" : "dark");
+            close();
+          },
+          logout: () => {
+            // Handle logout
+            router.push("/login");
+            close();
+          },
+          openHelp: () => {
+            window.open("/help", "_blank");
+            close();
+          },
+        });
+
+        return [navigationGroup, actionGroup, ...customGroups];
+      }, [router, setTheme, resolvedTheme, close, customGroups]);
+
+      const runCommand = useCallback(
+        (command: () => void | Promise<void>) => {
+          close();
+          command();
+        },
+        [close]
+      );
+
+      return (
+        <CommandPrimitive.Dialog
+          open={isOpen}
+          onOpenChange={setIsOpen}
+          label="Command Palette"
+        >
+          <div className="fixed inset-0 z-50 bg-black/50 backdrop-blur-sm" />
+
+          <div className="fixed left-1/2 top-1/4 z-50 w-full max-w-lg -translate-x-1/2 transform">
+            <div className="overflow-hidden rounded-lg border bg-white shadow-2xl dark:bg-gray-900">
+              <CommandPrimitive.Input
+                value={search}
+                onValueChange={setSearch}
+                placeholder={placeholder}
+                className="w-full border-b bg-transparent px-4 py-3 text-sm outline-none placeholder:text-gray-400"
+              />
+
+              <CommandPrimitive.List className="max-h-80 overflow-y-auto p-2">
+                <CommandPrimitive.Empty className="py-6 text-center text-sm text-gray-400">
+                  No commands found.
+                </CommandPrimitive.Empty>
+
+                {groups.map((group) => (
+                  <CommandPrimitive.Group
+                    key={group.id}
+                    heading={group.label}
+                    className="mb-2"
+                  >
+                    <div className="px-2 py-1.5 text-xs font-medium text-gray-400">
+                      {group.label}
+                    </div>
+
+                    {group.commands.map((command) => (
+                      <CommandPrimitive.Item
+                        key={command.id}
+                        value={[
+                          command.label,
+                          command.description,
+                          ...(command.keywords || []),
+                        ].join(" ")}
+                        onSelect={() => runCommand(command.action)}
+                        disabled={command.disabled}
+                        className="flex cursor-pointer items-center justify-between rounded-md px-3 py-2 text-sm aria-selected:bg-gray-100 aria-disabled:opacity-50 dark:aria-selected:bg-gray-800"
+                      >
+                        <div className="flex items-center gap-3">
+                          {command.icon && (
+                            <span className="text-gray-400">{command.icon}</span>
+                          )}
+                          <div>
+                            <div className="font-medium">{command.label}</div>
+                            {command.description && (
+                              <div className="text-xs text-gray-400">
+                                {command.description}
+                              </div>
+                            )}
+                          </div>
+                        </div>
+
+                        {command.shortcut && (
+                          <div className="flex gap-1">
+                            {command.shortcut.map((key) => (
+                              <kbd
+                                key={key}
+                                className="rounded border bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-500 dark:bg-gray-800 dark:text-gray-400"
+                              >
+                                {key}
+                              </kbd>
+                            ))}
+                          </div>
+                        )}
+                      </CommandPrimitive.Item>
+                    ))}
+                  </CommandPrimitive.Group>
+                ))}
+              </CommandPrimitive.List>
+
+              <div className="flex items-center justify-between border-t px-4 py-2 text-xs text-gray-400">
+                <div className="flex items-center gap-4">
+                  <span className="flex items-center gap-1">
+                    <kbd className="rounded border bg-gray-100 px-1 text-xs dark:bg-gray-800">
+                      ↑↓
+                    </kbd>
+                    to navigate
+                  </span>
+                  <span className="flex items-center gap-1">
+                    <kbd className="rounded border bg-gray-100 px-1 text-xs dark:bg-gray-800">
+                      ↵
+                    </kbd>
+                    to select
+                  </span>
+                  <span className="flex items-center gap-1">
+                    <kbd className="rounded border bg-gray-100 px-1 text-xs dark:bg-gray-800">
+                      esc
+                    </kbd>
+                    to close
+                  </span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </CommandPrimitive.Dialog>
+      );
+    }
+
+    /**
+     * Command palette trigger button
+     */
+    export function CommandPaletteTrigger() {
+      const { open } = useCommandPalette();
+
+      return (
+        <button
+          onClick={open}
+          className="flex items-center gap-2 rounded-md border bg-white px-3 py-1.5 text-sm text-gray-500 shadow-sm hover:bg-gray-50 dark:bg-gray-900 dark:hover:bg-gray-800"
+        >
+          <span>Search...</span>
+          <kbd className="rounded border bg-gray-100 px-1.5 py-0.5 text-xs font-mono dark:bg-gray-800">
+            ⌘K
+          </kbd>
+        </button>
+      );
+    }
+
+  app/layout.tsx: |
+    import { CommandPalette } from "@/components/command-palette";
+
+    export default function RootLayout({
+      children,
+    }: {
+      children: React.ReactNode;
+    }) {
+      return (
+        <html lang="en">
+          <body>
+            {children}
+            <CommandPalette />
+          </body>
+        </html>
+      );
+    }
+
+edge_cases:
+  - id: shortcut-conflict
+    symptom: "Cmd+K not working"
+    cause: "Browser or other app capturing shortcut"
+    solution: |
+      Use alternative shortcut:
+      const { isOpen, setIsOpen } = useCommandPalette({
+        shortcut: "/", // Use "/" instead
+      });
+
+      Or check for conflicts in dev tools.
+
+  - id: focus-trap
+    symptom: "Focus escapes command palette"
+    cause: "Focus not properly trapped"
+    solution: |
+      cmdk handles focus automatically.
+      Ensure dialog is mounted at root level.
+      Check z-index of overlay and content.
+
+  - id: search-not-working
+    symptom: "Commands not filtering correctly"
+    cause: "Value prop not including searchable text"
+    solution: |
+      Include all searchable text in value:
+      <CommandPrimitive.Item
+        value={[
+          command.label,
+          command.description,
+          ...command.keywords,
+        ].join(" ")}
+      >
+
+  - id: async-commands
+    symptom: "Palette closes before command completes"
+    cause: "Close called immediately"
+    solution: |
+      For async commands, handle completion:
+      const runCommand = async (action) => {
+        try {
+          await action();
+          close();
+        } catch (error) {
+          // Show error, don't close
+        }
+      };
+
+validation:
+  manual_test:
+    - "Install cmdk: npm install cmdk"
+    - "Add CommandPalette to layout"
+    - "Press Cmd+K (or Ctrl+K) - palette opens"
+    - "Type to filter commands"
+    - "Use arrow keys to navigate"
+    - "Press Enter to execute"
+    - "Press Escape to close"
+    - "Verify shortcut keys work (g+h for home)"
