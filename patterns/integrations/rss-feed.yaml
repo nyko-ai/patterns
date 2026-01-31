@@ -1,0 +1,294 @@
+id: rss-feed
+version: "1.0.0"
+updated_at: "2026-01-31"
+author: "nyko-team"
+status: beta
+
+name: "RSS Feed Generation"
+description: "Generate RSS and Atom feeds for blog posts and content"
+
+category: integrations
+tags:
+  - rss
+  - atom
+  - feed
+  - blog
+  - syndication
+
+difficulty: beginner
+time_estimate: "15-20 min"
+
+stack:
+  required:
+    - name: "next"
+      version: "^15.1.0"
+      reason: "Next.js App Router"
+
+requires: []
+
+enables: []
+
+env_vars:
+  required:
+    - key: NEXT_PUBLIC_SITE_URL
+      description: "Base URL for the site"
+      format: "https://example.com"
+      where_to_find: "Your deployment URL"
+
+external_setup: []
+
+files:
+  - path: "lib/feed.ts"
+    action: create
+    description: "RSS feed generation utilities"
+    priority: 1
+
+  - path: "app/feed.xml/route.ts"
+    action: create
+    description: "RSS feed endpoint"
+    priority: 2
+
+  - path: "app/atom.xml/route.ts"
+    action: create
+    description: "Atom feed endpoint"
+    priority: 3
+
+code:
+  lib/feed.ts: |
+    interface FeedItem {
+      title: string;
+      description: string;
+      link: string;
+      pubDate: Date;
+      author?: string;
+      guid?: string;
+      categories?: string[];
+      content?: string;
+    }
+
+    interface FeedConfig {
+      title: string;
+      description: string;
+      siteUrl: string;
+      feedUrl: string;
+      language?: string;
+      copyright?: string;
+      author?: {
+        name: string;
+        email?: string;
+        link?: string;
+      };
+      image?: {
+        url: string;
+        title: string;
+        link: string;
+      };
+    }
+
+    function escapeXml(text: string): string {
+      return text
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&apos;");
+    }
+
+    export function generateRssFeed(config: FeedConfig, items: FeedItem[]): string {
+      const itemsXml = items
+        .map(
+          (item) => `
+        <item>
+          <title>${escapeXml(item.title)}</title>
+          <link>${escapeXml(item.link)}</link>
+          <description>${escapeXml(item.description)}</description>
+          <pubDate>${item.pubDate.toUTCString()}</pubDate>
+          <guid isPermaLink="true">${escapeXml(item.guid || item.link)}</guid>
+          ${item.author ? `<author>${escapeXml(item.author)}</author>` : ""}
+          ${item.categories?.map((cat) => `<category>${escapeXml(cat)}</category>`).join("") || ""}
+          ${item.content ? `<content:encoded><![CDATA[${item.content}]]></content:encoded>` : ""}
+        </item>`
+        )
+        .join("");
+
+      return `<?xml version="1.0" encoding="UTF-8"?>
+    <rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:content="http://purl.org/rss/1.0/modules/content/">
+      <channel>
+        <title>${escapeXml(config.title)}</title>
+        <link>${escapeXml(config.siteUrl)}</link>
+        <description>${escapeXml(config.description)}</description>
+        <language>${config.language || "en"}</language>
+        <lastBuildDate>${new Date().toUTCString()}</lastBuildDate>
+        <atom:link href="${escapeXml(config.feedUrl)}" rel="self" type="application/rss+xml"/>
+        ${config.copyright ? `<copyright>${escapeXml(config.copyright)}</copyright>` : ""}
+        ${config.image ? `
+        <image>
+          <url>${escapeXml(config.image.url)}</url>
+          <title>${escapeXml(config.image.title)}</title>
+          <link>${escapeXml(config.image.link)}</link>
+        </image>` : ""}
+        ${itemsXml}
+      </channel>
+    </rss>`;
+    }
+
+    export function generateAtomFeed(config: FeedConfig, items: FeedItem[]): string {
+      const entriesXml = items
+        .map(
+          (item) => `
+      <entry>
+        <title>${escapeXml(item.title)}</title>
+        <link href="${escapeXml(item.link)}"/>
+        <id>${escapeXml(item.guid || item.link)}</id>
+        <updated>${item.pubDate.toISOString()}</updated>
+        <summary>${escapeXml(item.description)}</summary>
+        ${item.author ? `<author><name>${escapeXml(item.author)}</name></author>` : ""}
+        ${item.categories?.map((cat) => `<category term="${escapeXml(cat)}"/>`).join("") || ""}
+        ${item.content ? `<content type="html"><![CDATA[${item.content}]]></content>` : ""}
+      </entry>`
+        )
+        .join("");
+
+      return `<?xml version="1.0" encoding="UTF-8"?>
+    <feed xmlns="http://www.w3.org/2005/Atom">
+      <title>${escapeXml(config.title)}</title>
+      <link href="${escapeXml(config.siteUrl)}"/>
+      <link href="${escapeXml(config.feedUrl)}" rel="self"/>
+      <id>${escapeXml(config.siteUrl)}</id>
+      <updated>${new Date().toISOString()}</updated>
+      <subtitle>${escapeXml(config.description)}</subtitle>
+      ${config.author ? `
+      <author>
+        <name>${escapeXml(config.author.name)}</name>
+        ${config.author.email ? `<email>${escapeXml(config.author.email)}</email>` : ""}
+        ${config.author.link ? `<uri>${escapeXml(config.author.link)}</uri>` : ""}
+      </author>` : ""}
+      ${entriesXml}
+    </feed>`;
+    }
+
+    export type { FeedItem, FeedConfig };
+
+  app/feed.xml/route.ts: |
+    import { NextResponse } from "next/server";
+    import { generateRssFeed, type FeedItem } from "@/lib/feed";
+
+    const SITE_URL = process.env.NEXT_PUBLIC_SITE_URL || "https://example.com";
+
+    async function getPosts(): Promise<FeedItem[]> {
+      // Replace with actual data fetching
+      // Example: const posts = await db.post.findMany({ orderBy: { createdAt: 'desc' }, take: 20 });
+
+      return [
+        {
+          title: "Example Post",
+          description: "This is an example blog post",
+          link: `${SITE_URL}/blog/example-post`,
+          pubDate: new Date(),
+          author: "Author Name",
+          categories: ["Technology", "Tutorial"],
+        },
+      ];
+    }
+
+    export async function GET() {
+      const posts = await getPosts();
+
+      const feed = generateRssFeed(
+        {
+          title: "Your Blog",
+          description: "Latest posts from our blog",
+          siteUrl: SITE_URL,
+          feedUrl: `${SITE_URL}/feed.xml`,
+          language: "en",
+          copyright: `Copyright ${new Date().getFullYear()}`,
+          author: {
+            name: "Your Name",
+            email: "hello@example.com",
+          },
+        },
+        posts
+      );
+
+      return new NextResponse(feed, {
+        headers: {
+          "Content-Type": "application/rss+xml; charset=utf-8",
+          "Cache-Control": "public, max-age=3600, s-maxage=3600",
+        },
+      });
+    }
+
+  app/atom.xml/route.ts: |
+    import { NextResponse } from "next/server";
+    import { generateAtomFeed, type FeedItem } from "@/lib/feed";
+
+    const SITE_URL = process.env.NEXT_PUBLIC_SITE_URL || "https://example.com";
+
+    async function getPosts(): Promise<FeedItem[]> {
+      // Replace with actual data fetching
+      return [
+        {
+          title: "Example Post",
+          description: "This is an example blog post",
+          link: `${SITE_URL}/blog/example-post`,
+          pubDate: new Date(),
+          author: "Author Name",
+          categories: ["Technology"],
+        },
+      ];
+    }
+
+    export async function GET() {
+      const posts = await getPosts();
+
+      const feed = generateAtomFeed(
+        {
+          title: "Your Blog",
+          description: "Latest posts from our blog",
+          siteUrl: SITE_URL,
+          feedUrl: `${SITE_URL}/atom.xml`,
+          author: {
+            name: "Your Name",
+            email: "hello@example.com",
+            link: SITE_URL,
+          },
+        },
+        posts
+      );
+
+      return new NextResponse(feed, {
+        headers: {
+          "Content-Type": "application/atom+xml; charset=utf-8",
+          "Cache-Control": "public, max-age=3600, s-maxage=3600",
+        },
+      });
+    }
+
+edge_cases:
+  - id: invalid-xml
+    symptom: "Feed readers can't parse feed"
+    cause: "Special characters not escaped"
+    solution: "Use escapeXml helper for all user content"
+
+  - id: empty-feed
+    symptom: "Feed shows no items"
+    cause: "Data fetching returns empty array"
+    solution: "Add fallback content or error handling for empty feeds"
+
+  - id: wrong-dates
+    symptom: "Items appear in wrong order"
+    cause: "Invalid date format or timezone issues"
+    solution: "Use ISO dates for Atom, RFC 2822 for RSS, ensure UTC timezone"
+
+  - id: feed-not-discovered
+    symptom: "Feed readers can't find feed"
+    cause: "Missing link tag in HTML head"
+    solution: "Add <link rel='alternate' type='application/rss+xml'> to layout"
+
+validation:
+  manual_test:
+    - "Access /feed.xml endpoint"
+    - "Validate with W3C Feed Validator"
+    - "Subscribe in feed reader"
+    - "Verify items display correctly"
+    - "Test Atom feed at /atom.xml"

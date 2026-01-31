@@ -1,0 +1,282 @@
+id: slack-webhook
+version: "1.0.0"
+updated_at: "2026-01-31"
+author: "nyko-team"
+status: beta
+
+name: "Slack Webhook Notifications"
+description: "Send notifications to Slack channels via webhooks"
+
+category: integrations
+tags:
+  - slack
+  - webhook
+  - notifications
+  - alerts
+  - chat
+
+difficulty: beginner
+time_estimate: "10-15 min"
+
+stack:
+  required:
+    - name: "next"
+      version: "^15.1.0"
+      reason: "Next.js App Router"
+
+requires: []
+
+enables: []
+
+env_vars:
+  required:
+    - key: SLACK_WEBHOOK_URL
+      description: "Slack incoming webhook URL"
+      format: "https://hooks.slack.com/services/xxx/xxx/xxx"
+      where_to_find: "Slack App > Incoming Webhooks > Add New Webhook"
+
+external_setup:
+  - service: "Slack"
+    url: "https://api.slack.com/apps"
+    steps:
+      - "Go to api.slack.com/apps"
+      - "Create new app or select existing"
+      - "Enable Incoming Webhooks"
+      - "Add New Webhook to Workspace"
+      - "Select target channel"
+      - "Copy webhook URL"
+
+files:
+  - path: "lib/slack.ts"
+    action: create
+    description: "Slack webhook client"
+    priority: 1
+
+  - path: "lib/notifications/slack-templates.ts"
+    action: create
+    description: "Slack message templates"
+    priority: 2
+
+code:
+  lib/slack.ts: |
+    interface SlackBlock {
+      type: string;
+      text?: { type: string; text: string; emoji?: boolean };
+      fields?: Array<{ type: string; text: string }>;
+      elements?: Array<{ type: string; text?: { type: string; text: string }; url?: string; action_id?: string }>;
+      accessory?: { type: string; image_url?: string; alt_text?: string };
+    }
+
+    interface SlackAttachment {
+      color?: string;
+      title?: string;
+      text?: string;
+      fields?: Array<{ title: string; value: string; short?: boolean }>;
+      footer?: string;
+      ts?: number;
+    }
+
+    interface SlackMessage {
+      text?: string;
+      blocks?: SlackBlock[];
+      attachments?: SlackAttachment[];
+      unfurl_links?: boolean;
+      unfurl_media?: boolean;
+    }
+
+    const WEBHOOK_URL = process.env.SLACK_WEBHOOK_URL;
+
+    export async function sendSlackMessage(message: SlackMessage): Promise<boolean> {
+      if (!WEBHOOK_URL) {
+        console.warn("Slack webhook URL not configured");
+        return false;
+      }
+
+      try {
+        const response = await fetch(WEBHOOK_URL, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(message),
+        });
+
+        if (!response.ok) {
+          const error = await response.text();
+          console.error("Slack webhook error:", error);
+          return false;
+        }
+
+        return true;
+      } catch (error) {
+        console.error("Slack webhook failed:", error);
+        return false;
+      }
+    }
+
+    export const SlackColors = {
+      SUCCESS: "#22c55e",
+      ERROR: "#ef4444",
+      WARNING: "#f59e0b",
+      INFO: "#3b82f6",
+    } as const;
+
+    export function createTextBlock(text: string): SlackBlock {
+      return {
+        type: "section",
+        text: { type: "mrkdwn", text },
+      };
+    }
+
+    export function createFieldsBlock(
+      fields: Array<{ label: string; value: string }>
+    ): SlackBlock {
+      return {
+        type: "section",
+        fields: fields.map((f) => ({
+          type: "mrkdwn",
+          text: `*${f.label}*\n${f.value}`,
+        })),
+      };
+    }
+
+    export function createDivider(): SlackBlock {
+      return { type: "divider" };
+    }
+
+    export function createHeader(text: string): SlackBlock {
+      return {
+        type: "header",
+        text: { type: "plain_text", text, emoji: true },
+      };
+    }
+
+    export function createAttachment(params: {
+      color: string;
+      title?: string;
+      text?: string;
+      fields?: Array<{ title: string; value: string; short?: boolean }>;
+    }): SlackAttachment {
+      return {
+        color: params.color,
+        title: params.title,
+        text: params.text,
+        fields: params.fields,
+        ts: Math.floor(Date.now() / 1000),
+      };
+    }
+
+  lib/notifications/slack-templates.ts: |
+    import {
+      sendSlackMessage,
+      SlackColors,
+      createHeader,
+      createFieldsBlock,
+      createTextBlock,
+      createAttachment,
+    } from "@/lib/slack";
+
+    export async function notifyNewUser(user: { email: string; name?: string }) {
+      return sendSlackMessage({
+        blocks: [
+          createHeader("New User Signup"),
+          createFieldsBlock([
+            { label: "Email", value: user.email },
+            { label: "Name", value: user.name || "Not provided" },
+          ]),
+        ],
+        attachments: [createAttachment({ color: SlackColors.SUCCESS })],
+      });
+    }
+
+    export async function notifyNewSubscription(params: {
+      userId: string;
+      plan: string;
+      amount: number;
+    }) {
+      return sendSlackMessage({
+        blocks: [
+          createHeader("New Subscription"),
+          createFieldsBlock([
+            { label: "User ID", value: params.userId },
+            { label: "Plan", value: params.plan },
+            { label: "Amount", value: `$${params.amount / 100}` },
+          ]),
+        ],
+        attachments: [createAttachment({ color: SlackColors.SUCCESS })],
+      });
+    }
+
+    export async function notifyError(params: {
+      error: string;
+      context?: string;
+      stack?: string;
+    }) {
+      return sendSlackMessage({
+        blocks: [
+          createHeader("Application Error"),
+          createTextBlock(`*Error:* ${params.error}`),
+          ...(params.context ? [createTextBlock(`*Context:* ${params.context}`)] : []),
+          ...(params.stack ? [createTextBlock(`\`\`\`${params.stack.slice(0, 2000)}\`\`\``)] : []),
+        ],
+        attachments: [createAttachment({ color: SlackColors.ERROR })],
+      });
+    }
+
+    export async function notifyDeployment(params: {
+      environment: string;
+      version: string;
+      status: "started" | "success" | "failed";
+      url?: string;
+    }) {
+      const colorMap = {
+        started: SlackColors.INFO,
+        success: SlackColors.SUCCESS,
+        failed: SlackColors.ERROR,
+      };
+
+      const emojiMap = {
+        started: "rocket",
+        success: "white_check_mark",
+        failed: "x",
+      };
+
+      return sendSlackMessage({
+        blocks: [
+          createHeader(`Deployment ${params.status.charAt(0).toUpperCase() + params.status.slice(1)}`),
+          createFieldsBlock([
+            { label: "Environment", value: params.environment },
+            { label: "Version", value: params.version },
+          ]),
+          ...(params.url ? [createTextBlock(`<${params.url}|View Deployment>`)] : []),
+        ],
+        attachments: [createAttachment({ color: colorMap[params.status] })],
+      });
+    }
+
+edge_cases:
+  - id: rate-limiting
+    symptom: "Webhook returns rate limit error"
+    cause: "Too many requests to Slack API"
+    solution: "Implement rate limiting (1 message/second), batch notifications"
+
+  - id: channel-archived
+    symptom: "Webhook fails with channel_not_found"
+    cause: "Target channel was archived or deleted"
+    solution: "Update webhook to new channel in Slack app settings"
+
+  - id: app-uninstalled
+    symptom: "Webhook returns invalid_token"
+    cause: "Slack app was uninstalled from workspace"
+    solution: "Reinstall app and create new webhook"
+
+  - id: message-formatting
+    symptom: "Message appears with raw markdown"
+    cause: "Using wrong text type in blocks"
+    solution: "Use mrkdwn type for markdown, plain_text for literal text"
+
+validation:
+  manual_test:
+    - "Create Slack app and webhook"
+    - "Send test message"
+    - "Verify message appears in channel"
+    - "Test message with blocks"
+    - "Test error notification"

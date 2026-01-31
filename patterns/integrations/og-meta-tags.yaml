@@ -1,0 +1,386 @@
+id: og-meta-tags
+version: "1.0.0"
+updated_at: "2026-01-31"
+author: "nyko-team"
+status: beta
+
+name: "Open Graph & Twitter Cards"
+description: "Dynamic Open Graph and Twitter Card meta tags for social sharing"
+
+category: integrations
+tags:
+  - opengraph
+  - twitter
+  - meta-tags
+  - seo
+  - social
+
+difficulty: beginner
+time_estimate: "15-20 min"
+
+stack:
+  required:
+    - name: "next"
+      version: "^15.1.0"
+      reason: "Next.js App Router with Metadata API"
+
+requires: []
+
+enables: []
+
+env_vars:
+  optional:
+    - key: NEXT_PUBLIC_SITE_URL
+      description: "Base URL for the site"
+      format: "https://example.com"
+      where_to_find: "Your deployment URL"
+
+external_setup: []
+
+files:
+  - path: "lib/metadata.ts"
+    action: create
+    description: "Metadata generation utilities"
+    priority: 1
+
+  - path: "app/layout.tsx"
+    action: modify
+    description: "Root layout with default metadata"
+    priority: 2
+
+  - path: "app/[slug]/page.tsx"
+    action: create
+    description: "Dynamic page with custom metadata"
+    priority: 3
+
+  - path: "app/api/og/route.tsx"
+    action: create
+    description: "Dynamic OG image generation"
+    priority: 4
+
+code:
+  lib/metadata.ts: |
+    import { Metadata } from "next";
+
+    const SITE_URL = process.env.NEXT_PUBLIC_SITE_URL || "https://example.com";
+    const SITE_NAME = "Your App Name";
+
+    interface PageMetadata {
+      title: string;
+      description: string;
+      image?: string;
+      url?: string;
+      type?: "website" | "article" | "profile";
+      publishedTime?: string;
+      modifiedTime?: string;
+      authors?: string[];
+      tags?: string[];
+      noIndex?: boolean;
+    }
+
+    export function generateMetadata(page: PageMetadata): Metadata {
+      const url = page.url || SITE_URL;
+      const image = page.image || `${SITE_URL}/api/og?title=${encodeURIComponent(page.title)}`;
+
+      return {
+        title: page.title,
+        description: page.description,
+        metadataBase: new URL(SITE_URL),
+        alternates: {
+          canonical: url,
+        },
+        openGraph: {
+          title: page.title,
+          description: page.description,
+          url,
+          siteName: SITE_NAME,
+          images: [
+            {
+              url: image,
+              width: 1200,
+              height: 630,
+              alt: page.title,
+            },
+          ],
+          locale: "en_US",
+          type: page.type || "website",
+          ...(page.type === "article" && {
+            publishedTime: page.publishedTime,
+            modifiedTime: page.modifiedTime,
+            authors: page.authors,
+            tags: page.tags,
+          }),
+        },
+        twitter: {
+          card: "summary_large_image",
+          title: page.title,
+          description: page.description,
+          images: [image],
+          creator: "@yourtwitterhandle",
+        },
+        robots: page.noIndex
+          ? { index: false, follow: false }
+          : { index: true, follow: true },
+      };
+    }
+
+    export function generateArticleMetadata(article: {
+      title: string;
+      description: string;
+      slug: string;
+      image?: string;
+      publishedAt: Date;
+      updatedAt?: Date;
+      author: string;
+      tags?: string[];
+    }): Metadata {
+      return generateMetadata({
+        title: article.title,
+        description: article.description,
+        url: `${SITE_URL}/blog/${article.slug}`,
+        image: article.image,
+        type: "article",
+        publishedTime: article.publishedAt.toISOString(),
+        modifiedTime: article.updatedAt?.toISOString(),
+        authors: [article.author],
+        tags: article.tags,
+      });
+    }
+
+    export function generateProductMetadata(product: {
+      name: string;
+      description: string;
+      slug: string;
+      image?: string;
+      price: number;
+      currency: string;
+    }): Metadata {
+      const metadata = generateMetadata({
+        title: product.name,
+        description: product.description,
+        url: `${SITE_URL}/products/${product.slug}`,
+        image: product.image,
+      });
+
+      return {
+        ...metadata,
+        other: {
+          "product:price:amount": String(product.price),
+          "product:price:currency": product.currency,
+        },
+      };
+    }
+
+  app/layout.tsx: |
+    import { Metadata } from "next";
+
+    export const metadata: Metadata = {
+      title: {
+        default: "Your App Name",
+        template: "%s | Your App Name",
+      },
+      description: "Your app description for SEO and social sharing",
+      metadataBase: new URL(process.env.NEXT_PUBLIC_SITE_URL || "https://example.com"),
+      openGraph: {
+        title: "Your App Name",
+        description: "Your app description",
+        url: "/",
+        siteName: "Your App Name",
+        images: [
+          {
+            url: "/api/og",
+            width: 1200,
+            height: 630,
+          },
+        ],
+        locale: "en_US",
+        type: "website",
+      },
+      twitter: {
+        card: "summary_large_image",
+        title: "Your App Name",
+        description: "Your app description",
+        creator: "@yourtwitterhandle",
+      },
+      robots: {
+        index: true,
+        follow: true,
+      },
+    };
+
+    export default function RootLayout({
+      children,
+    }: {
+      children: React.ReactNode;
+    }) {
+      return (
+        <html lang="en">
+          <body>{children}</body>
+        </html>
+      );
+    }
+
+  app/[slug]/page.tsx: |
+    import { Metadata } from "next";
+    import { generateMetadata as createMetadata } from "@/lib/metadata";
+    import { notFound } from "next/navigation";
+
+    // Example: fetch page data
+    async function getPage(slug: string) {
+      // Replace with actual data fetching
+      const pages: Record<string, { title: string; description: string; content: string }> = {
+        about: {
+          title: "About Us",
+          description: "Learn more about our company",
+          content: "About page content...",
+        },
+      };
+      return pages[slug];
+    }
+
+    export async function generateMetadata({
+      params,
+    }: {
+      params: Promise<{ slug: string }>;
+    }): Promise<Metadata> {
+      const { slug } = await params;
+      const page = await getPage(slug);
+
+      if (!page) {
+        return { title: "Not Found" };
+      }
+
+      return createMetadata({
+        title: page.title,
+        description: page.description,
+        url: `/${slug}`,
+      });
+    }
+
+    export default async function Page({
+      params,
+    }: {
+      params: Promise<{ slug: string }>;
+    }) {
+      const { slug } = await params;
+      const page = await getPage(slug);
+
+      if (!page) {
+        notFound();
+      }
+
+      return (
+        <main>
+          <h1>{page.title}</h1>
+          <p>{page.content}</p>
+        </main>
+      );
+    }
+
+  app/api/og/route.tsx: |
+    import { ImageResponse } from "next/og";
+    import { NextRequest } from "next/server";
+
+    export const runtime = "edge";
+
+    export async function GET(request: NextRequest) {
+      const { searchParams } = request.nextUrl;
+      const title = searchParams.get("title") || "Your App Name";
+      const description = searchParams.get("description") || "";
+
+      return new ImageResponse(
+        (
+          <div
+            style={{
+              height: "100%",
+              width: "100%",
+              display: "flex",
+              flexDirection: "column",
+              alignItems: "center",
+              justifyContent: "center",
+              backgroundColor: "#0f172a",
+              padding: "40px",
+            }}
+          >
+            <div
+              style={{
+                display: "flex",
+                flexDirection: "column",
+                alignItems: "center",
+                justifyContent: "center",
+                textAlign: "center",
+              }}
+            >
+              <h1
+                style={{
+                  fontSize: "60px",
+                  fontWeight: "bold",
+                  color: "white",
+                  marginBottom: "20px",
+                  lineHeight: 1.2,
+                }}
+              >
+                {title}
+              </h1>
+              {description && (
+                <p
+                  style={{
+                    fontSize: "30px",
+                    color: "#94a3b8",
+                    maxWidth: "800px",
+                  }}
+                >
+                  {description}
+                </p>
+              )}
+            </div>
+            <div
+              style={{
+                position: "absolute",
+                bottom: "40px",
+                display: "flex",
+                alignItems: "center",
+                gap: "10px",
+              }}
+            >
+              <span style={{ fontSize: "24px", color: "#64748b" }}>
+                yourapp.com
+              </span>
+            </div>
+          </div>
+        ),
+        {
+          width: 1200,
+          height: 630,
+        }
+      );
+    }
+
+edge_cases:
+  - id: image-not-loading
+    symptom: "Social preview shows no image"
+    cause: "OG image URL not accessible or wrong dimensions"
+    solution: "Use absolute URLs, ensure image is 1200x630px, test with validators"
+
+  - id: cache-not-updating
+    symptom: "Old preview shown after update"
+    cause: "Social platforms cache OG data"
+    solution: "Use cache busting query params, clear cache via platform tools"
+
+  - id: special-characters
+    symptom: "Title or description truncated/malformed"
+    cause: "Unescaped HTML entities or special characters"
+    solution: "Properly encode special characters, limit title to 60 chars"
+
+  - id: missing-metadata
+    symptom: "Some platforms show incomplete preview"
+    cause: "Platform-specific tags missing"
+    solution: "Include both OpenGraph and Twitter Card tags"
+
+validation:
+  manual_test:
+    - "Check page source for meta tags"
+    - "Test with Facebook Sharing Debugger"
+    - "Test with Twitter Card Validator"
+    - "Test with LinkedIn Post Inspector"
+    - "Verify dynamic OG image generation"

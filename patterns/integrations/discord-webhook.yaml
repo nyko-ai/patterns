@@ -1,0 +1,246 @@
+id: discord-webhook
+version: "1.0.0"
+updated_at: "2026-01-31"
+author: "nyko-team"
+status: beta
+
+name: "Discord Webhook Notifications"
+description: "Send notifications to Discord channels via webhooks"
+
+category: integrations
+tags:
+  - discord
+  - webhook
+  - notifications
+  - alerts
+  - chat
+
+difficulty: beginner
+time_estimate: "10-15 min"
+
+stack:
+  required:
+    - name: "next"
+      version: "^15.1.0"
+      reason: "Next.js App Router"
+
+requires: []
+
+enables: []
+
+env_vars:
+  required:
+    - key: DISCORD_WEBHOOK_URL
+      description: "Discord webhook URL"
+      format: "https://discord.com/api/webhooks/xxx/xxx"
+      where_to_find: "Discord Server > Channel Settings > Integrations > Webhooks"
+
+external_setup:
+  - service: "Discord"
+    url: "https://discord.com"
+    steps:
+      - "Open Discord server settings"
+      - "Go to Integrations > Webhooks"
+      - "Create new webhook"
+      - "Select target channel"
+      - "Copy webhook URL"
+      - "Optional: Customize webhook name and avatar"
+
+files:
+  - path: "lib/discord.ts"
+    action: create
+    description: "Discord webhook client"
+    priority: 1
+
+  - path: "lib/notifications/discord-templates.ts"
+    action: create
+    description: "Discord message templates"
+    priority: 2
+
+code:
+  lib/discord.ts: |
+    interface DiscordEmbed {
+      title?: string;
+      description?: string;
+      url?: string;
+      color?: number;
+      fields?: Array<{ name: string; value: string; inline?: boolean }>;
+      footer?: { text: string; icon_url?: string };
+      timestamp?: string;
+      thumbnail?: { url: string };
+      image?: { url: string };
+      author?: { name: string; url?: string; icon_url?: string };
+    }
+
+    interface DiscordMessage {
+      content?: string;
+      username?: string;
+      avatar_url?: string;
+      embeds?: DiscordEmbed[];
+    }
+
+    const WEBHOOK_URL = process.env.DISCORD_WEBHOOK_URL;
+
+    export async function sendDiscordMessage(message: DiscordMessage): Promise<boolean> {
+      if (!WEBHOOK_URL) {
+        console.warn("Discord webhook URL not configured");
+        return false;
+      }
+
+      try {
+        const response = await fetch(WEBHOOK_URL, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(message),
+        });
+
+        if (!response.ok) {
+          const error = await response.text();
+          console.error("Discord webhook error:", error);
+          return false;
+        }
+
+        return true;
+      } catch (error) {
+        console.error("Discord webhook failed:", error);
+        return false;
+      }
+    }
+
+    export async function sendDiscordEmbed(embed: DiscordEmbed): Promise<boolean> {
+      return sendDiscordMessage({ embeds: [embed] });
+    }
+
+    export const DiscordColors = {
+      SUCCESS: 0x22c55e,
+      ERROR: 0xef4444,
+      WARNING: 0xf59e0b,
+      INFO: 0x3b82f6,
+      PRIMARY: 0x6366f1,
+    } as const;
+
+    export function createEmbed(params: {
+      title: string;
+      description?: string;
+      color?: number;
+      fields?: Array<{ name: string; value: string; inline?: boolean }>;
+      url?: string;
+      footer?: string;
+    }): DiscordEmbed {
+      return {
+        title: params.title,
+        description: params.description,
+        color: params.color || DiscordColors.INFO,
+        fields: params.fields,
+        url: params.url,
+        footer: params.footer ? { text: params.footer } : undefined,
+        timestamp: new Date().toISOString(),
+      };
+    }
+
+  lib/notifications/discord-templates.ts: |
+    import { sendDiscordEmbed, DiscordColors, createEmbed } from "@/lib/discord";
+
+    export async function notifyNewUser(user: { email: string; name?: string }) {
+      return sendDiscordEmbed(
+        createEmbed({
+          title: "New User Signup",
+          description: `A new user has registered`,
+          color: DiscordColors.SUCCESS,
+          fields: [
+            { name: "Email", value: user.email, inline: true },
+            { name: "Name", value: user.name || "Not provided", inline: true },
+          ],
+        })
+      );
+    }
+
+    export async function notifyNewSubscription(params: {
+      userId: string;
+      plan: string;
+      amount: number;
+    }) {
+      return sendDiscordEmbed(
+        createEmbed({
+          title: "New Subscription",
+          description: "A user has subscribed to a paid plan",
+          color: DiscordColors.PRIMARY,
+          fields: [
+            { name: "User ID", value: params.userId, inline: true },
+            { name: "Plan", value: params.plan, inline: true },
+            { name: "Amount", value: `$${params.amount / 100}`, inline: true },
+          ],
+        })
+      );
+    }
+
+    export async function notifyError(params: {
+      error: string;
+      context?: string;
+      stack?: string;
+    }) {
+      return sendDiscordEmbed(
+        createEmbed({
+          title: "Application Error",
+          description: params.error,
+          color: DiscordColors.ERROR,
+          fields: [
+            ...(params.context ? [{ name: "Context", value: params.context }] : []),
+            ...(params.stack ? [{ name: "Stack", value: `\`\`\`${params.stack.slice(0, 1000)}\`\`\`` }] : []),
+          ],
+          footer: "Error Notification",
+        })
+      );
+    }
+
+    export async function notifyDeployment(params: {
+      environment: string;
+      version: string;
+      status: "started" | "success" | "failed";
+    }) {
+      const colorMap = {
+        started: DiscordColors.INFO,
+        success: DiscordColors.SUCCESS,
+        failed: DiscordColors.ERROR,
+      };
+
+      return sendDiscordEmbed(
+        createEmbed({
+          title: `Deployment ${params.status.charAt(0).toUpperCase() + params.status.slice(1)}`,
+          color: colorMap[params.status],
+          fields: [
+            { name: "Environment", value: params.environment, inline: true },
+            { name: "Version", value: params.version, inline: true },
+          ],
+        })
+      );
+    }
+
+edge_cases:
+  - id: rate-limiting
+    symptom: "Webhook returns 429 Too Many Requests"
+    cause: "Sending too many messages too quickly"
+    solution: "Implement rate limiting (30 messages/minute per webhook), queue messages"
+
+  - id: message-too-long
+    symptom: "Message not sent or truncated"
+    cause: "Discord has message length limits"
+    solution: "Limit embed description to 4096 chars, total embed to 6000 chars"
+
+  - id: invalid-webhook
+    symptom: "Webhook returns 404"
+    cause: "Webhook deleted or URL incorrect"
+    solution: "Verify webhook URL in Discord settings, create new webhook if needed"
+
+  - id: embed-validation
+    symptom: "Webhook returns 400 Bad Request"
+    cause: "Invalid embed structure"
+    solution: "Validate embed fields, check color is valid integer, ensure required fields present"
+
+validation:
+  manual_test:
+    - "Create webhook in Discord channel"
+    - "Send test message"
+    - "Verify message appears in channel"
+    - "Test embed with all fields"
+    - "Test error notification"

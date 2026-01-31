@@ -1,0 +1,285 @@
+id: zapier-webhook
+version: "1.0.0"
+updated_at: "2026-01-31"
+author: "nyko-team"
+status: beta
+
+name: "Zapier/n8n Webhook Triggers"
+description: "Trigger automation workflows via Zapier and n8n webhooks"
+
+category: integrations
+tags:
+  - zapier
+  - n8n
+  - webhook
+  - automation
+  - workflow
+
+difficulty: beginner
+time_estimate: "15-20 min"
+
+stack:
+  required:
+    - name: "next"
+      version: "^15.1.0"
+      reason: "Next.js App Router"
+
+requires: []
+
+enables: []
+
+env_vars:
+  optional:
+    - key: ZAPIER_WEBHOOK_URL
+      description: "Zapier webhook URL"
+      format: "https://hooks.zapier.com/hooks/catch/xxx/xxx/"
+      where_to_find: "Zapier > Create Zap > Webhooks by Zapier trigger"
+    - key: N8N_WEBHOOK_URL
+      description: "n8n webhook URL"
+      format: "https://your-n8n.com/webhook/xxx"
+      where_to_find: "n8n > Webhook node > Production URL"
+
+external_setup:
+  - service: "Zapier"
+    url: "https://zapier.com"
+    steps:
+      - "Create new Zap"
+      - "Select Webhooks by Zapier as trigger"
+      - "Choose Catch Hook"
+      - "Copy webhook URL"
+      - "Test with sample data"
+      - "Connect to actions"
+  - service: "n8n"
+    url: "https://n8n.io"
+    steps:
+      - "Create new workflow"
+      - "Add Webhook node as trigger"
+      - "Set HTTP Method to POST"
+      - "Copy Production URL"
+      - "Connect to other nodes"
+
+files:
+  - path: "lib/webhooks/automation.ts"
+    action: create
+    description: "Automation webhook client"
+    priority: 1
+
+  - path: "lib/webhooks/events.ts"
+    action: create
+    description: "Event type definitions and triggers"
+    priority: 2
+
+code:
+  lib/webhooks/automation.ts: |
+    type WebhookProvider = "zapier" | "n8n" | "custom";
+
+    interface WebhookConfig {
+      provider: WebhookProvider;
+      url: string;
+      secret?: string;
+    }
+
+    interface WebhookPayload {
+      event: string;
+      timestamp: string;
+      data: Record<string, unknown>;
+    }
+
+    const webhooks: WebhookConfig[] = [];
+
+    export function registerWebhook(config: WebhookConfig) {
+      webhooks.push(config);
+    }
+
+    export function initializeWebhooks() {
+      if (process.env.ZAPIER_WEBHOOK_URL) {
+        registerWebhook({
+          provider: "zapier",
+          url: process.env.ZAPIER_WEBHOOK_URL,
+        });
+      }
+
+      if (process.env.N8N_WEBHOOK_URL) {
+        registerWebhook({
+          provider: "n8n",
+          url: process.env.N8N_WEBHOOK_URL,
+        });
+      }
+    }
+
+    export async function triggerWebhook(
+      event: string,
+      data: Record<string, unknown>,
+      options?: { providers?: WebhookProvider[] }
+    ): Promise<{ success: boolean; results: Array<{ provider: string; success: boolean; error?: string }> }> {
+      const payload: WebhookPayload = {
+        event,
+        timestamp: new Date().toISOString(),
+        data,
+      };
+
+      const targetWebhooks = options?.providers
+        ? webhooks.filter((w) => options.providers?.includes(w.provider))
+        : webhooks;
+
+      const results = await Promise.all(
+        targetWebhooks.map(async (webhook) => {
+          try {
+            const response = await fetch(webhook.url, {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+                ...(webhook.secret ? { "X-Webhook-Secret": webhook.secret } : {}),
+              },
+              body: JSON.stringify(payload),
+            });
+
+            if (!response.ok) {
+              return {
+                provider: webhook.provider,
+                success: false,
+                error: `HTTP ${response.status}`,
+              };
+            }
+
+            return { provider: webhook.provider, success: true };
+          } catch (error) {
+            return {
+              provider: webhook.provider,
+              success: false,
+              error: error instanceof Error ? error.message : "Unknown error",
+            };
+          }
+        })
+      );
+
+      return {
+        success: results.every((r) => r.success),
+        results,
+      };
+    }
+
+    export async function triggerZapier(event: string, data: Record<string, unknown>) {
+      return triggerWebhook(event, data, { providers: ["zapier"] });
+    }
+
+    export async function triggerN8n(event: string, data: Record<string, unknown>) {
+      return triggerWebhook(event, data, { providers: ["n8n"] });
+    }
+
+  lib/webhooks/events.ts: |
+    import { triggerWebhook, initializeWebhooks } from "./automation";
+
+    // Initialize on module load
+    initializeWebhooks();
+
+    export const AutomationEvents = {
+      USER_CREATED: "user.created",
+      USER_UPDATED: "user.updated",
+      USER_DELETED: "user.deleted",
+      SUBSCRIPTION_CREATED: "subscription.created",
+      SUBSCRIPTION_CANCELLED: "subscription.cancelled",
+      PAYMENT_RECEIVED: "payment.received",
+      PAYMENT_FAILED: "payment.failed",
+      ORDER_CREATED: "order.created",
+      ORDER_COMPLETED: "order.completed",
+      FORM_SUBMITTED: "form.submitted",
+      FEEDBACK_RECEIVED: "feedback.received",
+    } as const;
+
+    export async function onUserCreated(user: {
+      id: string;
+      email: string;
+      name?: string;
+      createdAt: Date;
+    }) {
+      return triggerWebhook(AutomationEvents.USER_CREATED, {
+        user_id: user.id,
+        email: user.email,
+        name: user.name,
+        created_at: user.createdAt.toISOString(),
+      });
+    }
+
+    export async function onSubscriptionCreated(subscription: {
+      userId: string;
+      plan: string;
+      amount: number;
+      currency: string;
+    }) {
+      return triggerWebhook(AutomationEvents.SUBSCRIPTION_CREATED, {
+        user_id: subscription.userId,
+        plan: subscription.plan,
+        amount: subscription.amount,
+        currency: subscription.currency,
+      });
+    }
+
+    export async function onPaymentReceived(payment: {
+      userId: string;
+      amount: number;
+      currency: string;
+      invoiceId: string;
+    }) {
+      return triggerWebhook(AutomationEvents.PAYMENT_RECEIVED, {
+        user_id: payment.userId,
+        amount: payment.amount,
+        currency: payment.currency,
+        invoice_id: payment.invoiceId,
+      });
+    }
+
+    export async function onFormSubmitted(form: {
+      formId: string;
+      userId?: string;
+      data: Record<string, unknown>;
+    }) {
+      return triggerWebhook(AutomationEvents.FORM_SUBMITTED, {
+        form_id: form.formId,
+        user_id: form.userId,
+        form_data: form.data,
+      });
+    }
+
+    export async function onFeedbackReceived(feedback: {
+      userId?: string;
+      type: string;
+      message: string;
+      rating?: number;
+    }) {
+      return triggerWebhook(AutomationEvents.FEEDBACK_RECEIVED, {
+        user_id: feedback.userId,
+        type: feedback.type,
+        message: feedback.message,
+        rating: feedback.rating,
+      });
+    }
+
+edge_cases:
+  - id: webhook-timeout
+    symptom: "Webhook trigger times out"
+    cause: "Automation workflow takes too long"
+    solution: "Use async/fire-and-forget pattern, don't wait for response"
+
+  - id: payload-too-large
+    symptom: "Webhook fails with payload error"
+    cause: "Data exceeds size limits (Zapier: 6MB)"
+    solution: "Limit payload size, send reference IDs instead of full data"
+
+  - id: rate-limiting
+    symptom: "Webhooks throttled or blocked"
+    cause: "Too many triggers in short time"
+    solution: "Implement queue and batch similar events"
+
+  - id: schema-changes
+    symptom: "Automation workflow breaks"
+    cause: "Payload structure changed"
+    solution: "Version your events, maintain backwards compatibility"
+
+validation:
+  manual_test:
+    - "Create Zapier/n8n webhook"
+    - "Register webhook URL"
+    - "Trigger test event"
+    - "Verify webhook received data"
+    - "Check automation workflow executes"
