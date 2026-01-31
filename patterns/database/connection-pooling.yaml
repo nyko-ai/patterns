@@ -1,0 +1,504 @@
+id: connection-pooling
+version: "1.0.0"
+updated_at: "2026-01-31"
+author: "nyko-team"
+status: beta
+
+name: "Database Connection Pooling"
+description: "Configure connection pooling with Supavisor, PgBouncer, or Prisma for serverless"
+
+category: database
+tags:
+  - postgres
+  - connection-pooling
+  - pgbouncer
+  - supavisor
+  - serverless
+
+difficulty: intermediate
+time_estimate: "25-30 min"
+
+stack:
+  required:
+    - name: "next"
+      version: "^15.1.0"
+      reason: "App Router"
+    - name: "@prisma/client"
+      version: "^7.3.0"
+      reason: "Prisma ORM"
+    - name: "prisma"
+      version: "^7.3.0"
+      reason: "Prisma CLI"
+
+requires: []
+
+enables: []
+
+env_vars:
+  required:
+    - key: DATABASE_URL
+      description: "Direct database connection URL"
+      format: "postgresql://user:pass@host:5432/db"
+      where_to_find: "Database provider dashboard"
+    - key: DATABASE_URL_POOLED
+      description: "Pooled connection URL for queries"
+      format: "postgresql://user:pass@host:6543/db?pgbouncer=true"
+      where_to_find: "Supabase: Settings > Database > Connection pooling"
+
+external_setup:
+  - service: "Supabase (Supavisor)"
+    url: "https://supabase.com/dashboard"
+    steps:
+      - "Go to Settings > Database"
+      - "Find the Connection pooling section"
+      - "Copy the pooled connection string (port 6543)"
+      - "Use pooled URL for application queries"
+      - "Use direct URL for migrations"
+
+  - service: "Neon (Built-in pooling)"
+    url: "https://console.neon.tech"
+    steps:
+      - "Connection strings include pooling by default"
+      - "Use ?sslmode=require for connections"
+      - "Configure connection limits in project settings"
+
+files:
+  - path: "lib/db/prisma.ts"
+    action: create
+    description: "Prisma client with connection pooling"
+    priority: 1
+
+  - path: "prisma/schema.prisma"
+    action: create
+    description: "Prisma schema with datasource config"
+    priority: 2
+
+  - path: "lib/db/connection-manager.ts"
+    action: create
+    description: "Connection management utilities"
+    priority: 3
+
+  - path: "app/api/health/db/route.ts"
+    action: create
+    description: "Database health check endpoint"
+    priority: 4
+
+code:
+  lib/db/prisma.ts: |
+    import { PrismaClient } from "@prisma/client";
+
+    /**
+     * Prisma Client Singleton for Next.js
+     *
+     * In development, hot reloading can create multiple instances.
+     * In production, we want a single instance for connection pooling.
+     */
+
+    const globalForPrisma = globalThis as unknown as {
+      prisma: PrismaClient | undefined;
+    };
+
+    function createPrismaClient(): PrismaClient {
+      return new PrismaClient({
+        log:
+          process.env.NODE_ENV === "development"
+            ? ["query", "error", "warn"]
+            : ["error"],
+
+        // Configure connection pool
+        datasources: {
+          db: {
+            url: process.env.DATABASE_URL_POOLED || process.env.DATABASE_URL,
+          },
+        },
+      });
+    }
+
+    export const prisma = globalForPrisma.prisma ?? createPrismaClient();
+
+    if (process.env.NODE_ENV !== "production") {
+      globalForPrisma.prisma = prisma;
+    }
+
+    /**
+     * Direct connection for migrations and schema changes
+     * Bypasses connection pooler for DDL operations
+     */
+    export function getDirectClient(): PrismaClient {
+      return new PrismaClient({
+        datasources: {
+          db: {
+            url: process.env.DATABASE_URL, // Direct, not pooled
+          },
+        },
+      });
+    }
+
+    /**
+     * Disconnect client (useful for serverless cleanup)
+     */
+    export async function disconnect(): Promise<void> {
+      await prisma.$disconnect();
+    }
+
+    /**
+     * Health check
+     */
+    export async function checkConnection(): Promise<boolean> {
+      try {
+        await prisma.$queryRaw`SELECT 1`;
+        return true;
+      } catch {
+        return false;
+      }
+    }
+
+    /**
+     * Get connection pool stats (if using extensions)
+     */
+    export async function getPoolStats(): Promise<{
+      activeConnections: number;
+      idleConnections: number;
+      waitingRequests: number;
+    } | null> {
+      try {
+        // This works with pgbouncer SHOW commands
+        // Note: May not work with all poolers
+        const result = await prisma.$queryRawUnsafe<
+          { active: number; waiting: number; idle: number }[]
+        >("SHOW POOLS");
+
+        if (result[0]) {
+          return {
+            activeConnections: result[0].active || 0,
+            idleConnections: result[0].idle || 0,
+            waitingRequests: result[0].waiting || 0,
+          };
+        }
+        return null;
+      } catch {
+        // Pool stats not available
+        return null;
+      }
+    }
+
+  prisma/schema.prisma: |
+    // Prisma Schema with Connection Pooling Configuration
+
+    generator client {
+      provider        = "prisma-client-js"
+      previewFeatures = ["driverAdapters"]
+    }
+
+    datasource db {
+      provider  = "postgresql"
+      url       = env("DATABASE_URL_POOLED")
+      directUrl = env("DATABASE_URL")
+      // directUrl is used for migrations
+      // url (pooled) is used for queries
+    }
+
+    // Example models
+    model User {
+      id        String   @id @default(uuid())
+      email     String   @unique
+      name      String?
+      posts     Post[]
+      createdAt DateTime @default(now()) @map("created_at")
+      updatedAt DateTime @updatedAt @map("updated_at")
+
+      @@map("users")
+    }
+
+    model Post {
+      id        String   @id @default(uuid())
+      title     String
+      content   String?
+      published Boolean  @default(false)
+      authorId  String   @map("author_id")
+      author    User     @relation(fields: [authorId], references: [id])
+      createdAt DateTime @default(now()) @map("created_at")
+      updatedAt DateTime @updatedAt @map("updated_at")
+
+      @@map("posts")
+    }
+
+  lib/db/connection-manager.ts: |
+    import { prisma, disconnect, checkConnection } from "./prisma";
+
+    /**
+     * Connection pool configuration recommendations
+     */
+    export const POOL_CONFIG = {
+      // Supabase Supavisor defaults
+      supabase: {
+        poolMode: "transaction", // or "session"
+        maxConnections: 15, // Free tier
+        statementTimeout: 30000, // 30 seconds
+      },
+
+      // Neon serverless
+      neon: {
+        poolMode: "transaction",
+        maxConnections: 10,
+        idleTimeout: 300, // 5 minutes
+      },
+
+      // Self-hosted PgBouncer
+      pgbouncer: {
+        poolMode: "transaction", // Recommended for serverless
+        maxConnections: 100,
+        defaultPoolSize: 20,
+        minPoolSize: 5,
+        reservePoolSize: 5,
+      },
+    };
+
+    /**
+     * Retry configuration for transient errors
+     */
+    export interface RetryConfig {
+      maxRetries: number;
+      baseDelayMs: number;
+      maxDelayMs: number;
+    }
+
+    const DEFAULT_RETRY: RetryConfig = {
+      maxRetries: 3,
+      baseDelayMs: 100,
+      maxDelayMs: 2000,
+    };
+
+    /**
+     * Execute with retry for connection errors
+     */
+    export async function withRetry<T>(
+      operation: () => Promise<T>,
+      config: Partial<RetryConfig> = {}
+    ): Promise<T> {
+      const { maxRetries, baseDelayMs, maxDelayMs } = {
+        ...DEFAULT_RETRY,
+        ...config,
+      };
+
+      let lastError: Error | null = null;
+
+      for (let attempt = 0; attempt <= maxRetries; attempt++) {
+        try {
+          return await operation();
+        } catch (error) {
+          lastError = error as Error;
+
+          // Only retry on connection errors
+          if (!isRetryableError(error)) {
+            throw error;
+          }
+
+          if (attempt < maxRetries) {
+            const delay = Math.min(
+              baseDelayMs * Math.pow(2, attempt),
+              maxDelayMs
+            );
+            await sleep(delay);
+          }
+        }
+      }
+
+      throw lastError;
+    }
+
+    /**
+     * Check if error is retryable (connection/pool related)
+     */
+    function isRetryableError(error: unknown): boolean {
+      if (!(error instanceof Error)) return false;
+
+      const retryableMessages = [
+        "Connection refused",
+        "Connection terminated",
+        "Connection reset",
+        "ECONNREFUSED",
+        "ETIMEDOUT",
+        "too many connections",
+        "connection pool timeout",
+        "prepared statement",
+        "server closed the connection",
+      ];
+
+      return retryableMessages.some((msg) =>
+        error.message.toLowerCase().includes(msg.toLowerCase())
+      );
+    }
+
+    function sleep(ms: number): Promise<void> {
+      return new Promise((resolve) => setTimeout(resolve, ms));
+    }
+
+    /**
+     * Transaction wrapper with timeout
+     */
+    export async function withTransaction<T>(
+      operation: (tx: typeof prisma) => Promise<T>,
+      options: { timeout?: number } = {}
+    ): Promise<T> {
+      const { timeout = 30000 } = options;
+
+      return prisma.$transaction(operation, {
+        maxWait: 5000, // Wait for connection
+        timeout, // Transaction timeout
+      });
+    }
+
+    /**
+     * Serverless-safe query wrapper
+     */
+    export async function query<T>(
+      operation: () => Promise<T>
+    ): Promise<T> {
+      try {
+        return await withRetry(operation);
+      } finally {
+        // In serverless, consider disconnecting to free connections
+        // Note: This adds latency, only use if hitting connection limits
+        // await disconnect();
+      }
+    }
+
+    /**
+     * Graceful shutdown handler
+     */
+    export async function gracefulShutdown(): Promise<void> {
+      console.log("Closing database connections...");
+      await disconnect();
+      console.log("Database connections closed");
+    }
+
+    // Register shutdown handlers
+    if (typeof process !== "undefined") {
+      process.on("SIGTERM", async () => {
+        await gracefulShutdown();
+        process.exit(0);
+      });
+
+      process.on("SIGINT", async () => {
+        await gracefulShutdown();
+        process.exit(0);
+      });
+    }
+
+  app/api/health/db/route.ts: |
+    import { NextResponse } from "next/server";
+    import { checkConnection, getPoolStats } from "@/lib/db/prisma";
+
+    export const dynamic = "force-dynamic";
+
+    export async function GET() {
+      try {
+        const startTime = Date.now();
+        const isConnected = await checkConnection();
+        const latency = Date.now() - startTime;
+
+        if (!isConnected) {
+          return NextResponse.json(
+            {
+              status: "unhealthy",
+              database: "disconnected",
+            },
+            { status: 503 }
+          );
+        }
+
+        // Try to get pool stats (may not be available)
+        const poolStats = await getPoolStats();
+
+        return NextResponse.json({
+          status: "healthy",
+          database: "connected",
+          latencyMs: latency,
+          pool: poolStats,
+          timestamp: new Date().toISOString(),
+        });
+      } catch (error) {
+        console.error("Health check failed:", error);
+
+        return NextResponse.json(
+          {
+            status: "unhealthy",
+            database: "error",
+            error: error instanceof Error ? error.message : "Unknown error",
+          },
+          { status: 503 }
+        );
+      }
+    }
+
+edge_cases:
+  - id: prepared-statement-error
+    symptom: "Error: prepared statement already exists"
+    cause: "PgBouncer in transaction mode doesn't support prepared statements"
+    solution: |
+      1. Use statement pooling mode if possible
+      2. Or disable prepared statements in Prisma:
+
+      datasource db {
+        provider = "postgresql"
+        url      = env("DATABASE_URL_POOLED")
+      }
+
+      // In connection string, add:
+      ?pgbouncer=true&connection_limit=1
+
+  - id: connection-timeout
+    symptom: "Timed out fetching a new connection from the pool"
+    cause: "All pool connections are in use"
+    solution: |
+      1. Increase pool size in your pooler config
+      2. Reduce query time with indexes and optimization
+      3. Use connection timeouts:
+
+      const prisma = new PrismaClient({
+        datasources: {
+          db: {
+            url: `${process.env.DATABASE_URL}?connection_timeout=10`,
+          },
+        },
+      });
+
+  - id: too-many-connections
+    symptom: "FATAL: too many connections for role"
+    cause: "Serverless functions creating too many direct connections"
+    solution: |
+      1. Always use pooled connection URL
+      2. Use singleton pattern (provided in this pattern)
+      3. Disconnect after long-running operations:
+
+      try {
+        await operation();
+      } finally {
+        await prisma.$disconnect();
+      }
+
+  - id: migration-fails
+    symptom: "Migration fails with pool errors"
+    cause: "Running migrations through connection pooler"
+    solution: |
+      Use direct URL for migrations:
+
+      # In schema.prisma
+      datasource db {
+        url       = env("DATABASE_URL_POOLED")  # For queries
+        directUrl = env("DATABASE_URL")          # For migrations
+      }
+
+      # Run migrations with direct URL
+      npx prisma migrate deploy
+
+validation:
+  manual_test:
+    - "Configure DATABASE_URL and DATABASE_URL_POOLED"
+    - "Run prisma generate"
+    - "Run prisma migrate deploy"
+    - "Call the health check endpoint"
+    - "Verify connection is working"
+    - "Test under concurrent load"
+    - "Monitor connection count in database"

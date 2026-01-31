@@ -1,0 +1,604 @@
+id: full-text-search
+version: "1.0.0"
+updated_at: "2026-01-31"
+author: "nyko-team"
+status: beta
+
+name: "Postgres Full-Text Search"
+description: "Implement full-text search with Postgres/Supabase using tsvector and GIN indexes"
+
+category: database
+tags:
+  - postgres
+  - supabase
+  - search
+  - fts
+  - tsvector
+
+difficulty: intermediate
+time_estimate: "30-40 min"
+
+stack:
+  required:
+    - name: "next"
+      version: "^15.1.0"
+      reason: "App Router"
+    - name: "@supabase/supabase-js"
+      version: "^2.93.0"
+      reason: "Supabase client"
+
+requires:
+  - supabase-client-nextjs
+
+enables: []
+
+env_vars:
+  required:
+    - key: NEXT_PUBLIC_SUPABASE_URL
+      description: "Supabase project URL"
+      format: "https://xxx.supabase.co"
+      where_to_find: "Supabase Dashboard > Settings > API"
+    - key: NEXT_PUBLIC_SUPABASE_ANON_KEY
+      description: "Supabase anonymous key"
+      format: "eyJ..."
+      where_to_find: "Supabase Dashboard > Settings > API"
+
+external_setup:
+  - service: "Supabase"
+    url: "https://supabase.com/dashboard"
+    steps:
+      - "Create a Supabase project"
+      - "Run the SQL migrations to add FTS columns and indexes"
+      - "Create the search function"
+      - "Test with sample data"
+
+files:
+  - path: "supabase/migrations/001_full_text_search.sql"
+    action: create
+    description: "FTS migration with tsvector and indexes"
+    priority: 1
+
+  - path: "lib/search/full-text-search.ts"
+    action: create
+    description: "Full-text search utilities"
+    priority: 2
+
+  - path: "app/api/search/route.ts"
+    action: create
+    description: "Search API endpoint"
+    priority: 3
+
+  - path: "hooks/use-search.ts"
+    action: create
+    description: "Search React hook with debounce"
+    priority: 4
+
+code:
+  supabase/migrations/001_full_text_search.sql: |
+    -- Add tsvector column to your table
+    -- Example: articles table with title and content
+
+    -- Add the search vector column
+    ALTER TABLE articles
+    ADD COLUMN IF NOT EXISTS search_vector tsvector
+    GENERATED ALWAYS AS (
+      setweight(to_tsvector('english', coalesce(title, '')), 'A') ||
+      setweight(to_tsvector('english', coalesce(content, '')), 'B')
+    ) STORED;
+
+    -- Create GIN index for fast searching
+    CREATE INDEX IF NOT EXISTS articles_search_idx
+    ON articles USING GIN (search_vector);
+
+    -- Create a search function
+    CREATE OR REPLACE FUNCTION search_articles(
+      search_query text,
+      result_limit int DEFAULT 20,
+      result_offset int DEFAULT 0
+    )
+    RETURNS TABLE (
+      id uuid,
+      title text,
+      content text,
+      created_at timestamptz,
+      rank real,
+      headline_title text,
+      headline_content text
+    )
+    LANGUAGE plpgsql
+    AS $$
+    DECLARE
+      query tsquery;
+    BEGIN
+      -- Convert search query to tsquery with prefix matching
+      query := plainto_tsquery('english', search_query);
+
+      -- If simple query fails, try websearch format
+      IF query = ''::tsquery THEN
+        query := websearch_to_tsquery('english', search_query);
+      END IF;
+
+      RETURN QUERY
+      SELECT
+        a.id,
+        a.title,
+        a.content,
+        a.created_at,
+        ts_rank(a.search_vector, query) as rank,
+        ts_headline('english', a.title, query,
+          'MaxWords=10, MinWords=3, StartSel=<mark>, StopSel=</mark>'
+        ) as headline_title,
+        ts_headline('english', a.content, query,
+          'MaxWords=35, MinWords=15, StartSel=<mark>, StopSel=</mark>'
+        ) as headline_content
+      FROM articles a
+      WHERE a.search_vector @@ query
+      ORDER BY rank DESC, a.created_at DESC
+      LIMIT result_limit
+      OFFSET result_offset;
+    END;
+    $$;
+
+    -- Create function for autocomplete suggestions
+    CREATE OR REPLACE FUNCTION search_suggestions(
+      search_query text,
+      suggestion_limit int DEFAULT 5
+    )
+    RETURNS TABLE (
+      suggestion text,
+      count bigint
+    )
+    LANGUAGE sql
+    AS $$
+      SELECT
+        word as suggestion,
+        ndoc as count
+      FROM ts_stat(
+        'SELECT search_vector FROM articles'
+      )
+      WHERE word ILIKE search_query || '%'
+      ORDER BY ndoc DESC, word
+      LIMIT suggestion_limit;
+    $$;
+
+    -- Optional: Add trigger for real-time updates (if not using GENERATED column)
+    -- CREATE OR REPLACE FUNCTION update_search_vector()
+    -- RETURNS trigger AS $$
+    -- BEGIN
+    --   NEW.search_vector :=
+    --     setweight(to_tsvector('english', coalesce(NEW.title, '')), 'A') ||
+    --     setweight(to_tsvector('english', coalesce(NEW.content, '')), 'B');
+    --   RETURN NEW;
+    -- END;
+    -- $$ LANGUAGE plpgsql;
+    --
+    -- CREATE TRIGGER articles_search_update
+    -- BEFORE INSERT OR UPDATE ON articles
+    -- FOR EACH ROW EXECUTE FUNCTION update_search_vector();
+
+  lib/search/full-text-search.ts: |
+    import { createClient } from "@/lib/supabase/client";
+
+    export interface SearchResult {
+      id: string;
+      title: string;
+      content: string;
+      created_at: string;
+      rank: number;
+      headline_title: string;
+      headline_content: string;
+    }
+
+    export interface SearchOptions {
+      limit?: number;
+      offset?: number;
+      table?: string;
+      columns?: string[];
+    }
+
+    /**
+     * Search using the database function
+     */
+    export async function searchArticles(
+      query: string,
+      options: SearchOptions = {}
+    ): Promise<{ results: SearchResult[]; error: Error | null }> {
+      const { limit = 20, offset = 0 } = options;
+
+      if (!query.trim()) {
+        return { results: [], error: null };
+      }
+
+      const supabase = createClient();
+
+      const { data, error } = await supabase.rpc("search_articles", {
+        search_query: query,
+        result_limit: limit,
+        result_offset: offset,
+      });
+
+      if (error) {
+        console.error("Search error:", error);
+        return { results: [], error: new Error(error.message) };
+      }
+
+      return { results: data || [], error: null };
+    }
+
+    /**
+     * Get autocomplete suggestions
+     */
+    export async function getSearchSuggestions(
+      query: string,
+      limit: number = 5
+    ): Promise<{ suggestions: string[]; error: Error | null }> {
+      if (!query.trim() || query.length < 2) {
+        return { suggestions: [], error: null };
+      }
+
+      const supabase = createClient();
+
+      const { data, error } = await supabase.rpc("search_suggestions", {
+        search_query: query,
+        suggestion_limit: limit,
+      });
+
+      if (error) {
+        console.error("Suggestions error:", error);
+        return { suggestions: [], error: new Error(error.message) };
+      }
+
+      return {
+        suggestions: (data || []).map((s: { suggestion: string }) => s.suggestion),
+        error: null,
+      };
+    }
+
+    /**
+     * Direct table search using Supabase textSearch
+     */
+    export async function searchWithTextSearch<T>(
+      table: string,
+      column: string,
+      query: string,
+      options: {
+        select?: string;
+        limit?: number;
+        orderBy?: { column: string; ascending?: boolean };
+      } = {}
+    ): Promise<{ results: T[]; error: Error | null }> {
+      const { select = "*", limit = 20, orderBy } = options;
+
+      if (!query.trim()) {
+        return { results: [], error: null };
+      }
+
+      const supabase = createClient();
+
+      let queryBuilder = supabase
+        .from(table)
+        .select(select)
+        .textSearch(column, query, {
+          type: "websearch",
+          config: "english",
+        })
+        .limit(limit);
+
+      if (orderBy) {
+        queryBuilder = queryBuilder.order(orderBy.column, {
+          ascending: orderBy.ascending ?? false,
+        });
+      }
+
+      const { data, error } = await queryBuilder;
+
+      if (error) {
+        console.error("TextSearch error:", error);
+        return { results: [], error: new Error(error.message) };
+      }
+
+      return { results: (data as T[]) || [], error: null };
+    }
+
+    /**
+     * Build tsquery from user input
+     * Handles special characters and creates proper query
+     */
+    export function buildSearchQuery(input: string): string {
+      // Remove special characters that break tsquery
+      const sanitized = input
+        .replace(/[&|!():<>'"*]/g, " ")
+        .trim()
+        .split(/\s+/)
+        .filter(Boolean);
+
+      if (sanitized.length === 0) return "";
+
+      // Join with & for AND search, add :* for prefix matching
+      return sanitized.map((word) => `${word}:*`).join(" & ");
+    }
+
+    /**
+     * Highlight search terms in text
+     */
+    export function highlightSearchTerms(
+      text: string,
+      query: string,
+      className: string = "bg-yellow-200"
+    ): string {
+      if (!query.trim()) return text;
+
+      const terms = query.split(/\s+/).filter(Boolean);
+      let result = text;
+
+      for (const term of terms) {
+        const regex = new RegExp(`(${escapeRegex(term)})`, "gi");
+        result = result.replace(regex, `<mark class="${className}">$1</mark>`);
+      }
+
+      return result;
+    }
+
+    function escapeRegex(string: string): string {
+      return string.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    }
+
+  app/api/search/route.ts: |
+    import { NextRequest, NextResponse } from "next/server";
+    import {
+      searchArticles,
+      getSearchSuggestions,
+    } from "@/lib/search/full-text-search";
+
+    export async function GET(request: NextRequest) {
+      try {
+        const { searchParams } = new URL(request.url);
+        const query = searchParams.get("q") || "";
+        const type = searchParams.get("type") || "search";
+        const limit = parseInt(searchParams.get("limit") || "20");
+        const offset = parseInt(searchParams.get("offset") || "0");
+
+        if (!query.trim()) {
+          return NextResponse.json({ results: [], suggestions: [] });
+        }
+
+        if (type === "suggestions") {
+          const { suggestions, error } = await getSearchSuggestions(query, limit);
+
+          if (error) {
+            return NextResponse.json({ error: error.message }, { status: 500 });
+          }
+
+          return NextResponse.json({ suggestions });
+        }
+
+        // Default: full search
+        const { results, error } = await searchArticles(query, { limit, offset });
+
+        if (error) {
+          return NextResponse.json({ error: error.message }, { status: 500 });
+        }
+
+        return NextResponse.json({
+          results,
+          query,
+          count: results.length,
+          hasMore: results.length === limit,
+        });
+      } catch (error) {
+        console.error("Search API error:", error);
+        return NextResponse.json(
+          { error: "Search failed" },
+          { status: 500 }
+        );
+      }
+    }
+
+  hooks/use-search.ts: |
+    "use client";
+
+    import { useState, useEffect, useCallback, useRef } from "react";
+
+    interface SearchResult {
+      id: string;
+      title: string;
+      content: string;
+      created_at: string;
+      rank: number;
+      headline_title: string;
+      headline_content: string;
+    }
+
+    interface UseSearchOptions {
+      debounceMs?: number;
+      minLength?: number;
+      limit?: number;
+    }
+
+    export function useSearch(options: UseSearchOptions = {}) {
+      const { debounceMs = 300, minLength = 2, limit = 20 } = options;
+
+      const [query, setQuery] = useState("");
+      const [results, setResults] = useState<SearchResult[]>([]);
+      const [suggestions, setSuggestions] = useState<string[]>([]);
+      const [isLoading, setIsLoading] = useState(false);
+      const [error, setError] = useState<string | null>(null);
+
+      const abortControllerRef = useRef<AbortController | null>(null);
+
+      const search = useCallback(
+        async (searchQuery: string) => {
+          if (searchQuery.length < minLength) {
+            setResults([]);
+            setSuggestions([]);
+            return;
+          }
+
+          // Cancel previous request
+          if (abortControllerRef.current) {
+            abortControllerRef.current.abort();
+          }
+
+          abortControllerRef.current = new AbortController();
+          setIsLoading(true);
+          setError(null);
+
+          try {
+            const params = new URLSearchParams({
+              q: searchQuery,
+              limit: limit.toString(),
+            });
+
+            const response = await fetch(`/api/search?${params}`, {
+              signal: abortControllerRef.current.signal,
+            });
+
+            if (!response.ok) {
+              throw new Error("Search failed");
+            }
+
+            const data = await response.json();
+            setResults(data.results || []);
+          } catch (err) {
+            if (err instanceof Error && err.name === "AbortError") {
+              return; // Ignore aborted requests
+            }
+            setError(err instanceof Error ? err.message : "Search failed");
+            setResults([]);
+          } finally {
+            setIsLoading(false);
+          }
+        },
+        [limit, minLength]
+      );
+
+      const getSuggestions = useCallback(
+        async (searchQuery: string) => {
+          if (searchQuery.length < minLength) {
+            setSuggestions([]);
+            return;
+          }
+
+          try {
+            const params = new URLSearchParams({
+              q: searchQuery,
+              type: "suggestions",
+              limit: "5",
+            });
+
+            const response = await fetch(`/api/search?${params}`);
+            if (response.ok) {
+              const data = await response.json();
+              setSuggestions(data.suggestions || []);
+            }
+          } catch {
+            // Silently fail for suggestions
+          }
+        },
+        [minLength]
+      );
+
+      // Debounced search
+      useEffect(() => {
+        const timeoutId = setTimeout(() => {
+          if (query) {
+            search(query);
+            getSuggestions(query);
+          } else {
+            setResults([]);
+            setSuggestions([]);
+          }
+        }, debounceMs);
+
+        return () => clearTimeout(timeoutId);
+      }, [query, debounceMs, search, getSuggestions]);
+
+      // Cleanup on unmount
+      useEffect(() => {
+        return () => {
+          if (abortControllerRef.current) {
+            abortControllerRef.current.abort();
+          }
+        };
+      }, []);
+
+      const clearSearch = useCallback(() => {
+        setQuery("");
+        setResults([]);
+        setSuggestions([]);
+        setError(null);
+      }, []);
+
+      return {
+        query,
+        setQuery,
+        results,
+        suggestions,
+        isLoading,
+        error,
+        clearSearch,
+      };
+    }
+
+edge_cases:
+  - id: special-characters
+    symptom: "Search fails with syntax error"
+    cause: "Special characters in query break tsquery"
+    solution: |
+      Sanitize input before creating tsquery:
+
+      const sanitized = query
+        .replace(/[&|!():<>'"*]/g, " ")
+        .trim();
+
+      Or use websearch_to_tsquery which handles this.
+
+  - id: no-results-found
+    symptom: "Search returns no results for valid terms"
+    cause: "Terms not in tsvector or wrong language config"
+    solution: |
+      1. Check the tsvector contains the terms:
+         SELECT search_vector FROM articles WHERE id = 'xxx';
+
+      2. Try different language configs:
+         to_tsvector('simple', text) -- No stemming
+         to_tsvector('english', text) -- English stemming
+
+      3. Use prefix matching for partial words:
+         to_tsquery('english', 'term:*')
+
+  - id: slow-search
+    symptom: "Search queries are slow"
+    cause: "Missing GIN index or large dataset"
+    solution: |
+      1. Ensure GIN index exists:
+         CREATE INDEX CONCURRENTLY idx_search
+         ON articles USING GIN (search_vector);
+
+      2. Use EXPLAIN ANALYZE to check index usage:
+         EXPLAIN ANALYZE SELECT * FROM articles
+         WHERE search_vector @@ to_tsquery('term');
+
+      3. Consider partial indexes for common filters.
+
+  - id: stale-search-vector
+    symptom: "New content not appearing in search"
+    cause: "Search vector not updated on insert/update"
+    solution: |
+      Use GENERATED ALWAYS column (automatic) or trigger:
+
+      -- Trigger-based approach
+      CREATE TRIGGER update_search
+      BEFORE INSERT OR UPDATE ON articles
+      FOR EACH ROW
+      EXECUTE FUNCTION update_search_vector();
+
+validation:
+  manual_test:
+    - "Run the SQL migration"
+    - "Insert test articles with various content"
+    - "Search for single word"
+    - "Search for phrase"
+    - "Verify highlighting in results"
+    - "Test autocomplete suggestions"
+    - "Check search ranking order"

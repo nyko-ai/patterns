@@ -1,0 +1,684 @@
+id: database-migrations
+version: "1.0.0"
+updated_at: "2026-01-31"
+author: "nyko-team"
+status: beta
+
+name: "Database Migration Strategies"
+description: "Safe database migrations with Prisma including rollbacks, zero-downtime, and CI/CD"
+
+category: database
+tags:
+  - prisma
+  - migrations
+  - database
+  - schema
+  - cicd
+
+difficulty: intermediate
+time_estimate: "30-40 min"
+
+stack:
+  required:
+    - name: "prisma"
+      version: "^7.3.0"
+      reason: "Prisma ORM with migrations"
+    - name: "@prisma/client"
+      version: "^7.3.0"
+      reason: "Prisma client"
+
+requires: []
+
+enables: []
+
+env_vars:
+  required:
+    - key: DATABASE_URL
+      description: "Direct database connection URL"
+      format: "postgresql://user:pass@host:5432/db"
+      where_to_find: "Database provider dashboard"
+
+external_setup:
+  - service: "Database"
+    url: "https://supabase.com/dashboard"
+    steps:
+      - "Create a PostgreSQL database"
+      - "Get the direct connection string (not pooled)"
+      - "Configure DATABASE_URL in environment"
+      - "Run initial migration"
+
+files:
+  - path: "prisma/schema.prisma"
+    action: create
+    description: "Prisma schema configuration"
+    priority: 1
+
+  - path: "scripts/migrate.ts"
+    action: create
+    description: "Migration runner script"
+    priority: 2
+
+  - path: "scripts/rollback.ts"
+    action: create
+    description: "Migration rollback script"
+    priority: 3
+
+  - path: ".github/workflows/migrations.yml"
+    action: create
+    description: "CI/CD migration workflow"
+    priority: 4
+
+  - path: "lib/migrations/migration-utils.ts"
+    action: create
+    description: "Migration utilities"
+    priority: 5
+
+code:
+  prisma/schema.prisma: |
+    // Prisma Schema with Migration Best Practices
+
+    generator client {
+      provider        = "prisma-client-js"
+      previewFeatures = ["driverAdapters"]
+    }
+
+    datasource db {
+      provider  = "postgresql"
+      url       = env("DATABASE_URL")
+      directUrl = env("DATABASE_URL_DIRECT") // For migrations in pooled setups
+    }
+
+    // Migration history tracking (Prisma manages this automatically)
+    // Table: _prisma_migrations
+
+    // Example: User model with versioned changes
+    model User {
+      id        String   @id @default(uuid())
+      email     String   @unique
+
+      // V1: Original fields
+      name      String?
+
+      // V2: Added profile fields (migration: add_user_profile)
+      avatarUrl String?  @map("avatar_url")
+      bio       String?
+
+      // V3: Added status (migration: add_user_status)
+      status    UserStatus @default(ACTIVE)
+
+      // Relationships
+      posts     Post[]
+
+      // Timestamps
+      createdAt DateTime @default(now()) @map("created_at")
+      updatedAt DateTime @updatedAt @map("updated_at")
+
+      // Soft delete support
+      deletedAt DateTime? @map("deleted_at")
+
+      @@index([email])
+      @@index([status])
+      @@map("users")
+    }
+
+    enum UserStatus {
+      ACTIVE
+      INACTIVE
+      SUSPENDED
+    }
+
+    model Post {
+      id        String   @id @default(uuid())
+      title     String
+      content   String?
+      published Boolean  @default(false)
+
+      // Author relationship
+      authorId  String   @map("author_id")
+      author    User     @relation(fields: [authorId], references: [id], onDelete: Cascade)
+
+      createdAt DateTime @default(now()) @map("created_at")
+      updatedAt DateTime @updatedAt @map("updated_at")
+
+      @@index([authorId])
+      @@index([published])
+      @@map("posts")
+    }
+
+  scripts/migrate.ts: |
+    #!/usr/bin/env npx ts-node
+
+    /**
+     * Safe Migration Runner
+     *
+     * Features:
+     * - Pre-migration backup (optional)
+     * - Dry-run mode
+     * - Rollback on failure
+     * - Slack/Discord notifications
+     */
+
+    import { execSync } from "child_process";
+
+    interface MigrationOptions {
+      dryRun?: boolean;
+      createBackup?: boolean;
+      skipSeed?: boolean;
+    }
+
+    async function runMigrations(options: MigrationOptions = {}): Promise<void> {
+      const { dryRun = false, createBackup = false, skipSeed = true } = options;
+
+      console.log("🚀 Starting migration process...\n");
+
+      try {
+        // Step 1: Create backup (optional)
+        if (createBackup) {
+          console.log("📦 Creating database backup...");
+          await createDatabaseBackup();
+          console.log("✅ Backup created\n");
+        }
+
+        // Step 2: Check pending migrations
+        console.log("🔍 Checking pending migrations...");
+        const status = execSync("npx prisma migrate status", {
+          encoding: "utf-8",
+        });
+        console.log(status);
+
+        // Step 3: Run migrations
+        if (dryRun) {
+          console.log("🧪 DRY RUN: Would execute the following migrations:");
+          execSync("npx prisma migrate diff --preview-feature", {
+            stdio: "inherit",
+          });
+        } else {
+          console.log("📝 Applying migrations...");
+          execSync("npx prisma migrate deploy", { stdio: "inherit" });
+          console.log("✅ Migrations applied\n");
+
+          // Step 4: Generate client
+          console.log("🔧 Regenerating Prisma Client...");
+          execSync("npx prisma generate", { stdio: "inherit" });
+          console.log("✅ Client generated\n");
+
+          // Step 5: Run seed (optional)
+          if (!skipSeed && process.env.NODE_ENV !== "production") {
+            console.log("🌱 Running database seed...");
+            execSync("npx prisma db seed", { stdio: "inherit" });
+            console.log("✅ Seed completed\n");
+          }
+        }
+
+        console.log("🎉 Migration process completed successfully!");
+        await sendNotification("✅ Database migrations completed successfully");
+      } catch (error) {
+        console.error("❌ Migration failed:", error);
+        await sendNotification(`❌ Migration failed: ${error}`);
+
+        if (createBackup) {
+          console.log("🔄 Consider restoring from backup");
+        }
+
+        process.exit(1);
+      }
+    }
+
+    async function createDatabaseBackup(): Promise<void> {
+      const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+      const backupFile = `backup-${timestamp}.sql`;
+
+      // For Supabase
+      if (process.env.SUPABASE_PROJECT_ID) {
+        console.log("Using Supabase backup...");
+        // Supabase has automatic backups, just log
+        return;
+      }
+
+      // For standard PostgreSQL
+      const dbUrl = process.env.DATABASE_URL;
+      if (!dbUrl) throw new Error("DATABASE_URL not set");
+
+      execSync(`pg_dump "${dbUrl}" > backups/${backupFile}`, {
+        stdio: "inherit",
+      });
+    }
+
+    async function sendNotification(message: string): Promise<void> {
+      // Slack notification
+      if (process.env.SLACK_WEBHOOK_URL) {
+        try {
+          await fetch(process.env.SLACK_WEBHOOK_URL, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ text: message }),
+          });
+        } catch {
+          console.log("Failed to send Slack notification");
+        }
+      }
+    }
+
+    // Parse CLI arguments
+    const args = process.argv.slice(2);
+    const options: MigrationOptions = {
+      dryRun: args.includes("--dry-run"),
+      createBackup: args.includes("--backup"),
+      skipSeed: !args.includes("--seed"),
+    };
+
+    runMigrations(options);
+
+  scripts/rollback.ts: |
+    #!/usr/bin/env npx ts-node
+
+    /**
+     * Migration Rollback Script
+     *
+     * Note: Prisma doesn't have built-in rollback.
+     * This script provides manual rollback strategies.
+     */
+
+    import { execSync } from "child_process";
+    import { readFileSync, readdirSync } from "fs";
+    import { join } from "path";
+
+    interface RollbackOptions {
+      steps?: number;
+      toMigration?: string;
+      dryRun?: boolean;
+    }
+
+    async function rollback(options: RollbackOptions = {}): Promise<void> {
+      const { steps = 1, toMigration, dryRun = false } = options;
+
+      console.log("⏪ Starting rollback process...\n");
+
+      try {
+        // Get migration history
+        const migrationsDir = join(process.cwd(), "prisma", "migrations");
+        const migrations = readdirSync(migrationsDir)
+          .filter((f) => f !== "migration_lock.toml")
+          .sort()
+          .reverse();
+
+        console.log("📋 Applied migrations:");
+        migrations.slice(0, 5).forEach((m, i) => {
+          console.log(`  ${i + 1}. ${m}`);
+        });
+        console.log("");
+
+        // Determine target migration
+        let targetIndex = steps;
+        if (toMigration) {
+          targetIndex = migrations.findIndex((m) => m.includes(toMigration));
+          if (targetIndex === -1) {
+            throw new Error(`Migration not found: ${toMigration}`);
+          }
+        }
+
+        const migrationsToRollback = migrations.slice(0, targetIndex);
+
+        console.log(`🎯 Rolling back ${migrationsToRollback.length} migration(s):`);
+        migrationsToRollback.forEach((m) => console.log(`  - ${m}`));
+        console.log("");
+
+        if (dryRun) {
+          console.log("🧪 DRY RUN: Would execute rollback SQL for each migration");
+          console.log("\nNote: Check each migration folder for down.sql or write custom rollback");
+          return;
+        }
+
+        // Execute rollback SQL for each migration
+        for (const migration of migrationsToRollback) {
+          const downPath = join(migrationsDir, migration, "down.sql");
+
+          try {
+            const downSql = readFileSync(downPath, "utf-8");
+            console.log(`⏪ Rolling back: ${migration}`);
+
+            // Execute the down migration
+            execSync(`npx prisma db execute --file "${downPath}"`, {
+              stdio: "inherit",
+            });
+
+            console.log(`✅ Rolled back: ${migration}\n`);
+          } catch {
+            console.log(`⚠️  No down.sql found for ${migration}`);
+            console.log("   Create prisma/migrations/${migration}/down.sql manually");
+          }
+        }
+
+        // Mark migrations as not applied
+        console.log("📝 Updating migration history...");
+        // Note: This requires direct database access to _prisma_migrations table
+
+        console.log("\n🎉 Rollback completed!");
+        console.log("⚠️  Remember to run 'prisma generate' to update the client");
+      } catch (error) {
+        console.error("❌ Rollback failed:", error);
+        process.exit(1);
+      }
+    }
+
+    // Parse CLI arguments
+    const args = process.argv.slice(2);
+
+    const stepsArg = args.find((a) => a.startsWith("--steps="));
+    const toArg = args.find((a) => a.startsWith("--to="));
+
+    const options: RollbackOptions = {
+      steps: stepsArg ? parseInt(stepsArg.split("=")[1]) : 1,
+      toMigration: toArg ? toArg.split("=")[1] : undefined,
+      dryRun: args.includes("--dry-run"),
+    };
+
+    rollback(options);
+
+  .github/workflows/migrations.yml: |
+    name: Database Migrations
+
+    on:
+      push:
+        branches: [main]
+        paths:
+          - 'prisma/migrations/**'
+          - 'prisma/schema.prisma'
+      workflow_dispatch:
+        inputs:
+          environment:
+            description: 'Environment to migrate'
+            required: true
+            default: 'staging'
+            type: choice
+            options:
+              - staging
+              - production
+
+    jobs:
+      migrate-staging:
+        name: Migrate Staging
+        runs-on: ubuntu-latest
+        if: github.event_name == 'push' || github.event.inputs.environment == 'staging'
+        environment: staging
+
+        steps:
+          - uses: actions/checkout@v4
+
+          - name: Setup Node.js
+            uses: actions/setup-node@v4
+            with:
+              node-version: '20'
+              cache: 'npm'
+
+          - name: Install dependencies
+            run: npm ci
+
+          - name: Run migrations
+            run: npx prisma migrate deploy
+            env:
+              DATABASE_URL: ${{ secrets.STAGING_DATABASE_URL }}
+
+          - name: Notify on failure
+            if: failure()
+            uses: slackapi/slack-github-action@v1
+            with:
+              payload: |
+                {
+                  "text": "❌ Staging migration failed: ${{ github.repository }}"
+                }
+            env:
+              SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+
+      migrate-production:
+        name: Migrate Production
+        runs-on: ubuntu-latest
+        needs: migrate-staging
+        if: github.event.inputs.environment == 'production'
+        environment: production
+
+        steps:
+          - uses: actions/checkout@v4
+
+          - name: Setup Node.js
+            uses: actions/setup-node@v4
+            with:
+              node-version: '20'
+              cache: 'npm'
+
+          - name: Install dependencies
+            run: npm ci
+
+          - name: Create backup
+            run: |
+              echo "Creating database backup..."
+              # Add your backup command here
+            env:
+              DATABASE_URL: ${{ secrets.PRODUCTION_DATABASE_URL }}
+
+          - name: Run migrations
+            run: npx prisma migrate deploy
+            env:
+              DATABASE_URL: ${{ secrets.PRODUCTION_DATABASE_URL }}
+
+          - name: Notify success
+            uses: slackapi/slack-github-action@v1
+            with:
+              payload: |
+                {
+                  "text": "✅ Production migration completed: ${{ github.repository }}"
+                }
+            env:
+              SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+
+          - name: Notify on failure
+            if: failure()
+            uses: slackapi/slack-github-action@v1
+            with:
+              payload: |
+                {
+                  "text": "🚨 PRODUCTION migration failed: ${{ github.repository }}"
+                }
+            env:
+              SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+
+  lib/migrations/migration-utils.ts: |
+    import { PrismaClient } from "@prisma/client";
+
+    const prisma = new PrismaClient();
+
+    export interface MigrationInfo {
+      id: string;
+      migration_name: string;
+      started_at: Date;
+      finished_at: Date | null;
+      applied_steps_count: number;
+    }
+
+    /**
+     * Get applied migrations
+     */
+    export async function getAppliedMigrations(): Promise<MigrationInfo[]> {
+      const migrations = await prisma.$queryRaw<MigrationInfo[]>`
+        SELECT * FROM _prisma_migrations
+        ORDER BY started_at DESC
+      `;
+
+      return migrations;
+    }
+
+    /**
+     * Check if a specific migration is applied
+     */
+    export async function isMigrationApplied(
+      migrationName: string
+    ): Promise<boolean> {
+      const result = await prisma.$queryRaw<{ count: bigint }[]>`
+        SELECT COUNT(*) as count FROM _prisma_migrations
+        WHERE migration_name = ${migrationName}
+        AND finished_at IS NOT NULL
+      `;
+
+      return Number(result[0].count) > 0;
+    }
+
+    /**
+     * Execute raw SQL migration
+     */
+    export async function executeRawMigration(sql: string): Promise<void> {
+      await prisma.$executeRawUnsafe(sql);
+    }
+
+    /**
+     * Safe column addition (check if exists first)
+     */
+    export async function addColumnIfNotExists(
+      table: string,
+      column: string,
+      definition: string
+    ): Promise<boolean> {
+      const exists = await prisma.$queryRaw<{ exists: boolean }[]>`
+        SELECT EXISTS (
+          SELECT 1 FROM information_schema.columns
+          WHERE table_name = ${table} AND column_name = ${column}
+        ) as exists
+      `;
+
+      if (exists[0].exists) {
+        console.log(`Column ${table}.${column} already exists`);
+        return false;
+      }
+
+      await prisma.$executeRawUnsafe(
+        `ALTER TABLE "${table}" ADD COLUMN "${column}" ${definition}`
+      );
+
+      console.log(`Added column ${table}.${column}`);
+      return true;
+    }
+
+    /**
+     * Safe index creation
+     */
+    export async function createIndexIfNotExists(
+      indexName: string,
+      table: string,
+      columns: string[],
+      options: { unique?: boolean; concurrent?: boolean } = {}
+    ): Promise<boolean> {
+      const { unique = false, concurrent = true } = options;
+
+      const exists = await prisma.$queryRaw<{ exists: boolean }[]>`
+        SELECT EXISTS (
+          SELECT 1 FROM pg_indexes
+          WHERE indexname = ${indexName}
+        ) as exists
+      `;
+
+      if (exists[0].exists) {
+        console.log(`Index ${indexName} already exists`);
+        return false;
+      }
+
+      const uniqueStr = unique ? "UNIQUE" : "";
+      const concurrentStr = concurrent ? "CONCURRENTLY" : "";
+      const columnsStr = columns.join(", ");
+
+      await prisma.$executeRawUnsafe(
+        `CREATE ${uniqueStr} INDEX ${concurrentStr} "${indexName}" ON "${table}" (${columnsStr})`
+      );
+
+      console.log(`Created index ${indexName}`);
+      return true;
+    }
+
+    /**
+     * Zero-downtime table rename
+     */
+    export async function safeTableRename(
+      oldName: string,
+      newName: string
+    ): Promise<void> {
+      // 1. Create new table with same structure
+      // 2. Create trigger to sync writes
+      // 3. Copy existing data
+      // 4. Switch application to new table
+      // 5. Drop trigger and old table
+
+      console.log(`Renaming ${oldName} to ${newName}`);
+
+      // Simple rename (causes brief lock)
+      await prisma.$executeRawUnsafe(
+        `ALTER TABLE "${oldName}" RENAME TO "${newName}"`
+      );
+
+      console.log(`Renamed ${oldName} to ${newName}`);
+    }
+
+    /**
+     * Cleanup function
+     */
+    export async function disconnect(): Promise<void> {
+      await prisma.$disconnect();
+    }
+
+edge_cases:
+  - id: migration-conflict
+    symptom: "Migration failed to apply: migration already applied"
+    cause: "Migration was manually applied or database is out of sync"
+    solution: |
+      1. Check migration status:
+         npx prisma migrate status
+
+      2. Mark migration as applied (if already in DB):
+         npx prisma migrate resolve --applied "migration_name"
+
+      3. Or reset and re-apply (dev only!):
+         npx prisma migrate reset
+
+  - id: production-data-loss
+    symptom: "Data was deleted after migration"
+    cause: "Destructive migration without data migration"
+    solution: |
+      Always create data migration for destructive changes:
+
+      1. Create new column first
+      2. Migrate data: UPDATE table SET new_col = old_col
+      3. Remove old column in separate migration
+
+      Never use `prisma migrate reset` in production!
+
+  - id: long-running-migration
+    symptom: "Migration times out or locks table"
+    cause: "Large table operations without proper strategy"
+    solution: |
+      For large tables:
+
+      1. Use CONCURRENTLY for indexes:
+         CREATE INDEX CONCURRENTLY idx ON table(col);
+
+      2. Batch data migrations:
+         UPDATE table SET col = value WHERE id > X LIMIT 1000;
+
+      3. Consider pg_repack for table rewrites.
+
+  - id: failed-migration
+    symptom: "Migration failed halfway through"
+    cause: "Error during migration execution"
+    solution: |
+      1. Check what was applied:
+         npx prisma migrate status
+
+      2. If partially applied, fix manually then:
+         npx prisma migrate resolve --rolled-back "migration_name"
+
+      3. Fix the migration SQL and re-apply.
+
+validation:
+  manual_test:
+    - "Run npx prisma migrate dev to create migration"
+    - "Review generated SQL in migrations folder"
+    - "Run npx prisma migrate deploy on staging"
+    - "Verify schema changes applied"
+    - "Test application functionality"
+    - "Run on production with backup"

@@ -1,0 +1,699 @@
+id: audit-logs
+version: "1.0.0"
+updated_at: "2026-01-31"
+author: "nyko-team"
+status: beta
+
+name: "Database Audit Logs"
+description: "Automatic audit trail with Postgres triggers for tracking all data changes"
+
+category: database
+tags:
+  - postgres
+  - audit
+  - triggers
+  - logging
+  - compliance
+
+difficulty: intermediate
+time_estimate: "30-35 min"
+
+stack:
+  required:
+    - name: "next"
+      version: "^15.1.0"
+      reason: "App Router"
+    - name: "@supabase/supabase-js"
+      version: "^2.93.0"
+      reason: "Supabase client"
+
+requires:
+  - supabase-client-nextjs
+
+enables: []
+
+env_vars:
+  required:
+    - key: NEXT_PUBLIC_SUPABASE_URL
+      description: "Supabase project URL"
+      format: "https://xxx.supabase.co"
+      where_to_find: "Supabase Dashboard > Settings > API"
+    - key: SUPABASE_SERVICE_ROLE_KEY
+      description: "Supabase service role key for admin operations"
+      format: "eyJ..."
+      where_to_find: "Supabase Dashboard > Settings > API"
+
+external_setup:
+  - service: "Supabase"
+    url: "https://supabase.com/dashboard"
+    steps:
+      - "Create Supabase project"
+      - "Run the audit log migration"
+      - "Apply triggers to tables you want to audit"
+      - "Set up RLS policies for audit_logs table"
+
+files:
+  - path: "supabase/migrations/001_audit_logs.sql"
+    action: create
+    description: "Audit log table and trigger functions"
+    priority: 1
+
+  - path: "lib/audit/audit-logger.ts"
+    action: create
+    description: "Audit log utilities"
+    priority: 2
+
+  - path: "app/api/audit/route.ts"
+    action: create
+    description: "Audit log API endpoints"
+    priority: 3
+
+  - path: "components/audit-log-viewer.tsx"
+    action: create
+    description: "Audit log viewer component"
+    priority: 4
+
+code:
+  supabase/migrations/001_audit_logs.sql: |
+    -- Create audit_logs table
+    CREATE TABLE IF NOT EXISTS audit_logs (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+      table_name text NOT NULL,
+      record_id uuid NOT NULL,
+      operation text NOT NULL CHECK (operation IN ('INSERT', 'UPDATE', 'DELETE')),
+      old_data jsonb,
+      new_data jsonb,
+      changed_fields text[],
+      user_id uuid REFERENCES auth.users(id),
+      ip_address inet,
+      user_agent text,
+      metadata jsonb DEFAULT '{}',
+      created_at timestamptz DEFAULT now()
+    );
+
+    -- Create indexes for common queries
+    CREATE INDEX IF NOT EXISTS audit_logs_table_name_idx ON audit_logs(table_name);
+    CREATE INDEX IF NOT EXISTS audit_logs_record_id_idx ON audit_logs(record_id);
+    CREATE INDEX IF NOT EXISTS audit_logs_user_id_idx ON audit_logs(user_id);
+    CREATE INDEX IF NOT EXISTS audit_logs_created_at_idx ON audit_logs(created_at DESC);
+    CREATE INDEX IF NOT EXISTS audit_logs_operation_idx ON audit_logs(operation);
+
+    -- Composite index for common filter combinations
+    CREATE INDEX IF NOT EXISTS audit_logs_table_record_idx
+    ON audit_logs(table_name, record_id, created_at DESC);
+
+    -- Function to get changed fields between old and new data
+    CREATE OR REPLACE FUNCTION get_changed_fields(old_data jsonb, new_data jsonb)
+    RETURNS text[]
+    LANGUAGE plpgsql
+    AS $$
+    DECLARE
+      changed text[];
+      key text;
+    BEGIN
+      changed := ARRAY[]::text[];
+
+      -- Check all keys in new_data
+      FOR key IN SELECT jsonb_object_keys(new_data)
+      LOOP
+        IF old_data IS NULL OR
+           old_data->key IS DISTINCT FROM new_data->key THEN
+          changed := array_append(changed, key);
+        END IF;
+      END LOOP;
+
+      -- Check for deleted keys
+      IF old_data IS NOT NULL THEN
+        FOR key IN SELECT jsonb_object_keys(old_data)
+        LOOP
+          IF new_data->key IS NULL AND old_data->key IS NOT NULL THEN
+            changed := array_append(changed, key);
+          END IF;
+        END LOOP;
+      END IF;
+
+      RETURN changed;
+    END;
+    $$;
+
+    -- Generic audit trigger function
+    CREATE OR REPLACE FUNCTION audit_trigger_function()
+    RETURNS trigger
+    LANGUAGE plpgsql
+    SECURITY DEFINER
+    AS $$
+    DECLARE
+      old_data jsonb;
+      new_data jsonb;
+      changed_fields text[];
+      record_id uuid;
+      current_user_id uuid;
+    BEGIN
+      -- Get the current user ID from JWT
+      current_user_id := auth.uid();
+
+      -- Determine operation type and set data
+      IF TG_OP = 'DELETE' THEN
+        old_data := to_jsonb(OLD);
+        new_data := NULL;
+        record_id := OLD.id;
+        changed_fields := NULL;
+      ELSIF TG_OP = 'INSERT' THEN
+        old_data := NULL;
+        new_data := to_jsonb(NEW);
+        record_id := NEW.id;
+        changed_fields := NULL;
+      ELSIF TG_OP = 'UPDATE' THEN
+        old_data := to_jsonb(OLD);
+        new_data := to_jsonb(NEW);
+        record_id := NEW.id;
+        changed_fields := get_changed_fields(old_data, new_data);
+
+        -- Skip if no actual changes
+        IF array_length(changed_fields, 1) IS NULL THEN
+          RETURN NEW;
+        END IF;
+      END IF;
+
+      -- Insert audit log
+      INSERT INTO audit_logs (
+        table_name,
+        record_id,
+        operation,
+        old_data,
+        new_data,
+        changed_fields,
+        user_id
+      ) VALUES (
+        TG_TABLE_NAME,
+        record_id,
+        TG_OP,
+        old_data,
+        new_data,
+        changed_fields,
+        current_user_id
+      );
+
+      -- Return appropriate value
+      IF TG_OP = 'DELETE' THEN
+        RETURN OLD;
+      ELSE
+        RETURN NEW;
+      END IF;
+    END;
+    $$;
+
+    -- Function to add audit trigger to a table
+    CREATE OR REPLACE FUNCTION enable_audit_for_table(target_table text)
+    RETURNS void
+    LANGUAGE plpgsql
+    AS $$
+    BEGIN
+      EXECUTE format(
+        'CREATE TRIGGER audit_trigger_%s
+         AFTER INSERT OR UPDATE OR DELETE ON %I
+         FOR EACH ROW EXECUTE FUNCTION audit_trigger_function()',
+        target_table,
+        target_table
+      );
+    END;
+    $$;
+
+    -- Function to remove audit trigger from a table
+    CREATE OR REPLACE FUNCTION disable_audit_for_table(target_table text)
+    RETURNS void
+    LANGUAGE plpgsql
+    AS $$
+    BEGIN
+      EXECUTE format(
+        'DROP TRIGGER IF EXISTS audit_trigger_%s ON %I',
+        target_table,
+        target_table
+      );
+    END;
+    $$;
+
+    -- Enable RLS on audit_logs
+    ALTER TABLE audit_logs ENABLE ROW LEVEL SECURITY;
+
+    -- Policy: Users can view audit logs for their own actions
+    CREATE POLICY "Users can view own audit logs"
+    ON audit_logs FOR SELECT
+    USING (user_id = auth.uid());
+
+    -- Policy: Admins can view all audit logs (adjust based on your admin logic)
+    -- CREATE POLICY "Admins can view all audit logs"
+    -- ON audit_logs FOR SELECT
+    -- USING (
+    --   EXISTS (
+    --     SELECT 1 FROM user_roles
+    --     WHERE user_id = auth.uid() AND role = 'admin'
+    --   )
+    -- );
+
+    -- Example: Enable audit on users table
+    -- SELECT enable_audit_for_table('users');
+
+    -- Example: Enable audit on orders table
+    -- SELECT enable_audit_for_table('orders');
+
+  lib/audit/audit-logger.ts: |
+    import { createClient } from "@supabase/supabase-js";
+
+    // Admin client for audit operations
+    function getAdminClient() {
+      const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
+      const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+
+      if (!url || !serviceKey) {
+        throw new Error("Missing Supabase admin credentials");
+      }
+
+      return createClient(url, serviceKey);
+    }
+
+    export interface AuditLog {
+      id: string;
+      table_name: string;
+      record_id: string;
+      operation: "INSERT" | "UPDATE" | "DELETE";
+      old_data: Record<string, unknown> | null;
+      new_data: Record<string, unknown> | null;
+      changed_fields: string[] | null;
+      user_id: string | null;
+      ip_address: string | null;
+      user_agent: string | null;
+      metadata: Record<string, unknown>;
+      created_at: string;
+    }
+
+    export interface AuditQueryOptions {
+      tableName?: string;
+      recordId?: string;
+      userId?: string;
+      operation?: "INSERT" | "UPDATE" | "DELETE";
+      startDate?: Date;
+      endDate?: Date;
+      limit?: number;
+      offset?: number;
+    }
+
+    /**
+     * Query audit logs with filters
+     */
+    export async function queryAuditLogs(
+      options: AuditQueryOptions = {}
+    ): Promise<{ logs: AuditLog[]; count: number; error: Error | null }> {
+      const {
+        tableName,
+        recordId,
+        userId,
+        operation,
+        startDate,
+        endDate,
+        limit = 50,
+        offset = 0,
+      } = options;
+
+      const supabase = getAdminClient();
+
+      let query = supabase
+        .from("audit_logs")
+        .select("*", { count: "exact" })
+        .order("created_at", { ascending: false })
+        .range(offset, offset + limit - 1);
+
+      if (tableName) {
+        query = query.eq("table_name", tableName);
+      }
+
+      if (recordId) {
+        query = query.eq("record_id", recordId);
+      }
+
+      if (userId) {
+        query = query.eq("user_id", userId);
+      }
+
+      if (operation) {
+        query = query.eq("operation", operation);
+      }
+
+      if (startDate) {
+        query = query.gte("created_at", startDate.toISOString());
+      }
+
+      if (endDate) {
+        query = query.lte("created_at", endDate.toISOString());
+      }
+
+      const { data, count, error } = await query;
+
+      if (error) {
+        return { logs: [], count: 0, error: new Error(error.message) };
+      }
+
+      return { logs: data || [], count: count || 0, error: null };
+    }
+
+    /**
+     * Get audit history for a specific record
+     */
+    export async function getRecordHistory(
+      tableName: string,
+      recordId: string
+    ): Promise<{ logs: AuditLog[]; error: Error | null }> {
+      const { logs, error } = await queryAuditLogs({
+        tableName,
+        recordId,
+        limit: 100,
+      });
+
+      return { logs, error };
+    }
+
+    /**
+     * Get user activity log
+     */
+    export async function getUserActivity(
+      userId: string,
+      options: { limit?: number; startDate?: Date } = {}
+    ): Promise<{ logs: AuditLog[]; error: Error | null }> {
+      const { logs, error } = await queryAuditLogs({
+        userId,
+        limit: options.limit || 50,
+        startDate: options.startDate,
+      });
+
+      return { logs, error };
+    }
+
+    /**
+     * Create a manual audit entry (for custom events)
+     */
+    export async function createAuditEntry(params: {
+      tableName: string;
+      recordId: string;
+      operation: "INSERT" | "UPDATE" | "DELETE";
+      oldData?: Record<string, unknown>;
+      newData?: Record<string, unknown>;
+      userId?: string;
+      metadata?: Record<string, unknown>;
+    }): Promise<{ success: boolean; error: Error | null }> {
+      const supabase = getAdminClient();
+
+      const { error } = await supabase.from("audit_logs").insert({
+        table_name: params.tableName,
+        record_id: params.recordId,
+        operation: params.operation,
+        old_data: params.oldData || null,
+        new_data: params.newData || null,
+        user_id: params.userId || null,
+        metadata: params.metadata || {},
+      });
+
+      if (error) {
+        return { success: false, error: new Error(error.message) };
+      }
+
+      return { success: true, error: null };
+    }
+
+    /**
+     * Format audit log for display
+     */
+    export function formatAuditLog(log: AuditLog) {
+      return {
+        ...log,
+        formattedDate: new Date(log.created_at).toLocaleString(),
+        operationLabel: getOperationLabel(log.operation),
+        changesSummary: summarizeChanges(log),
+      };
+    }
+
+    function getOperationLabel(operation: string): string {
+      const labels: Record<string, string> = {
+        INSERT: "Created",
+        UPDATE: "Updated",
+        DELETE: "Deleted",
+      };
+      return labels[operation] || operation;
+    }
+
+    function summarizeChanges(log: AuditLog): string {
+      if (log.operation === "INSERT") {
+        return "Record created";
+      }
+
+      if (log.operation === "DELETE") {
+        return "Record deleted";
+      }
+
+      if (log.changed_fields && log.changed_fields.length > 0) {
+        return `Changed: ${log.changed_fields.join(", ")}`;
+      }
+
+      return "No changes detected";
+    }
+
+  app/api/audit/route.ts: |
+    import { NextRequest, NextResponse } from "next/server";
+    import { queryAuditLogs, formatAuditLog } from "@/lib/audit/audit-logger";
+
+    export async function GET(request: NextRequest) {
+      try {
+        const { searchParams } = new URL(request.url);
+
+        const options = {
+          tableName: searchParams.get("table") || undefined,
+          recordId: searchParams.get("recordId") || undefined,
+          userId: searchParams.get("userId") || undefined,
+          operation: searchParams.get("operation") as "INSERT" | "UPDATE" | "DELETE" | undefined,
+          startDate: searchParams.get("startDate")
+            ? new Date(searchParams.get("startDate")!)
+            : undefined,
+          endDate: searchParams.get("endDate")
+            ? new Date(searchParams.get("endDate")!)
+            : undefined,
+          limit: parseInt(searchParams.get("limit") || "50"),
+          offset: parseInt(searchParams.get("offset") || "0"),
+        };
+
+        const { logs, count, error } = await queryAuditLogs(options);
+
+        if (error) {
+          return NextResponse.json({ error: error.message }, { status: 500 });
+        }
+
+        return NextResponse.json({
+          logs: logs.map(formatAuditLog),
+          total: count,
+          limit: options.limit,
+          offset: options.offset,
+          hasMore: options.offset + logs.length < count,
+        });
+      } catch (error) {
+        console.error("Audit API error:", error);
+        return NextResponse.json(
+          { error: "Failed to fetch audit logs" },
+          { status: 500 }
+        );
+      }
+    }
+
+  components/audit-log-viewer.tsx: |
+    "use client";
+
+    import { useState, useEffect } from "react";
+
+    interface AuditLog {
+      id: string;
+      table_name: string;
+      record_id: string;
+      operation: "INSERT" | "UPDATE" | "DELETE";
+      old_data: Record<string, unknown> | null;
+      new_data: Record<string, unknown> | null;
+      changed_fields: string[] | null;
+      user_id: string | null;
+      created_at: string;
+      formattedDate: string;
+      operationLabel: string;
+      changesSummary: string;
+    }
+
+    interface AuditLogViewerProps {
+      tableName?: string;
+      recordId?: string;
+    }
+
+    export function AuditLogViewer({ tableName, recordId }: AuditLogViewerProps) {
+      const [logs, setLogs] = useState<AuditLog[]>([]);
+      const [isLoading, setIsLoading] = useState(true);
+      const [error, setError] = useState<string | null>(null);
+      const [expandedId, setExpandedId] = useState<string | null>(null);
+
+      useEffect(() => {
+        const fetchLogs = async () => {
+          setIsLoading(true);
+          try {
+            const params = new URLSearchParams();
+            if (tableName) params.append("table", tableName);
+            if (recordId) params.append("recordId", recordId);
+
+            const response = await fetch(`/api/audit?${params}`);
+            if (!response.ok) throw new Error("Failed to fetch logs");
+
+            const data = await response.json();
+            setLogs(data.logs);
+          } catch (err) {
+            setError(err instanceof Error ? err.message : "Failed to load");
+          } finally {
+            setIsLoading(false);
+          }
+        };
+
+        fetchLogs();
+      }, [tableName, recordId]);
+
+      const getOperationColor = (operation: string) => {
+        const colors: Record<string, string> = {
+          INSERT: "bg-green-100 text-green-800",
+          UPDATE: "bg-blue-100 text-blue-800",
+          DELETE: "bg-red-100 text-red-800",
+        };
+        return colors[operation] || "bg-gray-100 text-gray-800";
+      };
+
+      if (isLoading) {
+        return <div className="py-8 text-center text-gray-500">Loading audit logs...</div>;
+      }
+
+      if (error) {
+        return <div className="py-8 text-center text-red-500">{error}</div>;
+      }
+
+      return (
+        <div className="space-y-4">
+          <h2 className="text-lg font-semibold">Audit Log</h2>
+
+          {logs.length === 0 ? (
+            <p className="text-gray-500">No audit logs found</p>
+          ) : (
+            <div className="space-y-2">
+              {logs.map((log) => (
+                <div
+                  key={log.id}
+                  className="rounded-lg border bg-white p-4 shadow-sm"
+                >
+                  <div className="flex items-start justify-between">
+                    <div className="flex items-center gap-3">
+                      <span
+                        className={`rounded-full px-2 py-1 text-xs font-medium ${getOperationColor(
+                          log.operation
+                        )}`}
+                      >
+                        {log.operationLabel}
+                      </span>
+                      <span className="text-sm font-medium">{log.table_name}</span>
+                    </div>
+                    <span className="text-xs text-gray-500">
+                      {log.formattedDate}
+                    </span>
+                  </div>
+
+                  <p className="mt-2 text-sm text-gray-600">{log.changesSummary}</p>
+
+                  <button
+                    onClick={() =>
+                      setExpandedId(expandedId === log.id ? null : log.id)
+                    }
+                    className="mt-2 text-xs text-blue-600 hover:underline"
+                  >
+                    {expandedId === log.id ? "Hide details" : "Show details"}
+                  </button>
+
+                  {expandedId === log.id && (
+                    <div className="mt-3 space-y-2 rounded bg-gray-50 p-3 text-xs">
+                      {log.old_data && (
+                        <div>
+                          <p className="font-medium text-gray-700">Previous:</p>
+                          <pre className="overflow-auto rounded bg-gray-100 p-2">
+                            {JSON.stringify(log.old_data, null, 2)}
+                          </pre>
+                        </div>
+                      )}
+                      {log.new_data && (
+                        <div>
+                          <p className="font-medium text-gray-700">New:</p>
+                          <pre className="overflow-auto rounded bg-gray-100 p-2">
+                            {JSON.stringify(log.new_data, null, 2)}
+                          </pre>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      );
+    }
+
+edge_cases:
+  - id: high-volume-tables
+    symptom: "Audit log table grows too large"
+    cause: "Auditing high-frequency tables"
+    solution: |
+      1. Implement partitioning:
+         CREATE TABLE audit_logs (
+           ...
+         ) PARTITION BY RANGE (created_at);
+
+      2. Create monthly partitions:
+         CREATE TABLE audit_logs_2024_01
+         PARTITION OF audit_logs
+         FOR VALUES FROM ('2024-01-01') TO ('2024-02-01');
+
+      3. Set up automatic cleanup:
+         DELETE FROM audit_logs WHERE created_at < NOW() - INTERVAL '90 days';
+
+  - id: sensitive-data-logged
+    symptom: "Passwords or tokens appearing in audit logs"
+    cause: "All columns logged including sensitive ones"
+    solution: |
+      Exclude sensitive fields in the trigger:
+
+      -- Modify trigger to exclude sensitive fields
+      new_data := to_jsonb(NEW) - ARRAY['password', 'token', 'secret'];
+
+  - id: trigger-performance
+    symptom: "Slow INSERT/UPDATE operations"
+    cause: "Audit trigger adds overhead"
+    solution: |
+      1. Use AFTER triggers (not BEFORE)
+      2. Consider async logging with pg_background or queues
+      3. Add indexes only on frequently queried columns
+      4. Batch audit log cleanup during off-peak hours
+
+  - id: missing-user-context
+    symptom: "user_id is always NULL in audit logs"
+    cause: "auth.uid() not available in trigger context"
+    solution: |
+      Pass user context through application:
+
+      -- Set user in session before operations
+      SET LOCAL app.current_user_id = 'user-uuid';
+
+      -- Then in trigger:
+      current_setting('app.current_user_id', true)
+
+validation:
+  manual_test:
+    - "Run the SQL migration"
+    - "Enable audit on a test table"
+    - "Insert a record and verify audit log"
+    - "Update a record and verify changes logged"
+    - "Delete a record and verify audit log"
+    - "Query audit history for a record"
+    - "Test RLS policies on audit_logs"
