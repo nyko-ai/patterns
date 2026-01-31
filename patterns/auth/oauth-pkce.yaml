@@ -1,0 +1,409 @@
+id: oauth-pkce
+version: "1.0.0"
+updated_at: "2026-01-31"
+author: "nyko-team"
+status: beta
+
+name: "OAuth PKCE Flow"
+description: "Manual OAuth 2.0 PKCE implementation for secure authorization"
+
+category: auth
+tags:
+  - oauth
+  - pkce
+  - authorization
+  - security
+  - spa
+
+difficulty: advanced
+time_estimate: "35-45 min"
+
+stack:
+  required:
+    - name: "next"
+      version: "^15.1.0"
+      reason: "Next.js App Router"
+
+requires: []
+
+enables: []
+
+env_vars:
+  required:
+    - key: OAUTH_CLIENT_ID
+      description: "OAuth client ID"
+      format: "Provider-specific format"
+      where_to_find: "OAuth provider dashboard"
+    - key: OAUTH_CLIENT_SECRET
+      description: "OAuth client secret (for confidential clients)"
+      format: "Provider-specific format"
+      where_to_find: "OAuth provider dashboard"
+    - key: OAUTH_AUTHORIZATION_URL
+      description: "Provider authorization endpoint"
+      format: "https://provider.com/oauth/authorize"
+      where_to_find: "OAuth provider documentation"
+    - key: OAUTH_TOKEN_URL
+      description: "Provider token endpoint"
+      format: "https://provider.com/oauth/token"
+      where_to_find: "OAuth provider documentation"
+  optional:
+    - key: OAUTH_REDIRECT_URI
+      description: "OAuth callback URL"
+      default: "http://localhost:3000/api/auth/callback"
+
+external_setup:
+  - service: "OAuth Provider"
+    url: "Provider dashboard URL"
+    steps:
+      - "Register application with OAuth provider"
+      - "Configure redirect URIs"
+      - "Copy Client ID and Client Secret"
+      - "Note authorization and token endpoints"
+      - "Configure allowed scopes"
+
+files:
+  - path: "lib/oauth/pkce.ts"
+    action: create
+    description: "PKCE utilities"
+    priority: 1
+
+  - path: "lib/oauth/client.ts"
+    action: create
+    description: "OAuth client implementation"
+    priority: 2
+
+  - path: "app/api/auth/oauth/authorize/route.ts"
+    action: create
+    description: "Start OAuth flow"
+    priority: 3
+
+  - path: "app/api/auth/oauth/callback/route.ts"
+    action: create
+    description: "OAuth callback handler"
+    priority: 4
+
+code:
+  lib/oauth/pkce.ts: |
+    import crypto from "crypto";
+
+    function base64UrlEncode(buffer: Buffer): string {
+      return buffer
+        .toString("base64")
+        .replace(/\+/g, "-")
+        .replace(/\//g, "_")
+        .replace(/=/g, "");
+    }
+
+    export function generateCodeVerifier(): string {
+      return base64UrlEncode(crypto.randomBytes(32));
+    }
+
+    export function generateCodeChallenge(verifier: string): string {
+      const hash = crypto.createHash("sha256").update(verifier).digest();
+      return base64UrlEncode(hash);
+    }
+
+    export function generateState(): string {
+      return base64UrlEncode(crypto.randomBytes(16));
+    }
+
+    export interface PKCEParams {
+      codeVerifier: string;
+      codeChallenge: string;
+      state: string;
+    }
+
+    export function generatePKCEParams(): PKCEParams {
+      const codeVerifier = generateCodeVerifier();
+      return {
+        codeVerifier,
+        codeChallenge: generateCodeChallenge(codeVerifier),
+        state: generateState(),
+      };
+    }
+
+  lib/oauth/client.ts: |
+    import { generatePKCEParams, type PKCEParams } from "./pkce";
+
+    interface OAuthConfig {
+      clientId: string;
+      clientSecret?: string;
+      authorizationUrl: string;
+      tokenUrl: string;
+      redirectUri: string;
+      scopes: string[];
+      userInfoUrl?: string;
+    }
+
+    interface TokenResponse {
+      access_token: string;
+      token_type: string;
+      expires_in?: number;
+      refresh_token?: string;
+      scope?: string;
+      id_token?: string;
+    }
+
+    interface UserInfo {
+      id: string;
+      email?: string;
+      name?: string;
+      picture?: string;
+      [key: string]: unknown;
+    }
+
+    const config: OAuthConfig = {
+      clientId: process.env.OAUTH_CLIENT_ID!,
+      clientSecret: process.env.OAUTH_CLIENT_SECRET,
+      authorizationUrl: process.env.OAUTH_AUTHORIZATION_URL!,
+      tokenUrl: process.env.OAUTH_TOKEN_URL!,
+      redirectUri: process.env.OAUTH_REDIRECT_URI || "http://localhost:3000/api/auth/oauth/callback",
+      scopes: ["openid", "email", "profile"],
+      userInfoUrl: process.env.OAUTH_USERINFO_URL,
+    };
+
+    export function getAuthorizationUrl(pkce: PKCEParams): string {
+      const params = new URLSearchParams({
+        response_type: "code",
+        client_id: config.clientId,
+        redirect_uri: config.redirectUri,
+        scope: config.scopes.join(" "),
+        state: pkce.state,
+        code_challenge: pkce.codeChallenge,
+        code_challenge_method: "S256",
+      });
+
+      return `${config.authorizationUrl}?${params.toString()}`;
+    }
+
+    export async function exchangeCodeForTokens(
+      code: string,
+      codeVerifier: string
+    ): Promise<TokenResponse> {
+      const params = new URLSearchParams({
+        grant_type: "authorization_code",
+        code,
+        redirect_uri: config.redirectUri,
+        client_id: config.clientId,
+        code_verifier: codeVerifier,
+      });
+
+      if (config.clientSecret) {
+        params.append("client_secret", config.clientSecret);
+      }
+
+      const response = await fetch(config.tokenUrl, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/x-www-form-urlencoded",
+        },
+        body: params.toString(),
+      });
+
+      if (!response.ok) {
+        const error = await response.text();
+        throw new Error(`Token exchange failed: ${error}`);
+      }
+
+      return response.json();
+    }
+
+    export async function refreshAccessToken(refreshToken: string): Promise<TokenResponse> {
+      const params = new URLSearchParams({
+        grant_type: "refresh_token",
+        refresh_token: refreshToken,
+        client_id: config.clientId,
+      });
+
+      if (config.clientSecret) {
+        params.append("client_secret", config.clientSecret);
+      }
+
+      const response = await fetch(config.tokenUrl, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/x-www-form-urlencoded",
+        },
+        body: params.toString(),
+      });
+
+      if (!response.ok) {
+        throw new Error("Token refresh failed");
+      }
+
+      return response.json();
+    }
+
+    export async function getUserInfo(accessToken: string): Promise<UserInfo | null> {
+      if (!config.userInfoUrl) return null;
+
+      const response = await fetch(config.userInfoUrl, {
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+        },
+      });
+
+      if (!response.ok) return null;
+
+      return response.json();
+    }
+
+    export { generatePKCEParams };
+
+  app/api/auth/oauth/authorize/route.ts: |
+    import { NextResponse } from "next/server";
+    import { getAuthorizationUrl, generatePKCEParams } from "@/lib/oauth/client";
+    import { cookies } from "next/headers";
+
+    export async function GET() {
+      const pkce = generatePKCEParams();
+
+      const cookieStore = await cookies();
+
+      // Store PKCE verifier and state in httpOnly cookies
+      cookieStore.set("oauth_code_verifier", pkce.codeVerifier, {
+        httpOnly: true,
+        secure: process.env.NODE_ENV === "production",
+        sameSite: "lax",
+        maxAge: 600, // 10 minutes
+        path: "/",
+      });
+
+      cookieStore.set("oauth_state", pkce.state, {
+        httpOnly: true,
+        secure: process.env.NODE_ENV === "production",
+        sameSite: "lax",
+        maxAge: 600,
+        path: "/",
+      });
+
+      const authUrl = getAuthorizationUrl(pkce);
+
+      return NextResponse.redirect(authUrl);
+    }
+
+  app/api/auth/oauth/callback/route.ts: |
+    import { NextRequest, NextResponse } from "next/server";
+    import { exchangeCodeForTokens, getUserInfo } from "@/lib/oauth/client";
+    import { cookies } from "next/headers";
+    import { prisma } from "@/lib/prisma";
+
+    export async function GET(request: NextRequest) {
+      const { searchParams } = request.nextUrl;
+      const code = searchParams.get("code");
+      const state = searchParams.get("state");
+      const error = searchParams.get("error");
+
+      if (error) {
+        return NextResponse.redirect(
+          new URL(`/login?error=${error}`, request.url)
+        );
+      }
+
+      if (!code || !state) {
+        return NextResponse.redirect(
+          new URL("/login?error=missing_params", request.url)
+        );
+      }
+
+      const cookieStore = await cookies();
+      const storedState = cookieStore.get("oauth_state")?.value;
+      const codeVerifier = cookieStore.get("oauth_code_verifier")?.value;
+
+      // Clean up PKCE cookies
+      cookieStore.delete("oauth_state");
+      cookieStore.delete("oauth_code_verifier");
+
+      if (!storedState || state !== storedState) {
+        return NextResponse.redirect(
+          new URL("/login?error=state_mismatch", request.url)
+        );
+      }
+
+      if (!codeVerifier) {
+        return NextResponse.redirect(
+          new URL("/login?error=missing_verifier", request.url)
+        );
+      }
+
+      try {
+        const tokens = await exchangeCodeForTokens(code, codeVerifier);
+        const userInfo = await getUserInfo(tokens.access_token);
+
+        if (!userInfo?.email) {
+          return NextResponse.redirect(
+            new URL("/login?error=no_email", request.url)
+          );
+        }
+
+        // Create or update user
+        const user = await prisma.user.upsert({
+          where: { email: userInfo.email },
+          update: {
+            name: userInfo.name,
+            image: userInfo.picture,
+          },
+          create: {
+            email: userInfo.email,
+            name: userInfo.name,
+            image: userInfo.picture,
+            emailVerified: new Date(),
+          },
+        });
+
+        // Create session (implement based on your session strategy)
+        // For JWT: create tokens and set cookies
+        // For session: create session record and set session cookie
+
+        const response = NextResponse.redirect(
+          new URL("/dashboard", request.url)
+        );
+
+        // Store tokens if needed
+        if (tokens.refresh_token) {
+          response.cookies.set("oauth_refresh_token", tokens.refresh_token, {
+            httpOnly: true,
+            secure: process.env.NODE_ENV === "production",
+            sameSite: "lax",
+            path: "/",
+          });
+        }
+
+        return response;
+      } catch (err) {
+        console.error("OAuth callback error:", err);
+        return NextResponse.redirect(
+          new URL("/login?error=exchange_failed", request.url)
+        );
+      }
+    }
+
+edge_cases:
+  - id: state-mismatch
+    symptom: "State parameter doesn't match"
+    cause: "CSRF attack or stale cookie"
+    solution: "Verify state matches, clear old cookies, regenerate PKCE params"
+
+  - id: verifier-missing
+    symptom: "Code verifier not found in cookies"
+    cause: "Cookies expired or cleared"
+    solution: "Ensure cookies have sufficient maxAge, handle missing gracefully"
+
+  - id: provider-error
+    symptom: "OAuth provider returns error"
+    cause: "User denied access or invalid request"
+    solution: "Handle error parameter in callback, show user-friendly message"
+
+  - id: token-exchange-fails
+    symptom: "Code exchange returns error"
+    cause: "Code expired, reused, or invalid client"
+    solution: "Verify client credentials, ensure code used only once"
+
+validation:
+  manual_test:
+    - "Click login with OAuth"
+    - "Verify redirect to provider"
+    - "Complete authorization"
+    - "Verify callback creates user"
+    - "Check tokens stored correctly"
+    - "Test with denied authorization"

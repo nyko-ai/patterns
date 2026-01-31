@@ -1,0 +1,478 @@
+id: 2fa-totp
+version: "1.0.0"
+updated_at: "2026-01-31"
+author: "nyko-team"
+status: beta
+
+name: "TOTP Two-Factor Authentication"
+description: "Time-based One-Time Password 2FA implementation"
+
+category: auth
+tags:
+  - 2fa
+  - totp
+  - mfa
+  - security
+  - authenticator
+
+difficulty: advanced
+time_estimate: "30-40 min"
+
+stack:
+  required:
+    - name: "otplib"
+      version: "^13.2.1"
+      reason: "TOTP generation and verification"
+    - name: "qrcode"
+      version: "^1.5.4"
+      reason: "QR code generation"
+    - name: "next"
+      version: "^15.1.0"
+      reason: "Next.js App Router"
+    - name: "@prisma/client"
+      version: "^7.3.0"
+      reason: "2FA settings storage"
+
+requires: []
+
+enables: []
+
+env_vars:
+  required:
+    - key: TOTP_ENCRYPTION_KEY
+      description: "Key for encrypting TOTP secrets"
+      format: "32 byte hex string"
+      where_to_find: "Generate with: openssl rand -hex 32"
+  optional:
+    - key: TOTP_ISSUER
+      description: "App name shown in authenticator"
+      default: "YourApp"
+
+external_setup: []
+
+files:
+  - path: "prisma/schema.prisma"
+    action: modify
+    description: "Add TwoFactorAuth model"
+    priority: 1
+
+  - path: "lib/totp.ts"
+    action: create
+    description: "TOTP utilities"
+    priority: 2
+
+  - path: "lib/auth/2fa.ts"
+    action: create
+    description: "2FA management"
+    priority: 3
+
+  - path: "app/api/auth/2fa/setup/route.ts"
+    action: create
+    description: "2FA setup endpoint"
+    priority: 4
+
+  - path: "app/api/auth/2fa/verify/route.ts"
+    action: create
+    description: "2FA verification endpoint"
+    priority: 5
+
+  - path: "app/api/auth/2fa/disable/route.ts"
+    action: create
+    description: "2FA disable endpoint"
+    priority: 6
+
+code:
+  prisma/schema.prisma: |
+    // Add to existing schema.prisma
+
+    model TwoFactorAuth {
+      id              String   @id @default(cuid())
+      userId          String   @unique
+      secret          String
+      backupCodes     String[]
+      enabled         Boolean  @default(false)
+      verifiedAt      DateTime?
+      createdAt       DateTime @default(now())
+      updatedAt       DateTime @updatedAt
+
+      user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+    }
+
+  lib/totp.ts: |
+    import { authenticator } from "otplib";
+    import QRCode from "qrcode";
+    import crypto from "crypto";
+
+    const ISSUER = process.env.TOTP_ISSUER || "YourApp";
+    const ENCRYPTION_KEY = process.env.TOTP_ENCRYPTION_KEY!;
+    const ALGORITHM = "aes-256-gcm";
+
+    authenticator.options = {
+      digits: 6,
+      step: 30,
+      window: 1,
+    };
+
+    export function generateSecret(): string {
+      return authenticator.generateSecret();
+    }
+
+    export function generateTOTP(secret: string): string {
+      return authenticator.generate(secret);
+    }
+
+    export function verifyTOTP(token: string, secret: string): boolean {
+      return authenticator.verify({ token, secret });
+    }
+
+    export function getOTPAuthUrl(email: string, secret: string): string {
+      return authenticator.keyuri(email, ISSUER, secret);
+    }
+
+    export async function generateQRCodeDataUrl(otpAuthUrl: string): Promise<string> {
+      return QRCode.toDataURL(otpAuthUrl, {
+        width: 200,
+        margin: 2,
+        color: {
+          dark: "#000000",
+          light: "#ffffff",
+        },
+      });
+    }
+
+    export function encryptSecret(secret: string): string {
+      const iv = crypto.randomBytes(16);
+      const key = Buffer.from(ENCRYPTION_KEY, "hex");
+      const cipher = crypto.createCipheriv(ALGORITHM, key, iv);
+
+      let encrypted = cipher.update(secret, "utf8", "hex");
+      encrypted += cipher.final("hex");
+
+      const authTag = cipher.getAuthTag();
+
+      return `${iv.toString("hex")}:${authTag.toString("hex")}:${encrypted}`;
+    }
+
+    export function decryptSecret(encryptedData: string): string {
+      const [ivHex, authTagHex, encrypted] = encryptedData.split(":");
+      const iv = Buffer.from(ivHex, "hex");
+      const authTag = Buffer.from(authTagHex, "hex");
+      const key = Buffer.from(ENCRYPTION_KEY, "hex");
+
+      const decipher = crypto.createDecipheriv(ALGORITHM, key, iv);
+      decipher.setAuthTag(authTag);
+
+      let decrypted = decipher.update(encrypted, "hex", "utf8");
+      decrypted += decipher.final("utf8");
+
+      return decrypted;
+    }
+
+    export function generateBackupCodes(count: number = 10): string[] {
+      return Array.from({ length: count }, () =>
+        crypto.randomBytes(4).toString("hex").toUpperCase()
+      );
+    }
+
+    export function hashBackupCode(code: string): string {
+      return crypto.createHash("sha256").update(code.toUpperCase()).digest("hex");
+    }
+
+  lib/auth/2fa.ts: |
+    import { prisma } from "@/lib/prisma";
+    import {
+      generateSecret,
+      verifyTOTP,
+      getOTPAuthUrl,
+      generateQRCodeDataUrl,
+      encryptSecret,
+      decryptSecret,
+      generateBackupCodes,
+      hashBackupCode,
+    } from "@/lib/totp";
+
+    export async function setup2FA(userId: string, email: string) {
+      const secret = generateSecret();
+      const backupCodes = generateBackupCodes();
+      const hashedBackupCodes = backupCodes.map(hashBackupCode);
+
+      await prisma.twoFactorAuth.upsert({
+        where: { userId },
+        update: {
+          secret: encryptSecret(secret),
+          backupCodes: hashedBackupCodes,
+          enabled: false,
+          verifiedAt: null,
+        },
+        create: {
+          userId,
+          secret: encryptSecret(secret),
+          backupCodes: hashedBackupCodes,
+        },
+      });
+
+      const otpAuthUrl = getOTPAuthUrl(email, secret);
+      const qrCodeDataUrl = await generateQRCodeDataUrl(otpAuthUrl);
+
+      return {
+        secret,
+        qrCodeDataUrl,
+        backupCodes,
+      };
+    }
+
+    export async function verify2FASetup(userId: string, token: string): Promise<boolean> {
+      const twoFactor = await prisma.twoFactorAuth.findUnique({
+        where: { userId },
+      });
+
+      if (!twoFactor) return false;
+
+      const secret = decryptSecret(twoFactor.secret);
+      const isValid = verifyTOTP(token, secret);
+
+      if (isValid) {
+        await prisma.twoFactorAuth.update({
+          where: { userId },
+          data: {
+            enabled: true,
+            verifiedAt: new Date(),
+          },
+        });
+      }
+
+      return isValid;
+    }
+
+    export async function verify2FA(
+      userId: string,
+      token: string
+    ): Promise<{ valid: boolean; usedBackupCode?: boolean }> {
+      const twoFactor = await prisma.twoFactorAuth.findUnique({
+        where: { userId },
+      });
+
+      if (!twoFactor || !twoFactor.enabled) {
+        return { valid: false };
+      }
+
+      const secret = decryptSecret(twoFactor.secret);
+
+      // Try TOTP first
+      if (verifyTOTP(token, secret)) {
+        return { valid: true };
+      }
+
+      // Try backup codes
+      const hashedToken = hashBackupCode(token);
+      const backupCodeIndex = twoFactor.backupCodes.indexOf(hashedToken);
+
+      if (backupCodeIndex !== -1) {
+        // Remove used backup code
+        const updatedCodes = [...twoFactor.backupCodes];
+        updatedCodes.splice(backupCodeIndex, 1);
+
+        await prisma.twoFactorAuth.update({
+          where: { userId },
+          data: { backupCodes: updatedCodes },
+        });
+
+        return { valid: true, usedBackupCode: true };
+      }
+
+      return { valid: false };
+    }
+
+    export async function disable2FA(userId: string, token: string): Promise<boolean> {
+      const result = await verify2FA(userId, token);
+
+      if (!result.valid) return false;
+
+      await prisma.twoFactorAuth.delete({
+        where: { userId },
+      });
+
+      return true;
+    }
+
+    export async function is2FAEnabled(userId: string): Promise<boolean> {
+      const twoFactor = await prisma.twoFactorAuth.findUnique({
+        where: { userId },
+        select: { enabled: true },
+      });
+
+      return twoFactor?.enabled ?? false;
+    }
+
+    export async function regenerateBackupCodes(userId: string, token: string) {
+      const result = await verify2FA(userId, token);
+
+      if (!result.valid) return null;
+
+      const backupCodes = generateBackupCodes();
+      const hashedBackupCodes = backupCodes.map(hashBackupCode);
+
+      await prisma.twoFactorAuth.update({
+        where: { userId },
+        data: { backupCodes: hashedBackupCodes },
+      });
+
+      return backupCodes;
+    }
+
+  app/api/auth/2fa/setup/route.ts: |
+    import { auth } from "@/auth";
+    import { setup2FA } from "@/lib/auth/2fa";
+    import { NextResponse } from "next/server";
+
+    export async function POST() {
+      const session = await auth();
+      if (!session?.user?.id || !session.user.email) {
+        return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+      }
+
+      try {
+        const result = await setup2FA(session.user.id, session.user.email);
+
+        return NextResponse.json({
+          qrCode: result.qrCodeDataUrl,
+          secret: result.secret,
+          backupCodes: result.backupCodes,
+          message: "Scan QR code with authenticator app, then verify with a code",
+        });
+      } catch (error) {
+        console.error("2FA setup error:", error);
+        return NextResponse.json(
+          { error: "Failed to setup 2FA" },
+          { status: 500 }
+        );
+      }
+    }
+
+  app/api/auth/2fa/verify/route.ts: |
+    import { auth } from "@/auth";
+    import { verify2FASetup, verify2FA, is2FAEnabled } from "@/lib/auth/2fa";
+    import { NextRequest, NextResponse } from "next/server";
+
+    export async function POST(request: NextRequest) {
+      const session = await auth();
+      if (!session?.user?.id) {
+        return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+      }
+
+      const { token, type } = await request.json();
+
+      if (!token || typeof token !== "string" || token.length < 6) {
+        return NextResponse.json({ error: "Invalid token" }, { status: 400 });
+      }
+
+      try {
+        const isEnabled = await is2FAEnabled(session.user.id);
+
+        if (type === "setup" && !isEnabled) {
+          const success = await verify2FASetup(session.user.id, token);
+
+          if (!success) {
+            return NextResponse.json(
+              { error: "Invalid verification code" },
+              { status: 400 }
+            );
+          }
+
+          return NextResponse.json({
+            success: true,
+            message: "2FA enabled successfully",
+          });
+        }
+
+        const result = await verify2FA(session.user.id, token);
+
+        if (!result.valid) {
+          return NextResponse.json(
+            { error: "Invalid verification code" },
+            { status: 400 }
+          );
+        }
+
+        return NextResponse.json({
+          success: true,
+          usedBackupCode: result.usedBackupCode,
+        });
+      } catch (error) {
+        console.error("2FA verification error:", error);
+        return NextResponse.json(
+          { error: "Verification failed" },
+          { status: 500 }
+        );
+      }
+    }
+
+  app/api/auth/2fa/disable/route.ts: |
+    import { auth } from "@/auth";
+    import { disable2FA } from "@/lib/auth/2fa";
+    import { NextRequest, NextResponse } from "next/server";
+
+    export async function POST(request: NextRequest) {
+      const session = await auth();
+      if (!session?.user?.id) {
+        return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+      }
+
+      const { token } = await request.json();
+
+      if (!token) {
+        return NextResponse.json({ error: "Token required" }, { status: 400 });
+      }
+
+      try {
+        const success = await disable2FA(session.user.id, token);
+
+        if (!success) {
+          return NextResponse.json(
+            { error: "Invalid verification code" },
+            { status: 400 }
+          );
+        }
+
+        return NextResponse.json({
+          success: true,
+          message: "2FA disabled successfully",
+        });
+      } catch (error) {
+        console.error("2FA disable error:", error);
+        return NextResponse.json(
+          { error: "Failed to disable 2FA" },
+          { status: 500 }
+        );
+      }
+    }
+
+edge_cases:
+  - id: clock-drift
+    symptom: "Valid codes rejected"
+    cause: "User's phone clock out of sync"
+    solution: "Use window option in otplib to allow codes from adjacent time periods"
+
+  - id: backup-codes-exhausted
+    symptom: "User locked out after using all backup codes"
+    cause: "No backup codes remaining and no authenticator access"
+    solution: "Allow admin recovery, implement recovery email flow"
+
+  - id: secret-exposure
+    symptom: "TOTP secret leaked"
+    cause: "Secret stored unencrypted or logged"
+    solution: "Always encrypt at rest, never log secrets, rotate on exposure"
+
+  - id: timing-attack
+    symptom: "Brute force possible via timing"
+    cause: "Non-constant-time comparison"
+    solution: "otplib uses constant-time comparison by default"
+
+validation:
+  manual_test:
+    - "Enable 2FA and scan QR code"
+    - "Verify with authenticator code"
+    - "Test backup code login"
+    - "Disable 2FA with valid code"
+    - "Test with invalid codes"
+    - "Test clock drift handling"
