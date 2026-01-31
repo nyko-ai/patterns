@@ -1,0 +1,730 @@
+id: file-upload-form
+name: File Upload Form
+description: File upload form with drag-and-drop, preview, progress, and validation
+category: forms
+tags:
+  - forms
+  - file-upload
+  - drag-and-drop
+  - preview
+  - react-hook-form
+dependencies:
+  - react-hook-form: "^7.54.0"
+  - zod: "^3.24.0"
+  - "@hookform/resolvers": "^3.9.0"
+files:
+  - path: components/forms/file-upload/types.ts
+    description: Type definitions for file upload
+    content: |
+      export interface UploadedFile {
+        id: string;
+        file: File;
+        name: string;
+        size: number;
+        type: string;
+        preview?: string;
+        progress: number;
+        status: 'pending' | 'uploading' | 'success' | 'error';
+        error?: string;
+        url?: string;
+      }
+
+      export interface FileUploadConfig {
+        maxFiles?: number;
+        maxSize?: number; // in bytes
+        acceptedTypes?: string[];
+        multiple?: boolean;
+      }
+
+      export const DEFAULT_CONFIG: FileUploadConfig = {
+        maxFiles: 5,
+        maxSize: 5 * 1024 * 1024, // 5MB
+        acceptedTypes: ['image/jpeg', 'image/png', 'image/gif', 'application/pdf'],
+        multiple: true,
+      };
+
+      export function formatFileSize(bytes: number): string {
+        if (bytes === 0) return '0 Bytes';
+        const k = 1024;
+        const sizes = ['Bytes', 'KB', 'MB', 'GB'];
+        const i = Math.floor(Math.log(bytes) / Math.log(k));
+        return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+      }
+
+      export function generateFileId(): string {
+        return `file-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+      }
+
+  - path: hooks/use-file-upload.ts
+    description: Custom hook for file upload logic
+    content: |
+      'use client';
+
+      import { useState, useCallback, useRef } from 'react';
+      import {
+        UploadedFile,
+        FileUploadConfig,
+        DEFAULT_CONFIG,
+        generateFileId,
+      } from '@/components/forms/file-upload/types';
+
+      interface UseFileUploadOptions extends FileUploadConfig {
+        onUpload?: (file: File) => Promise<string>;
+        onRemove?: (fileId: string) => Promise<void>;
+      }
+
+      export function useFileUpload(options: UseFileUploadOptions = {}) {
+        const config = { ...DEFAULT_CONFIG, ...options };
+        const [files, setFiles] = useState<UploadedFile[]>([]);
+        const [isDragging, setIsDragging] = useState(false);
+        const inputRef = useRef<HTMLInputElement>(null);
+
+        const validateFile = useCallback(
+          (file: File): string | null => {
+            if (config.acceptedTypes && !config.acceptedTypes.includes(file.type)) {
+              return `File type ${file.type} is not supported`;
+            }
+            if (config.maxSize && file.size > config.maxSize) {
+              return `File size exceeds ${config.maxSize / 1024 / 1024}MB limit`;
+            }
+            return null;
+          },
+          [config.acceptedTypes, config.maxSize]
+        );
+
+        const createPreview = useCallback((file: File): string | undefined => {
+          if (file.type.startsWith('image/')) {
+            return URL.createObjectURL(file);
+          }
+          return undefined;
+        }, []);
+
+        const uploadFile = useCallback(
+          async (uploadedFile: UploadedFile) => {
+            if (!options.onUpload) {
+              // Simulate upload if no handler provided
+              return new Promise<string>((resolve) => {
+                setTimeout(() => {
+                  resolve(`/uploads/${uploadedFile.name}`);
+                }, 1500);
+              });
+            }
+            return options.onUpload(uploadedFile.file);
+          },
+          [options]
+        );
+
+        const addFiles = useCallback(
+          async (newFiles: FileList | File[]) => {
+            const fileArray = Array.from(newFiles);
+
+            // Check max files limit
+            if (config.maxFiles && files.length + fileArray.length > config.maxFiles) {
+              console.warn(`Maximum ${config.maxFiles} files allowed`);
+              return;
+            }
+
+            const filesToAdd: UploadedFile[] = [];
+
+            for (const file of fileArray) {
+              const error = validateFile(file);
+
+              const uploadedFile: UploadedFile = {
+                id: generateFileId(),
+                file,
+                name: file.name,
+                size: file.size,
+                type: file.type,
+                preview: createPreview(file),
+                progress: 0,
+                status: error ? 'error' : 'pending',
+                error: error || undefined,
+              };
+
+              filesToAdd.push(uploadedFile);
+            }
+
+            setFiles((prev) => [...prev, ...filesToAdd]);
+
+            // Start uploading valid files
+            for (const uploadedFile of filesToAdd) {
+              if (uploadedFile.status === 'pending') {
+                try {
+                  // Update status to uploading
+                  setFiles((prev) =>
+                    prev.map((f) =>
+                      f.id === uploadedFile.id
+                        ? { ...f, status: 'uploading' as const }
+                        : f
+                    )
+                  );
+
+                  // Simulate progress
+                  const progressInterval = setInterval(() => {
+                    setFiles((prev) =>
+                      prev.map((f) =>
+                        f.id === uploadedFile.id && f.progress < 90
+                          ? { ...f, progress: f.progress + 10 }
+                          : f
+                      )
+                    );
+                  }, 200);
+
+                  const url = await uploadFile(uploadedFile);
+
+                  clearInterval(progressInterval);
+
+                  setFiles((prev) =>
+                    prev.map((f) =>
+                      f.id === uploadedFile.id
+                        ? { ...f, status: 'success' as const, progress: 100, url }
+                        : f
+                    )
+                  );
+                } catch (error) {
+                  setFiles((prev) =>
+                    prev.map((f) =>
+                      f.id === uploadedFile.id
+                        ? {
+                            ...f,
+                            status: 'error' as const,
+                            error:
+                              error instanceof Error
+                                ? error.message
+                                : 'Upload failed',
+                          }
+                        : f
+                    )
+                  );
+                }
+              }
+            }
+          },
+          [files.length, config.maxFiles, validateFile, createPreview, uploadFile]
+        );
+
+        const removeFile = useCallback(
+          async (fileId: string) => {
+            const file = files.find((f) => f.id === fileId);
+
+            if (file?.preview) {
+              URL.revokeObjectURL(file.preview);
+            }
+
+            if (options.onRemove && file?.url) {
+              await options.onRemove(fileId);
+            }
+
+            setFiles((prev) => prev.filter((f) => f.id !== fileId));
+          },
+          [files, options]
+        );
+
+        const retryUpload = useCallback(
+          async (fileId: string) => {
+            const file = files.find((f) => f.id === fileId);
+            if (file && file.status === 'error') {
+              setFiles((prev) =>
+                prev.map((f) =>
+                  f.id === fileId
+                    ? { ...f, status: 'pending' as const, error: undefined, progress: 0 }
+                    : f
+                )
+              );
+              await addFiles([file.file]);
+            }
+          },
+          [files, addFiles]
+        );
+
+        const clearAll = useCallback(() => {
+          files.forEach((file) => {
+            if (file.preview) {
+              URL.revokeObjectURL(file.preview);
+            }
+          });
+          setFiles([]);
+        }, [files]);
+
+        const openFilePicker = useCallback(() => {
+          inputRef.current?.click();
+        }, []);
+
+        const handleDragEnter = useCallback((e: React.DragEvent) => {
+          e.preventDefault();
+          e.stopPropagation();
+          setIsDragging(true);
+        }, []);
+
+        const handleDragLeave = useCallback((e: React.DragEvent) => {
+          e.preventDefault();
+          e.stopPropagation();
+          setIsDragging(false);
+        }, []);
+
+        const handleDragOver = useCallback((e: React.DragEvent) => {
+          e.preventDefault();
+          e.stopPropagation();
+        }, []);
+
+        const handleDrop = useCallback(
+          (e: React.DragEvent) => {
+            e.preventDefault();
+            e.stopPropagation();
+            setIsDragging(false);
+
+            const droppedFiles = e.dataTransfer.files;
+            if (droppedFiles.length > 0) {
+              addFiles(droppedFiles);
+            }
+          },
+          [addFiles]
+        );
+
+        return {
+          files,
+          isDragging,
+          inputRef,
+          config,
+          addFiles,
+          removeFile,
+          retryUpload,
+          clearAll,
+          openFilePicker,
+          handleDragEnter,
+          handleDragLeave,
+          handleDragOver,
+          handleDrop,
+        };
+      }
+
+  - path: components/forms/file-upload/dropzone.tsx
+    description: Drag and drop zone component
+    content: |
+      'use client';
+
+      import { useRef } from 'react';
+      import { cn } from '@/lib/utils';
+      import { FileUploadConfig, formatFileSize } from './types';
+
+      interface DropzoneProps {
+        isDragging: boolean;
+        config: FileUploadConfig;
+        inputRef: React.RefObject<HTMLInputElement>;
+        onFilesAdded: (files: FileList) => void;
+        onDragEnter: (e: React.DragEvent) => void;
+        onDragLeave: (e: React.DragEvent) => void;
+        onDragOver: (e: React.DragEvent) => void;
+        onDrop: (e: React.DragEvent) => void;
+        onClick: () => void;
+        disabled?: boolean;
+      }
+
+      export function Dropzone({
+        isDragging,
+        config,
+        inputRef,
+        onFilesAdded,
+        onDragEnter,
+        onDragLeave,
+        onDragOver,
+        onDrop,
+        onClick,
+        disabled,
+      }: DropzoneProps) {
+        const acceptString = config.acceptedTypes?.join(',') || '*';
+
+        return (
+          <div
+            onClick={disabled ? undefined : onClick}
+            onDragEnter={onDragEnter}
+            onDragLeave={onDragLeave}
+            onDragOver={onDragOver}
+            onDrop={onDrop}
+            className={cn(
+              'relative border-2 border-dashed rounded-lg p-8 text-center transition-all',
+              isDragging
+                ? 'border-blue-500 bg-blue-50'
+                : 'border-gray-300 hover:border-gray-400',
+              disabled && 'opacity-50 cursor-not-allowed',
+              !disabled && 'cursor-pointer'
+            )}
+          >
+            <input
+              ref={inputRef}
+              type="file"
+              accept={acceptString}
+              multiple={config.multiple}
+              onChange={(e) => e.target.files && onFilesAdded(e.target.files)}
+              className="hidden"
+              disabled={disabled}
+            />
+
+            <div className="flex flex-col items-center gap-3">
+              <div
+                className={cn(
+                  'w-12 h-12 rounded-full flex items-center justify-center',
+                  isDragging ? 'bg-blue-100' : 'bg-gray-100'
+                )}
+              >
+                <svg
+                  className={cn(
+                    'w-6 h-6',
+                    isDragging ? 'text-blue-500' : 'text-gray-400'
+                  )}
+                  fill="none"
+                  viewBox="0 0 24 24"
+                  stroke="currentColor"
+                >
+                  <path
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    strokeWidth={2}
+                    d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12"
+                  />
+                </svg>
+              </div>
+
+              <div>
+                <p className="text-sm font-medium text-gray-700">
+                  {isDragging ? 'Drop files here' : 'Drag and drop files here'}
+                </p>
+                <p className="text-sm text-gray-500 mt-1">
+                  or <span className="text-blue-600">browse</span> to select files
+                </p>
+              </div>
+
+              <div className="text-xs text-gray-400 space-y-1">
+                <p>
+                  Accepted: {config.acceptedTypes?.map((t) => t.split('/')[1]).join(', ')}
+                </p>
+                <p>
+                  Max size: {formatFileSize(config.maxSize || 0)} per file
+                </p>
+                {config.maxFiles && <p>Max {config.maxFiles} files</p>}
+              </div>
+            </div>
+          </div>
+        );
+      }
+
+  - path: components/forms/file-upload/file-preview.tsx
+    description: File preview with progress component
+    content: |
+      'use client';
+
+      import { UploadedFile, formatFileSize } from './types';
+      import { cn } from '@/lib/utils';
+
+      interface FilePreviewProps {
+        file: UploadedFile;
+        onRemove: (id: string) => void;
+        onRetry: (id: string) => void;
+      }
+
+      export function FilePreview({ file, onRemove, onRetry }: FilePreviewProps) {
+        const isImage = file.type.startsWith('image/');
+
+        return (
+          <div
+            className={cn(
+              'relative flex items-center gap-4 p-4 border rounded-lg',
+              file.status === 'error' && 'border-red-200 bg-red-50',
+              file.status === 'success' && 'border-green-200 bg-green-50'
+            )}
+          >
+            {/* Preview/Icon */}
+            <div className="flex-shrink-0 w-16 h-16 rounded-lg overflow-hidden bg-gray-100 flex items-center justify-center">
+              {isImage && file.preview ? (
+                <img
+                  src={file.preview}
+                  alt={file.name}
+                  className="w-full h-full object-cover"
+                />
+              ) : (
+                <FileIcon type={file.type} />
+              )}
+            </div>
+
+            {/* Info */}
+            <div className="flex-1 min-w-0">
+              <p className="text-sm font-medium text-gray-900 truncate">
+                {file.name}
+              </p>
+              <p className="text-xs text-gray-500">{formatFileSize(file.size)}</p>
+
+              {/* Progress Bar */}
+              {file.status === 'uploading' && (
+                <div className="mt-2 h-1.5 bg-gray-200 rounded-full overflow-hidden">
+                  <div
+                    className="h-full bg-blue-600 transition-all duration-300"
+                    style={{ width: `${file.progress}%` }}
+                  />
+                </div>
+              )}
+
+              {/* Error Message */}
+              {file.status === 'error' && file.error && (
+                <p className="text-xs text-red-600 mt-1">{file.error}</p>
+              )}
+
+              {/* Status */}
+              {file.status === 'success' && (
+                <p className="text-xs text-green-600 mt-1">Upload complete</p>
+              )}
+            </div>
+
+            {/* Actions */}
+            <div className="flex-shrink-0 flex items-center gap-2">
+              {file.status === 'error' && (
+                <button
+                  type="button"
+                  onClick={() => onRetry(file.id)}
+                  className="p-1 text-blue-600 hover:text-blue-700"
+                  title="Retry upload"
+                >
+                  <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      strokeWidth={2}
+                      d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"
+                    />
+                  </svg>
+                </button>
+              )}
+
+              <button
+                type="button"
+                onClick={() => onRemove(file.id)}
+                className="p-1 text-gray-400 hover:text-red-600"
+                title="Remove file"
+              >
+                <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    strokeWidth={2}
+                    d="M6 18L18 6M6 6l12 12"
+                  />
+                </svg>
+              </button>
+            </div>
+          </div>
+        );
+      }
+
+      function FileIcon({ type }: { type: string }) {
+        const isPdf = type === 'application/pdf';
+
+        return (
+          <svg
+            className="w-8 h-8 text-gray-400"
+            fill="none"
+            viewBox="0 0 24 24"
+            stroke="currentColor"
+          >
+            {isPdf ? (
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                strokeWidth={2}
+                d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"
+              />
+            ) : (
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                strokeWidth={2}
+                d="M7 21h10a2 2 0 002-2V9.414a1 1 0 00-.293-.707l-5.414-5.414A1 1 0 0012.586 3H7a2 2 0 00-2 2v14a2 2 0 002 2z"
+              />
+            )}
+          </svg>
+        );
+      }
+
+  - path: components/forms/file-upload/file-upload-form.tsx
+    description: Complete file upload form component
+    content: |
+      'use client';
+
+      import { useFileUpload } from '@/hooks/use-file-upload';
+      import { Dropzone } from './dropzone';
+      import { FilePreview } from './file-preview';
+      import { FileUploadConfig } from './types';
+
+      interface FileUploadFormProps {
+        config?: FileUploadConfig;
+        onUpload?: (file: File) => Promise<string>;
+        onRemove?: (fileId: string) => Promise<void>;
+        onFilesChange?: (files: Array<{ id: string; url: string }>) => void;
+      }
+
+      export function FileUploadForm({
+        config,
+        onUpload,
+        onRemove,
+        onFilesChange,
+      }: FileUploadFormProps) {
+        const {
+          files,
+          isDragging,
+          inputRef,
+          config: mergedConfig,
+          addFiles,
+          removeFile,
+          retryUpload,
+          clearAll,
+          openFilePicker,
+          handleDragEnter,
+          handleDragLeave,
+          handleDragOver,
+          handleDrop,
+        } = useFileUpload({ ...config, onUpload, onRemove });
+
+        const successfulFiles = files.filter((f) => f.status === 'success');
+        const hasReachedLimit =
+          mergedConfig.maxFiles && files.length >= mergedConfig.maxFiles;
+
+        // Notify parent of successful uploads
+        const handleRemove = async (id: string) => {
+          await removeFile(id);
+          onFilesChange?.(
+            successfulFiles
+              .filter((f) => f.id !== id)
+              .map((f) => ({ id: f.id, url: f.url! }))
+          );
+        };
+
+        return (
+          <div className="space-y-4">
+            {/* Dropzone */}
+            <Dropzone
+              isDragging={isDragging}
+              config={mergedConfig}
+              inputRef={inputRef}
+              onFilesAdded={addFiles}
+              onDragEnter={handleDragEnter}
+              onDragLeave={handleDragLeave}
+              onDragOver={handleDragOver}
+              onDrop={handleDrop}
+              onClick={openFilePicker}
+              disabled={hasReachedLimit}
+            />
+
+            {/* File List */}
+            {files.length > 0 && (
+              <div className="space-y-3">
+                <div className="flex items-center justify-between">
+                  <span className="text-sm text-gray-500">
+                    {files.length} file{files.length !== 1 ? 's' : ''} selected
+                  </span>
+                  <button
+                    type="button"
+                    onClick={clearAll}
+                    className="text-sm text-red-600 hover:text-red-700"
+                  >
+                    Remove all
+                  </button>
+                </div>
+
+                <div className="space-y-2">
+                  {files.map((file) => (
+                    <FilePreview
+                      key={file.id}
+                      file={file}
+                      onRemove={handleRemove}
+                      onRetry={retryUpload}
+                    />
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        );
+      }
+
+  - path: app/api/upload/route.ts
+    description: Server-side upload handler
+    content: |
+      import { NextRequest, NextResponse } from 'next/server';
+      import { writeFile, mkdir } from 'fs/promises';
+      import path from 'path';
+
+      const UPLOAD_DIR = path.join(process.cwd(), 'public', 'uploads');
+      const MAX_SIZE = 5 * 1024 * 1024; // 5MB
+      const ALLOWED_TYPES = ['image/jpeg', 'image/png', 'image/gif', 'application/pdf'];
+
+      export async function POST(request: NextRequest) {
+        try {
+          const formData = await request.formData();
+          const file = formData.get('file') as File | null;
+
+          if (!file) {
+            return NextResponse.json({ error: 'No file provided' }, { status: 400 });
+          }
+
+          // Validate file type
+          if (!ALLOWED_TYPES.includes(file.type)) {
+            return NextResponse.json(
+              { error: 'File type not allowed' },
+              { status: 400 }
+            );
+          }
+
+          // Validate file size
+          if (file.size > MAX_SIZE) {
+            return NextResponse.json(
+              { error: 'File too large' },
+              { status: 400 }
+            );
+          }
+
+          // Create upload directory
+          await mkdir(UPLOAD_DIR, { recursive: true });
+
+          // Generate unique filename
+          const ext = path.extname(file.name);
+          const basename = path.basename(file.name, ext);
+          const timestamp = Date.now();
+          const filename = `${basename}-${timestamp}${ext}`;
+          const filepath = path.join(UPLOAD_DIR, filename);
+
+          // Save file
+          const bytes = await file.arrayBuffer();
+          const buffer = Buffer.from(bytes);
+          await writeFile(filepath, buffer);
+
+          const url = `/uploads/${filename}`;
+
+          return NextResponse.json({ url, filename });
+        } catch (error) {
+          console.error('Upload error:', error);
+          return NextResponse.json(
+            { error: 'Upload failed' },
+            { status: 500 }
+          );
+        }
+      }
+
+external_setup:
+  - step: Install dependencies
+    details: npm install react-hook-form zod @hookform/resolvers
+  - step: Create uploads directory
+    details: mkdir -p public/uploads && echo "public/uploads/*" >> .gitignore
+  - step: Add cn utility
+    details: See multi-step-form pattern for cn utility implementation
+  - step: Configure file size limits
+    details: Adjust MAX_SIZE in API route and config for production needs
+
+edge_cases:
+  - case: Large file uploads
+    solution: Use chunked upload for files >10MB, show progress per chunk
+  - case: Network interruption
+    solution: Implement resume capability with chunk tracking
+  - case: Duplicate files
+    solution: Generate unique filenames with timestamps or UUIDs
+  - case: Memory issues with many files
+    solution: Revoke object URLs when files are removed, limit concurrent uploads
+  - case: Mobile camera uploads
+    solution: Accept image/* for camera access, handle HEIC format conversion

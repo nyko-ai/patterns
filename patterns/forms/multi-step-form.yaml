@@ -1,0 +1,790 @@
+id: multi-step-form
+name: Multi-Step Form Wizard
+description: Multi-step wizard form with validation, progress tracking, and navigation
+category: forms
+tags:
+  - forms
+  - wizard
+  - multi-step
+  - react-hook-form
+  - validation
+dependencies:
+  - react-hook-form: "^7.54.0"
+  - zod: "^3.24.0"
+  - "@hookform/resolvers": "^3.9.0"
+files:
+  - path: components/forms/multi-step/types.ts
+    description: Type definitions for multi-step form
+    content: |
+      import { z } from 'zod';
+
+      // Step 1: Personal Info
+      export const personalInfoSchema = z.object({
+        firstName: z.string().min(2, 'First name must be at least 2 characters'),
+        lastName: z.string().min(2, 'Last name must be at least 2 characters'),
+        email: z.string().email('Invalid email address'),
+        phone: z.string().optional(),
+      });
+
+      // Step 2: Address
+      export const addressSchema = z.object({
+        street: z.string().min(5, 'Street address is required'),
+        city: z.string().min(2, 'City is required'),
+        state: z.string().min(2, 'State is required'),
+        zipCode: z.string().regex(/^\d{5}(-\d{4})?$/, 'Invalid ZIP code'),
+        country: z.string().min(2, 'Country is required'),
+      });
+
+      // Step 3: Preferences
+      export const preferencesSchema = z.object({
+        newsletter: z.boolean().default(false),
+        notifications: z.enum(['all', 'important', 'none']).default('important'),
+        interests: z.array(z.string()).min(1, 'Select at least one interest'),
+      });
+
+      // Combined schema
+      export const fullFormSchema = z.object({
+        ...personalInfoSchema.shape,
+        ...addressSchema.shape,
+        ...preferencesSchema.shape,
+      });
+
+      export type PersonalInfo = z.infer<typeof personalInfoSchema>;
+      export type Address = z.infer<typeof addressSchema>;
+      export type Preferences = z.infer<typeof preferencesSchema>;
+      export type FullFormData = z.infer<typeof fullFormSchema>;
+
+      export interface Step {
+        id: string;
+        title: string;
+        description?: string;
+        schema: z.ZodSchema;
+        fields: string[];
+      }
+
+      export const steps: Step[] = [
+        {
+          id: 'personal',
+          title: 'Personal Info',
+          description: 'Tell us about yourself',
+          schema: personalInfoSchema,
+          fields: ['firstName', 'lastName', 'email', 'phone'],
+        },
+        {
+          id: 'address',
+          title: 'Address',
+          description: 'Where should we send things?',
+          schema: addressSchema,
+          fields: ['street', 'city', 'state', 'zipCode', 'country'],
+        },
+        {
+          id: 'preferences',
+          title: 'Preferences',
+          description: 'Customize your experience',
+          schema: preferencesSchema,
+          fields: ['newsletter', 'notifications', 'interests'],
+        },
+      ];
+
+  - path: hooks/use-multi-step-form.ts
+    description: Custom hook for multi-step form logic
+    content: |
+      'use client';
+
+      import { useState, useCallback, useMemo } from 'react';
+      import { useForm, UseFormReturn } from 'react-hook-form';
+      import { zodResolver } from '@hookform/resolvers/zod';
+      import { z } from 'zod';
+      import { steps, fullFormSchema, FullFormData, Step } from '@/components/forms/multi-step/types';
+
+      interface UseMultiStepFormOptions {
+        defaultValues?: Partial<FullFormData>;
+        onComplete?: (data: FullFormData) => Promise<void>;
+      }
+
+      interface UseMultiStepFormReturn {
+        form: UseFormReturn<FullFormData>;
+        currentStep: number;
+        currentStepData: Step;
+        totalSteps: number;
+        isFirstStep: boolean;
+        isLastStep: boolean;
+        progress: number;
+        completedSteps: number[];
+        goToStep: (step: number) => Promise<boolean>;
+        nextStep: () => Promise<boolean>;
+        prevStep: () => void;
+        reset: () => void;
+        isSubmitting: boolean;
+        submitError: string | null;
+      }
+
+      export function useMultiStepForm({
+        defaultValues,
+        onComplete,
+      }: UseMultiStepFormOptions = {}): UseMultiStepFormReturn {
+        const [currentStep, setCurrentStep] = useState(0);
+        const [completedSteps, setCompletedSteps] = useState<number[]>([]);
+        const [isSubmitting, setIsSubmitting] = useState(false);
+        const [submitError, setSubmitError] = useState<string | null>(null);
+
+        const form = useForm<FullFormData>({
+          resolver: zodResolver(fullFormSchema),
+          defaultValues: defaultValues || {
+            firstName: '',
+            lastName: '',
+            email: '',
+            phone: '',
+            street: '',
+            city: '',
+            state: '',
+            zipCode: '',
+            country: '',
+            newsletter: false,
+            notifications: 'important',
+            interests: [],
+          },
+          mode: 'onChange',
+        });
+
+        const currentStepData = steps[currentStep];
+        const totalSteps = steps.length;
+        const isFirstStep = currentStep === 0;
+        const isLastStep = currentStep === totalSteps - 1;
+        const progress = ((currentStep + 1) / totalSteps) * 100;
+
+        const validateCurrentStep = useCallback(async (): Promise<boolean> => {
+          const stepSchema = currentStepData.schema;
+          const stepFields = currentStepData.fields as (keyof FullFormData)[];
+          const stepData: Record<string, any> = {};
+
+          stepFields.forEach((field) => {
+            stepData[field] = form.getValues(field);
+          });
+
+          try {
+            stepSchema.parse(stepData);
+
+            // Trigger validation for these specific fields
+            const result = await form.trigger(stepFields);
+            return result;
+          } catch (error) {
+            if (error instanceof z.ZodError) {
+              error.errors.forEach((err) => {
+                const field = err.path[0] as keyof FullFormData;
+                form.setError(field, { message: err.message });
+              });
+            }
+            return false;
+          }
+        }, [currentStepData, form]);
+
+        const goToStep = useCallback(
+          async (step: number): Promise<boolean> => {
+            if (step < 0 || step >= totalSteps) return false;
+
+            // If going forward, validate current step
+            if (step > currentStep) {
+              const isValid = await validateCurrentStep();
+              if (!isValid) return false;
+
+              // Mark current step as completed
+              setCompletedSteps((prev) =>
+                prev.includes(currentStep) ? prev : [...prev, currentStep]
+              );
+            }
+
+            setCurrentStep(step);
+            return true;
+          },
+          [currentStep, totalSteps, validateCurrentStep]
+        );
+
+        const nextStep = useCallback(async (): Promise<boolean> => {
+          if (isLastStep) {
+            // Final submission
+            const isValid = await form.trigger();
+            if (!isValid) return false;
+
+            setIsSubmitting(true);
+            setSubmitError(null);
+
+            try {
+              const data = form.getValues();
+              await onComplete?.(data);
+              setCompletedSteps((prev) => [...prev, currentStep]);
+              return true;
+            } catch (error) {
+              setSubmitError(
+                error instanceof Error ? error.message : 'Submission failed'
+              );
+              return false;
+            } finally {
+              setIsSubmitting(false);
+            }
+          }
+
+          return goToStep(currentStep + 1);
+        }, [isLastStep, currentStep, form, goToStep, onComplete]);
+
+        const prevStep = useCallback(() => {
+          if (!isFirstStep) {
+            setCurrentStep((prev) => prev - 1);
+          }
+        }, [isFirstStep]);
+
+        const reset = useCallback(() => {
+          form.reset();
+          setCurrentStep(0);
+          setCompletedSteps([]);
+          setSubmitError(null);
+        }, [form]);
+
+        return {
+          form,
+          currentStep,
+          currentStepData,
+          totalSteps,
+          isFirstStep,
+          isLastStep,
+          progress,
+          completedSteps,
+          goToStep,
+          nextStep,
+          prevStep,
+          reset,
+          isSubmitting,
+          submitError,
+        };
+      }
+
+  - path: components/forms/multi-step/progress-indicator.tsx
+    description: Step progress indicator component
+    content: |
+      'use client';
+
+      import { Step } from './types';
+      import { cn } from '@/lib/utils';
+
+      interface ProgressIndicatorProps {
+        steps: Step[];
+        currentStep: number;
+        completedSteps: number[];
+        onStepClick?: (step: number) => void;
+        allowNavigation?: boolean;
+      }
+
+      export function ProgressIndicator({
+        steps,
+        currentStep,
+        completedSteps,
+        onStepClick,
+        allowNavigation = true,
+      }: ProgressIndicatorProps) {
+        return (
+          <div className="w-full">
+            {/* Progress Bar */}
+            <div className="relative mb-8">
+              <div className="absolute top-5 left-0 right-0 h-0.5 bg-gray-200">
+                <div
+                  className="h-full bg-blue-600 transition-all duration-300"
+                  style={{
+                    width: `${(currentStep / (steps.length - 1)) * 100}%`,
+                  }}
+                />
+              </div>
+
+              {/* Step Indicators */}
+              <div className="relative flex justify-between">
+                {steps.map((step, index) => {
+                  const isCompleted = completedSteps.includes(index);
+                  const isCurrent = index === currentStep;
+                  const isClickable =
+                    allowNavigation && (isCompleted || index <= currentStep);
+
+                  return (
+                    <button
+                      key={step.id}
+                      type="button"
+                      disabled={!isClickable}
+                      onClick={() => isClickable && onStepClick?.(index)}
+                      className={cn(
+                        'flex flex-col items-center',
+                        isClickable ? 'cursor-pointer' : 'cursor-default'
+                      )}
+                    >
+                      {/* Circle */}
+                      <div
+                        className={cn(
+                          'w-10 h-10 rounded-full flex items-center justify-center text-sm font-medium transition-all',
+                          isCompleted
+                            ? 'bg-green-600 text-white'
+                            : isCurrent
+                              ? 'bg-blue-600 text-white ring-4 ring-blue-100'
+                              : 'bg-gray-200 text-gray-600'
+                        )}
+                      >
+                        {isCompleted ? (
+                          <svg
+                            className="w-5 h-5"
+                            fill="none"
+                            viewBox="0 0 24 24"
+                            stroke="currentColor"
+                          >
+                            <path
+                              strokeLinecap="round"
+                              strokeLinejoin="round"
+                              strokeWidth={2}
+                              d="M5 13l4 4L19 7"
+                            />
+                          </svg>
+                        ) : (
+                          index + 1
+                        )}
+                      </div>
+
+                      {/* Label */}
+                      <span
+                        className={cn(
+                          'mt-2 text-sm font-medium',
+                          isCurrent ? 'text-blue-600' : 'text-gray-500'
+                        )}
+                      >
+                        {step.title}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          </div>
+        );
+      }
+
+  - path: components/forms/multi-step/multi-step-form.tsx
+    description: Main multi-step form component
+    content: |
+      'use client';
+
+      import { FormProvider } from 'react-hook-form';
+      import { useMultiStepForm } from '@/hooks/use-multi-step-form';
+      import { ProgressIndicator } from './progress-indicator';
+      import { PersonalInfoStep } from './steps/personal-info-step';
+      import { AddressStep } from './steps/address-step';
+      import { PreferencesStep } from './steps/preferences-step';
+      import { steps, FullFormData } from './types';
+
+      interface MultiStepFormProps {
+        defaultValues?: Partial<FullFormData>;
+        onComplete: (data: FullFormData) => Promise<void>;
+      }
+
+      export function MultiStepForm({ defaultValues, onComplete }: MultiStepFormProps) {
+        const {
+          form,
+          currentStep,
+          currentStepData,
+          isFirstStep,
+          isLastStep,
+          completedSteps,
+          goToStep,
+          nextStep,
+          prevStep,
+          isSubmitting,
+          submitError,
+        } = useMultiStepForm({ defaultValues, onComplete });
+
+        const renderStep = () => {
+          switch (currentStep) {
+            case 0:
+              return <PersonalInfoStep />;
+            case 1:
+              return <AddressStep />;
+            case 2:
+              return <PreferencesStep />;
+            default:
+              return null;
+          }
+        };
+
+        const handleSubmit = async (e: React.FormEvent) => {
+          e.preventDefault();
+          await nextStep();
+        };
+
+        return (
+          <div className="max-w-2xl mx-auto p-6">
+            <ProgressIndicator
+              steps={steps}
+              currentStep={currentStep}
+              completedSteps={completedSteps}
+              onStepClick={goToStep}
+            />
+
+            <FormProvider {...form}>
+              <form onSubmit={handleSubmit} className="space-y-6">
+                {/* Step Header */}
+                <div className="mb-6">
+                  <h2 className="text-2xl font-bold">{currentStepData.title}</h2>
+                  {currentStepData.description && (
+                    <p className="text-gray-600 mt-1">{currentStepData.description}</p>
+                  )}
+                </div>
+
+                {/* Step Content */}
+                <div className="min-h-[300px]">{renderStep()}</div>
+
+                {/* Error Message */}
+                {submitError && (
+                  <div className="p-4 bg-red-50 text-red-600 rounded-lg">
+                    {submitError}
+                  </div>
+                )}
+
+                {/* Navigation */}
+                <div className="flex justify-between pt-6 border-t">
+                  <button
+                    type="button"
+                    onClick={prevStep}
+                    disabled={isFirstStep}
+                    className="px-6 py-2 border rounded-lg hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    Previous
+                  </button>
+
+                  <button
+                    type="submit"
+                    disabled={isSubmitting}
+                    className="px-6 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 flex items-center gap-2"
+                  >
+                    {isSubmitting ? (
+                      <>
+                        <svg className="animate-spin h-4 w-4" viewBox="0 0 24 24">
+                          <circle
+                            className="opacity-25"
+                            cx="12"
+                            cy="12"
+                            r="10"
+                            stroke="currentColor"
+                            strokeWidth="4"
+                            fill="none"
+                          />
+                          <path
+                            className="opacity-75"
+                            fill="currentColor"
+                            d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"
+                          />
+                        </svg>
+                        Submitting...
+                      </>
+                    ) : isLastStep ? (
+                      'Complete'
+                    ) : (
+                      'Next'
+                    )}
+                  </button>
+                </div>
+              </form>
+            </FormProvider>
+          </div>
+        );
+      }
+
+  - path: components/forms/multi-step/steps/personal-info-step.tsx
+    description: Personal info step component
+    content: |
+      'use client';
+
+      import { useFormContext } from 'react-hook-form';
+      import { FullFormData } from '../types';
+
+      export function PersonalInfoStep() {
+        const {
+          register,
+          formState: { errors },
+        } = useFormContext<FullFormData>();
+
+        return (
+          <div className="space-y-4">
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <label className="block text-sm font-medium mb-1">First Name</label>
+                <input
+                  {...register('firstName')}
+                  className="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500"
+                  placeholder="John"
+                />
+                {errors.firstName && (
+                  <p className="text-red-500 text-sm mt-1">{errors.firstName.message}</p>
+                )}
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium mb-1">Last Name</label>
+                <input
+                  {...register('lastName')}
+                  className="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500"
+                  placeholder="Doe"
+                />
+                {errors.lastName && (
+                  <p className="text-red-500 text-sm mt-1">{errors.lastName.message}</p>
+                )}
+              </div>
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium mb-1">Email</label>
+              <input
+                {...register('email')}
+                type="email"
+                className="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500"
+                placeholder="john@example.com"
+              />
+              {errors.email && (
+                <p className="text-red-500 text-sm mt-1">{errors.email.message}</p>
+              )}
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium mb-1">
+                Phone <span className="text-gray-400">(optional)</span>
+              </label>
+              <input
+                {...register('phone')}
+                type="tel"
+                className="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500"
+                placeholder="+1 (555) 123-4567"
+              />
+              {errors.phone && (
+                <p className="text-red-500 text-sm mt-1">{errors.phone.message}</p>
+              )}
+            </div>
+          </div>
+        );
+      }
+
+  - path: components/forms/multi-step/steps/address-step.tsx
+    description: Address step component
+    content: |
+      'use client';
+
+      import { useFormContext } from 'react-hook-form';
+      import { FullFormData } from '../types';
+
+      export function AddressStep() {
+        const {
+          register,
+          formState: { errors },
+        } = useFormContext<FullFormData>();
+
+        return (
+          <div className="space-y-4">
+            <div>
+              <label className="block text-sm font-medium mb-1">Street Address</label>
+              <input
+                {...register('street')}
+                className="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500"
+                placeholder="123 Main Street"
+              />
+              {errors.street && (
+                <p className="text-red-500 text-sm mt-1">{errors.street.message}</p>
+              )}
+            </div>
+
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <label className="block text-sm font-medium mb-1">City</label>
+                <input
+                  {...register('city')}
+                  className="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500"
+                  placeholder="New York"
+                />
+                {errors.city && (
+                  <p className="text-red-500 text-sm mt-1">{errors.city.message}</p>
+                )}
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium mb-1">State</label>
+                <input
+                  {...register('state')}
+                  className="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500"
+                  placeholder="NY"
+                />
+                {errors.state && (
+                  <p className="text-red-500 text-sm mt-1">{errors.state.message}</p>
+                )}
+              </div>
+            </div>
+
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <label className="block text-sm font-medium mb-1">ZIP Code</label>
+                <input
+                  {...register('zipCode')}
+                  className="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500"
+                  placeholder="10001"
+                />
+                {errors.zipCode && (
+                  <p className="text-red-500 text-sm mt-1">{errors.zipCode.message}</p>
+                )}
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium mb-1">Country</label>
+                <select
+                  {...register('country')}
+                  className="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500"
+                >
+                  <option value="">Select country</option>
+                  <option value="US">United States</option>
+                  <option value="CA">Canada</option>
+                  <option value="UK">United Kingdom</option>
+                  <option value="FR">France</option>
+                  <option value="DE">Germany</option>
+                </select>
+                {errors.country && (
+                  <p className="text-red-500 text-sm mt-1">{errors.country.message}</p>
+                )}
+              </div>
+            </div>
+          </div>
+        );
+      }
+
+  - path: components/forms/multi-step/steps/preferences-step.tsx
+    description: Preferences step component
+    content: |
+      'use client';
+
+      import { useFormContext, Controller } from 'react-hook-form';
+      import { FullFormData } from '../types';
+
+      const interests = [
+        { id: 'tech', label: 'Technology' },
+        { id: 'sports', label: 'Sports' },
+        { id: 'music', label: 'Music' },
+        { id: 'travel', label: 'Travel' },
+        { id: 'food', label: 'Food & Cooking' },
+        { id: 'art', label: 'Art & Design' },
+      ];
+
+      export function PreferencesStep() {
+        const {
+          register,
+          control,
+          formState: { errors },
+        } = useFormContext<FullFormData>();
+
+        return (
+          <div className="space-y-6">
+            {/* Newsletter */}
+            <div className="flex items-center gap-3">
+              <input
+                {...register('newsletter')}
+                type="checkbox"
+                id="newsletter"
+                className="w-4 h-4 text-blue-600 rounded focus:ring-blue-500"
+              />
+              <label htmlFor="newsletter" className="text-sm">
+                Subscribe to our newsletter for updates and promotions
+              </label>
+            </div>
+
+            {/* Notifications */}
+            <div>
+              <label className="block text-sm font-medium mb-2">
+                Notification Preferences
+              </label>
+              <div className="space-y-2">
+                {(['all', 'important', 'none'] as const).map((value) => (
+                  <label key={value} className="flex items-center gap-3">
+                    <input
+                      {...register('notifications')}
+                      type="radio"
+                      value={value}
+                      className="w-4 h-4 text-blue-600 focus:ring-blue-500"
+                    />
+                    <span className="text-sm capitalize">
+                      {value === 'all'
+                        ? 'All notifications'
+                        : value === 'important'
+                          ? 'Important only'
+                          : 'No notifications'}
+                    </span>
+                  </label>
+                ))}
+              </div>
+            </div>
+
+            {/* Interests */}
+            <div>
+              <label className="block text-sm font-medium mb-2">
+                Select Your Interests
+              </label>
+              <Controller
+                name="interests"
+                control={control}
+                render={({ field }) => (
+                  <div className="grid grid-cols-2 gap-2">
+                    {interests.map((interest) => (
+                      <label
+                        key={interest.id}
+                        className="flex items-center gap-2 p-3 border rounded-lg cursor-pointer hover:bg-gray-50"
+                      >
+                        <input
+                          type="checkbox"
+                          value={interest.id}
+                          checked={field.value?.includes(interest.id)}
+                          onChange={(e) => {
+                            const current = field.value || [];
+                            if (e.target.checked) {
+                              field.onChange([...current, interest.id]);
+                            } else {
+                              field.onChange(
+                                current.filter((id) => id !== interest.id)
+                              );
+                            }
+                          }}
+                          className="w-4 h-4 text-blue-600 rounded focus:ring-blue-500"
+                        />
+                        <span className="text-sm">{interest.label}</span>
+                      </label>
+                    ))}
+                  </div>
+                )}
+              />
+              {errors.interests && (
+                <p className="text-red-500 text-sm mt-1">
+                  {errors.interests.message}
+                </p>
+              )}
+            </div>
+          </div>
+        );
+      }
+
+external_setup:
+  - step: Install dependencies
+    details: npm install react-hook-form zod @hookform/resolvers
+  - step: Add cn utility
+    details: |
+      // lib/utils.ts
+      import { clsx, type ClassValue } from 'clsx';
+      import { twMerge } from 'tailwind-merge';
+
+      export function cn(...inputs: ClassValue[]) {
+        return twMerge(clsx(inputs));
+      }
+
+edge_cases:
+  - case: Browser back button
+    solution: Use beforeunload event to warn about unsaved changes
+  - case: Session timeout during form
+    solution: Save progress to localStorage and restore on page reload
+  - case: Validation across steps
+    solution: Use dependent validation in schema for fields that depend on previous steps
+  - case: Mobile keyboard navigation
+    solution: Ensure proper input types and tabIndex for mobile keyboards
+  - case: Accessibility
+    solution: Add aria-labels, role="form", and keyboard navigation support

@@ -1,0 +1,691 @@
+id: autosave-form
+name: Autosave Draft Form
+description: Form with automatic draft saving to localStorage and server sync
+category: forms
+tags:
+  - forms
+  - autosave
+  - draft
+  - localStorage
+  - react-hook-form
+dependencies:
+  - react-hook-form: "^7.54.0"
+  - zod: "^3.24.0"
+  - "@hookform/resolvers": "^3.9.0"
+files:
+  - path: hooks/use-autosave.ts
+    description: Generic autosave hook
+    content: |
+      'use client';
+
+      import { useEffect, useRef, useState, useCallback } from 'react';
+      import { useDebounce } from '@/hooks/use-debounce';
+
+      interface AutosaveOptions<T> {
+        key: string;
+        data: T;
+        onSave?: (data: T) => Promise<void>;
+        debounceMs?: number;
+        saveToServer?: boolean;
+        enabled?: boolean;
+      }
+
+      interface AutosaveState {
+        lastSaved: Date | null;
+        isSaving: boolean;
+        error: string | null;
+        hasUnsavedChanges: boolean;
+      }
+
+      export function useAutosave<T>({
+        key,
+        data,
+        onSave,
+        debounceMs = 2000,
+        saveToServer = false,
+        enabled = true,
+      }: AutosaveOptions<T>) {
+        const [state, setState] = useState<AutosaveState>({
+          lastSaved: null,
+          isSaving: false,
+          error: null,
+          hasUnsavedChanges: false,
+        });
+
+        const initialDataRef = useRef<string>(JSON.stringify(data));
+        const debouncedData = useDebounce(data, debounceMs);
+
+        // Check for unsaved changes
+        useEffect(() => {
+          const currentData = JSON.stringify(data);
+          const hasChanges = currentData !== initialDataRef.current;
+          setState((prev) => ({ ...prev, hasUnsavedChanges: hasChanges }));
+        }, [data]);
+
+        // Save to localStorage
+        const saveToLocal = useCallback(
+          (dataToSave: T) => {
+            try {
+              const draft = {
+                data: dataToSave,
+                savedAt: new Date().toISOString(),
+              };
+              localStorage.setItem(`draft:${key}`, JSON.stringify(draft));
+              return true;
+            } catch (error) {
+              console.error('Failed to save to localStorage:', error);
+              return false;
+            }
+          },
+          [key]
+        );
+
+        // Load from localStorage
+        const loadFromLocal = useCallback((): T | null => {
+          try {
+            const stored = localStorage.getItem(`draft:${key}`);
+            if (stored) {
+              const draft = JSON.parse(stored);
+              return draft.data;
+            }
+            return null;
+          } catch (error) {
+            console.error('Failed to load from localStorage:', error);
+            return null;
+          }
+        }, [key]);
+
+        // Clear draft
+        const clearDraft = useCallback(() => {
+          localStorage.removeItem(`draft:${key}`);
+          setState((prev) => ({
+            ...prev,
+            lastSaved: null,
+            hasUnsavedChanges: false,
+          }));
+        }, [key]);
+
+        // Autosave effect
+        useEffect(() => {
+          if (!enabled) return;
+
+          const save = async () => {
+            setState((prev) => ({ ...prev, isSaving: true, error: null }));
+
+            try {
+              // Always save to localStorage
+              saveToLocal(debouncedData);
+
+              // Optionally save to server
+              if (saveToServer && onSave) {
+                await onSave(debouncedData);
+              }
+
+              setState((prev) => ({
+                ...prev,
+                lastSaved: new Date(),
+                isSaving: false,
+                hasUnsavedChanges: false,
+              }));
+            } catch (error) {
+              setState((prev) => ({
+                ...prev,
+                isSaving: false,
+                error: error instanceof Error ? error.message : 'Save failed',
+              }));
+            }
+          };
+
+          save();
+        }, [debouncedData, enabled, onSave, saveToLocal, saveToServer]);
+
+        // Manual save
+        const saveNow = useCallback(async () => {
+          setState((prev) => ({ ...prev, isSaving: true, error: null }));
+
+          try {
+            saveToLocal(data);
+
+            if (saveToServer && onSave) {
+              await onSave(data);
+            }
+
+            setState((prev) => ({
+              ...prev,
+              lastSaved: new Date(),
+              isSaving: false,
+              hasUnsavedChanges: false,
+            }));
+          } catch (error) {
+            setState((prev) => ({
+              ...prev,
+              isSaving: false,
+              error: error instanceof Error ? error.message : 'Save failed',
+            }));
+          }
+        }, [data, onSave, saveToLocal, saveToServer]);
+
+        return {
+          ...state,
+          loadFromLocal,
+          clearDraft,
+          saveNow,
+        };
+      }
+
+  - path: hooks/use-debounce.ts
+    description: Debounce hook utility
+    content: |
+      'use client';
+
+      import { useState, useEffect } from 'react';
+
+      export function useDebounce<T>(value: T, delay: number): T {
+        const [debouncedValue, setDebouncedValue] = useState<T>(value);
+
+        useEffect(() => {
+          const timer = setTimeout(() => {
+            setDebouncedValue(value);
+          }, delay);
+
+          return () => {
+            clearTimeout(timer);
+          };
+        }, [value, delay]);
+
+        return debouncedValue;
+      }
+
+  - path: components/forms/autosave/autosave-indicator.tsx
+    description: Visual indicator for save status
+    content: |
+      'use client';
+
+      import { cn } from '@/lib/utils';
+
+      interface AutosaveIndicatorProps {
+        lastSaved: Date | null;
+        isSaving: boolean;
+        error: string | null;
+        hasUnsavedChanges: boolean;
+      }
+
+      export function AutosaveIndicator({
+        lastSaved,
+        isSaving,
+        error,
+        hasUnsavedChanges,
+      }: AutosaveIndicatorProps) {
+        const formatTime = (date: Date) => {
+          return date.toLocaleTimeString([], {
+            hour: '2-digit',
+            minute: '2-digit',
+          });
+        };
+
+        if (error) {
+          return (
+            <div className="flex items-center gap-2 text-sm text-red-600">
+              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  strokeWidth={2}
+                  d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"
+                />
+              </svg>
+              <span>Failed to save</span>
+            </div>
+          );
+        }
+
+        if (isSaving) {
+          return (
+            <div className="flex items-center gap-2 text-sm text-gray-500">
+              <svg
+                className="w-4 h-4 animate-spin"
+                fill="none"
+                viewBox="0 0 24 24"
+              >
+                <circle
+                  className="opacity-25"
+                  cx="12"
+                  cy="12"
+                  r="10"
+                  stroke="currentColor"
+                  strokeWidth="4"
+                />
+                <path
+                  className="opacity-75"
+                  fill="currentColor"
+                  d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"
+                />
+              </svg>
+              <span>Saving...</span>
+            </div>
+          );
+        }
+
+        if (hasUnsavedChanges) {
+          return (
+            <div className="flex items-center gap-2 text-sm text-amber-600">
+              <div className="w-2 h-2 rounded-full bg-amber-500" />
+              <span>Unsaved changes</span>
+            </div>
+          );
+        }
+
+        if (lastSaved) {
+          return (
+            <div className="flex items-center gap-2 text-sm text-green-600">
+              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  strokeWidth={2}
+                  d="M5 13l4 4L19 7"
+                />
+              </svg>
+              <span>Saved at {formatTime(lastSaved)}</span>
+            </div>
+          );
+        }
+
+        return null;
+      }
+
+  - path: components/forms/autosave/draft-recovery-modal.tsx
+    description: Modal for recovering saved draft
+    content: |
+      'use client';
+
+      import { useEffect, useState } from 'react';
+
+      interface DraftRecoveryModalProps<T> {
+        draftKey: string;
+        onRecover: (data: T) => void;
+        onDiscard: () => void;
+      }
+
+      export function DraftRecoveryModal<T>({
+        draftKey,
+        onRecover,
+        onDiscard,
+      }: DraftRecoveryModalProps<T>) {
+        const [draft, setDraft] = useState<{ data: T; savedAt: string } | null>(null);
+
+        useEffect(() => {
+          try {
+            const stored = localStorage.getItem(`draft:${draftKey}`);
+            if (stored) {
+              setDraft(JSON.parse(stored));
+            }
+          } catch {
+            // No draft found
+          }
+        }, [draftKey]);
+
+        if (!draft) return null;
+
+        const savedDate = new Date(draft.savedAt);
+        const formatDate = (date: Date) => {
+          return date.toLocaleString([], {
+            dateStyle: 'medium',
+            timeStyle: 'short',
+          });
+        };
+
+        const handleRecover = () => {
+          onRecover(draft.data);
+          setDraft(null);
+        };
+
+        const handleDiscard = () => {
+          localStorage.removeItem(`draft:${draftKey}`);
+          onDiscard();
+          setDraft(null);
+        };
+
+        return (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
+            <div className="bg-white rounded-lg shadow-xl max-w-md w-full mx-4 p-6">
+              <div className="flex items-start gap-4">
+                <div className="flex-shrink-0 w-10 h-10 rounded-full bg-blue-100 flex items-center justify-center">
+                  <svg
+                    className="w-5 h-5 text-blue-600"
+                    fill="none"
+                    viewBox="0 0 24 24"
+                    stroke="currentColor"
+                  >
+                    <path
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      strokeWidth={2}
+                      d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"
+                    />
+                  </svg>
+                </div>
+
+                <div className="flex-1">
+                  <h3 className="text-lg font-semibold">Recover Draft?</h3>
+                  <p className="text-gray-600 mt-1">
+                    We found an unsaved draft from {formatDate(savedDate)}. Would you
+                    like to recover it?
+                  </p>
+                </div>
+              </div>
+
+              <div className="flex justify-end gap-3 mt-6">
+                <button
+                  onClick={handleDiscard}
+                  className="px-4 py-2 text-gray-600 hover:text-gray-800"
+                >
+                  Discard
+                </button>
+                <button
+                  onClick={handleRecover}
+                  className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700"
+                >
+                  Recover Draft
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      }
+
+  - path: components/forms/autosave/autosave-form.tsx
+    description: Complete autosave form component
+    content: |
+      'use client';
+
+      import { useEffect, useState } from 'react';
+      import { useForm } from 'react-hook-form';
+      import { zodResolver } from '@hookform/resolvers/zod';
+      import { z } from 'zod';
+      import { useAutosave } from '@/hooks/use-autosave';
+      import { AutosaveIndicator } from './autosave-indicator';
+      import { DraftRecoveryModal } from './draft-recovery-modal';
+
+      const formSchema = z.object({
+        title: z.string().min(1, 'Title is required'),
+        content: z.string().min(10, 'Content must be at least 10 characters'),
+        tags: z.string().optional(),
+        published: z.boolean().default(false),
+      });
+
+      type FormData = z.infer<typeof formSchema>;
+
+      interface AutosaveFormProps {
+        draftKey: string;
+        defaultValues?: Partial<FormData>;
+        onSubmit: (data: FormData) => Promise<void>;
+        onSaveDraft?: (data: FormData) => Promise<void>;
+      }
+
+      export function AutosaveForm({
+        draftKey,
+        defaultValues,
+        onSubmit,
+        onSaveDraft,
+      }: AutosaveFormProps) {
+        const [showRecovery, setShowRecovery] = useState(true);
+        const [isSubmitting, setIsSubmitting] = useState(false);
+
+        const form = useForm<FormData>({
+          resolver: zodResolver(formSchema),
+          defaultValues: {
+            title: '',
+            content: '',
+            tags: '',
+            published: false,
+            ...defaultValues,
+          },
+        });
+
+        const formData = form.watch();
+
+        const {
+          lastSaved,
+          isSaving,
+          error,
+          hasUnsavedChanges,
+          clearDraft,
+          saveNow,
+        } = useAutosave({
+          key: draftKey,
+          data: formData,
+          onSave: onSaveDraft,
+          debounceMs: 2000,
+          saveToServer: !!onSaveDraft,
+        });
+
+        // Warn before leaving with unsaved changes
+        useEffect(() => {
+          const handleBeforeUnload = (e: BeforeUnloadEvent) => {
+            if (hasUnsavedChanges) {
+              e.preventDefault();
+              e.returnValue = '';
+            }
+          };
+
+          window.addEventListener('beforeunload', handleBeforeUnload);
+          return () => window.removeEventListener('beforeunload', handleBeforeUnload);
+        }, [hasUnsavedChanges]);
+
+        const handleRecover = (data: FormData) => {
+          form.reset(data);
+          setShowRecovery(false);
+        };
+
+        const handleDiscard = () => {
+          setShowRecovery(false);
+        };
+
+        const handleSubmit = async (data: FormData) => {
+          setIsSubmitting(true);
+          try {
+            await onSubmit(data);
+            clearDraft();
+            form.reset();
+          } finally {
+            setIsSubmitting(false);
+          }
+        };
+
+        return (
+          <>
+            {showRecovery && (
+              <DraftRecoveryModal<FormData>
+                draftKey={draftKey}
+                onRecover={handleRecover}
+                onDiscard={handleDiscard}
+              />
+            )}
+
+            <form onSubmit={form.handleSubmit(handleSubmit)} className="space-y-6">
+              {/* Header with autosave indicator */}
+              <div className="flex items-center justify-between">
+                <h2 className="text-xl font-semibold">Create Post</h2>
+                <AutosaveIndicator
+                  lastSaved={lastSaved}
+                  isSaving={isSaving}
+                  error={error}
+                  hasUnsavedChanges={hasUnsavedChanges}
+                />
+              </div>
+
+              {/* Title */}
+              <div>
+                <label className="block text-sm font-medium mb-1">Title</label>
+                <input
+                  {...form.register('title')}
+                  className="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500"
+                  placeholder="Enter title..."
+                />
+                {form.formState.errors.title && (
+                  <p className="text-red-500 text-sm mt-1">
+                    {form.formState.errors.title.message}
+                  </p>
+                )}
+              </div>
+
+              {/* Content */}
+              <div>
+                <label className="block text-sm font-medium mb-1">Content</label>
+                <textarea
+                  {...form.register('content')}
+                  rows={10}
+                  className="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500 resize-none"
+                  placeholder="Write your content..."
+                />
+                {form.formState.errors.content && (
+                  <p className="text-red-500 text-sm mt-1">
+                    {form.formState.errors.content.message}
+                  </p>
+                )}
+              </div>
+
+              {/* Tags */}
+              <div>
+                <label className="block text-sm font-medium mb-1">
+                  Tags <span className="text-gray-400">(comma-separated)</span>
+                </label>
+                <input
+                  {...form.register('tags')}
+                  className="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500"
+                  placeholder="react, nextjs, tutorial"
+                />
+              </div>
+
+              {/* Publish toggle */}
+              <div className="flex items-center gap-3">
+                <input
+                  {...form.register('published')}
+                  type="checkbox"
+                  id="published"
+                  className="w-4 h-4 text-blue-600 rounded focus:ring-blue-500"
+                />
+                <label htmlFor="published" className="text-sm">
+                  Publish immediately
+                </label>
+              </div>
+
+              {/* Actions */}
+              <div className="flex justify-between pt-4 border-t">
+                <button
+                  type="button"
+                  onClick={saveNow}
+                  disabled={isSaving || !hasUnsavedChanges}
+                  className="px-4 py-2 text-gray-600 hover:text-gray-800 disabled:opacity-50"
+                >
+                  Save Draft
+                </button>
+
+                <div className="flex gap-3">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      clearDraft();
+                      form.reset();
+                    }}
+                    className="px-4 py-2 border rounded-lg hover:bg-gray-50"
+                  >
+                    Clear
+                  </button>
+
+                  <button
+                    type="submit"
+                    disabled={isSubmitting}
+                    className="px-6 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50"
+                  >
+                    {isSubmitting ? 'Submitting...' : 'Submit'}
+                  </button>
+                </div>
+              </div>
+            </form>
+          </>
+        );
+      }
+
+  - path: app/api/drafts/[key]/route.ts
+    description: Server-side draft storage API
+    content: |
+      import { NextRequest, NextResponse } from 'next/server';
+
+      // In production, use a database like Redis or PostgreSQL
+      const drafts = new Map<string, { data: any; savedAt: string; userId: string }>();
+
+      interface Params {
+        params: Promise<{ key: string }>;
+      }
+
+      // Get draft
+      export async function GET(request: NextRequest, { params }: Params) {
+        const { key } = await params;
+        // TODO: Get userId from session
+        const userId = 'user-1';
+        const draftKey = `${userId}:${key}`;
+
+        const draft = drafts.get(draftKey);
+
+        if (!draft) {
+          return NextResponse.json({ error: 'Draft not found' }, { status: 404 });
+        }
+
+        return NextResponse.json(draft);
+      }
+
+      // Save draft
+      export async function PUT(request: NextRequest, { params }: Params) {
+        const { key } = await params;
+        // TODO: Get userId from session
+        const userId = 'user-1';
+        const draftKey = `${userId}:${key}`;
+
+        try {
+          const data = await request.json();
+
+          drafts.set(draftKey, {
+            data,
+            savedAt: new Date().toISOString(),
+            userId,
+          });
+
+          return NextResponse.json({ success: true });
+        } catch (error) {
+          return NextResponse.json({ error: 'Failed to save' }, { status: 500 });
+        }
+      }
+
+      // Delete draft
+      export async function DELETE(request: NextRequest, { params }: Params) {
+        const { key } = await params;
+        // TODO: Get userId from session
+        const userId = 'user-1';
+        const draftKey = `${userId}:${key}`;
+
+        drafts.delete(draftKey);
+
+        return NextResponse.json({ success: true });
+      }
+
+external_setup:
+  - step: Install dependencies
+    details: npm install react-hook-form zod @hookform/resolvers
+  - step: Create useDebounce hook
+    details: Already included in pattern files
+  - step: For server-side drafts
+    details: Replace in-memory Map with Redis or database storage
+
+edge_cases:
+  - case: localStorage quota exceeded
+    solution: Implement cleanup of old drafts, compress data before saving
+  - case: Multiple tabs editing same draft
+    solution: Use BroadcastChannel API to sync between tabs
+  - case: Offline support
+    solution: Queue server saves and sync when online using navigator.onLine
+  - case: Draft conflicts
+    solution: Show conflict resolution UI when server draft differs from local
+  - case: Sensitive data in drafts
+    solution: Encrypt localStorage data, clear on logout, set expiration
