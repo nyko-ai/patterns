@@ -1,0 +1,436 @@
+id: redis-upstash-cache
+version: "1.0.0"
+updated_at: "2026-01-31"
+author: "nyko-team"
+status: beta
+
+name: "Upstash Redis Caching Layer"
+description: "Serverless caching with Upstash Redis for API responses and data"
+
+category: cache
+tags:
+  - upstash
+  - redis
+  - cache
+  - serverless
+  - performance
+
+difficulty: intermediate
+time_estimate: "20-25 min"
+
+stack:
+  required:
+    - name: "next"
+      version: "^15.1.0"
+      reason: "App Router with server components"
+    - name: "@upstash/redis"
+      version: "^1.36.0"
+      reason: "Serverless Redis client"
+
+requires: []
+
+enables: []
+
+env_vars:
+  required:
+    - key: UPSTASH_REDIS_REST_URL
+      description: "Upstash Redis REST API URL"
+      format: "https://xxx.upstash.io"
+      where_to_find: "Upstash Console > Database > REST API"
+    - key: UPSTASH_REDIS_REST_TOKEN
+      description: "Upstash Redis REST API token"
+      format: "AXXXxxxxx..."
+      where_to_find: "Upstash Console > Database > REST API"
+
+external_setup:
+  - service: "Upstash"
+    url: "https://console.upstash.com"
+    steps:
+      - "Create account or log in"
+      - "Click 'Create Database'"
+      - "Select a region close to your deployment"
+      - "Copy the REST URL and Token from the database page"
+      - "Add credentials to .env.local"
+
+files:
+  - path: "lib/cache/redis.ts"
+    action: create
+    description: "Redis client with lazy initialization"
+    priority: 1
+
+  - path: "lib/cache/index.ts"
+    action: create
+    description: "Cache utilities and helpers"
+    priority: 2
+
+  - path: "lib/cache/cached-fetch.ts"
+    action: create
+    description: "Cached fetch wrapper"
+    priority: 3
+
+  - path: "app/api/cached/route.ts"
+    action: create
+    description: "Example cached API route"
+    priority: 4
+
+code:
+  lib/cache/redis.ts: |
+    import { Redis } from "@upstash/redis";
+
+    let redisInstance: Redis | null = null;
+
+    /**
+     * Get Redis client (lazy initialization for Next.js compatibility)
+     */
+    export function getRedis(): Redis {
+      if (!process.env.UPSTASH_REDIS_REST_URL) {
+        throw new Error("Missing UPSTASH_REDIS_REST_URL");
+      }
+      if (!process.env.UPSTASH_REDIS_REST_TOKEN) {
+        throw new Error("Missing UPSTASH_REDIS_REST_TOKEN");
+      }
+
+      if (!redisInstance) {
+        redisInstance = new Redis({
+          url: process.env.UPSTASH_REDIS_REST_URL,
+          token: process.env.UPSTASH_REDIS_REST_TOKEN,
+        });
+      }
+
+      return redisInstance;
+    }
+
+  lib/cache/index.ts: |
+    import { getRedis } from "./redis";
+
+    export interface CacheOptions {
+      /** Time to live in seconds */
+      ttl?: number;
+      /** Cache key prefix */
+      prefix?: string;
+      /** Tags for cache invalidation */
+      tags?: string[];
+    }
+
+    const DEFAULT_TTL = 3600; // 1 hour
+    const DEFAULT_PREFIX = "cache";
+
+    /**
+     * Generate a cache key from parts
+     */
+    export function cacheKey(...parts: string[]): string {
+      return parts.filter(Boolean).join(":");
+    }
+
+    /**
+     * Get a value from cache
+     */
+    export async function cacheGet<T>(key: string): Promise<T | null> {
+      const redis = getRedis();
+      const value = await redis.get<T>(key);
+      return value;
+    }
+
+    /**
+     * Set a value in cache with TTL
+     */
+    export async function cacheSet<T>(
+      key: string,
+      value: T,
+      options: CacheOptions = {}
+    ): Promise<void> {
+      const redis = getRedis();
+      const ttl = options.ttl ?? DEFAULT_TTL;
+
+      await redis.set(key, value, { ex: ttl });
+
+      // Store tags for invalidation
+      if (options.tags?.length) {
+        for (const tag of options.tags) {
+          await redis.sadd(`tag:${tag}`, key);
+          await redis.expire(`tag:${tag}`, ttl);
+        }
+      }
+    }
+
+    /**
+     * Delete a key from cache
+     */
+    export async function cacheDelete(key: string): Promise<void> {
+      const redis = getRedis();
+      await redis.del(key);
+    }
+
+    /**
+     * Invalidate all cache entries with a specific tag
+     */
+    export async function cacheInvalidateTag(tag: string): Promise<number> {
+      const redis = getRedis();
+      const keys = await redis.smembers(`tag:${tag}`);
+
+      if (keys.length === 0) return 0;
+
+      await redis.del(...keys, `tag:${tag}`);
+      return keys.length;
+    }
+
+    /**
+     * Cache-aside pattern: get from cache or compute and store
+     */
+    export async function cached<T>(
+      key: string,
+      fn: () => Promise<T>,
+      options: CacheOptions = {}
+    ): Promise<T> {
+      const fullKey = cacheKey(options.prefix ?? DEFAULT_PREFIX, key);
+
+      // Try to get from cache
+      const cachedValue = await cacheGet<T>(fullKey);
+      if (cachedValue !== null) {
+        return cachedValue;
+      }
+
+      // Compute value
+      const value = await fn();
+
+      // Store in cache (don't await to avoid blocking)
+      cacheSet(fullKey, value, options).catch((err) => {
+        console.error("Cache set error:", err);
+      });
+
+      return value;
+    }
+
+    /**
+     * Stale-while-revalidate pattern
+     */
+    export async function cachedSWR<T>(
+      key: string,
+      fn: () => Promise<T>,
+      options: CacheOptions & { staleTime?: number } = {}
+    ): Promise<{ data: T; stale: boolean }> {
+      const fullKey = cacheKey(options.prefix ?? DEFAULT_PREFIX, key);
+      const metaKey = `${fullKey}:meta`;
+      const redis = getRedis();
+
+      // Get cached value and metadata
+      const [cachedValue, meta] = await Promise.all([
+        cacheGet<T>(fullKey),
+        redis.get<{ updatedAt: number }>(metaKey),
+      ]);
+
+      const staleTime = options.staleTime ?? 60; // 1 minute default
+      const isStale = meta
+        ? Date.now() - meta.updatedAt > staleTime * 1000
+        : true;
+
+      if (cachedValue !== null) {
+        // If stale, revalidate in background
+        if (isStale) {
+          fn().then(async (value) => {
+            await Promise.all([
+              cacheSet(fullKey, value, options),
+              redis.set(metaKey, { updatedAt: Date.now() }, { ex: options.ttl ?? DEFAULT_TTL }),
+            ]);
+          }).catch(console.error);
+        }
+        return { data: cachedValue, stale: isStale };
+      }
+
+      // No cached value, compute fresh
+      const value = await fn();
+      await Promise.all([
+        cacheSet(fullKey, value, options),
+        redis.set(metaKey, { updatedAt: Date.now() }, { ex: options.ttl ?? DEFAULT_TTL }),
+      ]);
+
+      return { data: value, stale: false };
+    }
+
+    /**
+     * Memoize a function with cache
+     */
+    export function memoize<TArgs extends unknown[], TResult>(
+      fn: (...args: TArgs) => Promise<TResult>,
+      keyFn: (...args: TArgs) => string,
+      options: CacheOptions = {}
+    ): (...args: TArgs) => Promise<TResult> {
+      return async (...args: TArgs) => {
+        const key = keyFn(...args);
+        return cached(key, () => fn(...args), options);
+      };
+    }
+
+  lib/cache/cached-fetch.ts: |
+    import { cached, cacheKey, CacheOptions } from "./index";
+
+    interface CachedFetchOptions extends CacheOptions {
+      /** Request init options */
+      init?: RequestInit;
+      /** Parse response as JSON (default: true) */
+      json?: boolean;
+    }
+
+    /**
+     * Cached fetch wrapper
+     */
+    export async function cachedFetch<T>(
+      url: string,
+      options: CachedFetchOptions = {}
+    ): Promise<T> {
+      const { init, json = true, ...cacheOptions } = options;
+
+      // Create cache key from URL and method
+      const method = init?.method ?? "GET";
+      const key = cacheKey("fetch", method, url);
+
+      return cached(
+        key,
+        async () => {
+          const response = await fetch(url, {
+            ...init,
+            next: { revalidate: 0 }, // Disable Next.js cache, use our own
+          });
+
+          if (!response.ok) {
+            throw new Error(`Fetch failed: ${response.status}`);
+          }
+
+          return json ? response.json() : response.text();
+        },
+        cacheOptions
+      );
+    }
+
+    /**
+     * Cached API client factory
+     */
+    export function createCachedApiClient(baseUrl: string, defaultOptions: CachedFetchOptions = {}) {
+      return {
+        get: <T>(path: string, options?: CachedFetchOptions) =>
+          cachedFetch<T>(`${baseUrl}${path}`, {
+            ...defaultOptions,
+            ...options,
+            init: { ...defaultOptions.init, ...options?.init, method: "GET" },
+          }),
+
+        // POST/PUT/DELETE typically shouldn't be cached, but we can invalidate
+        post: async <T>(path: string, body: unknown, options?: Omit<CachedFetchOptions, "init">) => {
+          const response = await fetch(`${baseUrl}${path}`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(body),
+          });
+          return response.json() as Promise<T>;
+        },
+      };
+    }
+
+  app/api/cached/route.ts: |
+    import { NextResponse } from "next/server";
+    import { cached, cacheInvalidateTag } from "@/lib/cache";
+
+    interface ExternalData {
+      id: number;
+      title: string;
+      fetchedAt: string;
+    }
+
+    // Simulate external API call
+    async function fetchExternalData(): Promise<ExternalData> {
+      // Simulate latency
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+
+      return {
+        id: Math.floor(Math.random() * 1000),
+        title: "Fetched from external API",
+        fetchedAt: new Date().toISOString(),
+      };
+    }
+
+    export async function GET() {
+      const startTime = Date.now();
+
+      const data = await cached(
+        "external-data",
+        fetchExternalData,
+        {
+          ttl: 300, // 5 minutes
+          tags: ["external-api"],
+        }
+      );
+
+      const duration = Date.now() - startTime;
+
+      return NextResponse.json({
+        data,
+        cached: duration < 100, // If fast, it was cached
+        duration: `${duration}ms`,
+      });
+    }
+
+    // Invalidate cache
+    export async function DELETE() {
+      const invalidated = await cacheInvalidateTag("external-api");
+
+      return NextResponse.json({
+        message: "Cache invalidated",
+        keysInvalidated: invalidated,
+      });
+    }
+
+edge_cases:
+  - id: cache-stampede
+    symptom: "Many requests hit origin at same time when cache expires"
+    cause: "Cache stampede / thundering herd problem"
+    solution: |
+      Use stale-while-revalidate pattern:
+      const { data } = await cachedSWR(key, fetchFn, {
+        ttl: 3600,
+        staleTime: 60, // Serve stale for 1 min while revalidating
+      });
+
+      Or implement locking with Redis SETNX.
+
+  - id: cache-inconsistency
+    symptom: "Stale data shown after updates"
+    cause: "Cache not invalidated after mutations"
+    solution: |
+      Use tags for grouped invalidation:
+      // When caching
+      await cacheSet(key, data, { tags: ["user:123", "posts"] });
+
+      // After update
+      await cacheInvalidateTag("user:123");
+
+  - id: large-objects
+    symptom: "Error: payload too large"
+    cause: "Caching large objects exceeds Redis limits"
+    solution: |
+      1. Compress data before caching
+      2. Split into smaller chunks
+      3. Only cache essential fields
+      4. Use streaming for large responses
+
+  - id: cold-start
+    symptom: "First request after deployment is slow"
+    cause: "Cache is empty after deployment"
+    solution: |
+      Implement cache warming:
+      // In deployment script or startup
+      async function warmCache() {
+        await Promise.all([
+          cached("popular-data", fetchPopularData),
+          cached("config", fetchConfig),
+        ]);
+      }
+
+validation:
+  manual_test:
+    - "Add Upstash credentials to .env.local"
+    - "Start dev server: npm run dev"
+    - "GET /api/cached - note the duration (slow, ~1000ms)"
+    - "GET /api/cached again - should be fast (<100ms)"
+    - "DELETE /api/cached to invalidate"
+    - "GET /api/cached - slow again (cache miss)"
+    - "Check Upstash console for stored keys"

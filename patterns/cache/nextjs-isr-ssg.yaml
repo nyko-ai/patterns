@@ -1,0 +1,519 @@
+id: nextjs-isr-ssg
+version: "1.0.0"
+updated_at: "2026-01-31"
+author: "nyko-team"
+status: beta
+
+name: "Next.js ISR and SSG Strategies"
+description: "Incremental Static Regeneration and Static Site Generation patterns for Next.js App Router"
+
+category: cache
+tags:
+  - nextjs
+  - isr
+  - ssg
+  - static
+  - performance
+  - caching
+
+difficulty: intermediate
+time_estimate: "25-30 min"
+
+stack:
+  required:
+    - name: "next"
+      version: "^15.1.0"
+      reason: "App Router with ISR support"
+
+requires: []
+
+enables: []
+
+env_vars:
+  required: []
+  optional:
+    - key: REVALIDATE_SECRET
+      description: "Secret for on-demand revalidation API"
+      default: "your-secret-token"
+
+external_setup: []
+
+files:
+  - path: "app/blog/[slug]/page.tsx"
+    action: create
+    description: "ISR blog post with revalidation"
+    priority: 1
+
+  - path: "app/products/page.tsx"
+    action: create
+    description: "SSG product list with generateStaticParams"
+    priority: 2
+
+  - path: "app/api/revalidate/route.ts"
+    action: create
+    description: "On-demand revalidation API"
+    priority: 3
+
+  - path: "lib/cache-utils.ts"
+    action: create
+    description: "Cache utilities and fetch wrappers"
+    priority: 4
+
+  - path: "app/dashboard/page.tsx"
+    action: create
+    description: "Dynamic route with no caching"
+    priority: 5
+
+code:
+  lib/cache-utils.ts: |
+    import { unstable_cache } from "next/cache";
+
+    /**
+     * Revalidation time constants
+     */
+    export const REVALIDATE = {
+      /** No caching - always fresh */
+      NONE: 0,
+      /** Revalidate every minute */
+      MINUTE: 60,
+      /** Revalidate every 5 minutes */
+      FIVE_MINUTES: 300,
+      /** Revalidate every hour */
+      HOUR: 3600,
+      /** Revalidate daily */
+      DAY: 86400,
+      /** Revalidate weekly */
+      WEEK: 604800,
+    } as const;
+
+    /**
+     * Cached fetch wrapper with tags for invalidation
+     */
+    export async function cachedFetch<T>(
+      url: string,
+      options: {
+        revalidate?: number;
+        tags?: string[];
+      } = {}
+    ): Promise<T> {
+      const response = await fetch(url, {
+        next: {
+          revalidate: options.revalidate ?? REVALIDATE.HOUR,
+          tags: options.tags,
+        },
+      });
+
+      if (!response.ok) {
+        throw new Error(`Fetch failed: ${response.status}`);
+      }
+
+      return response.json();
+    }
+
+    /**
+     * Wrap a function with Next.js cache
+     * Uses unstable_cache for data layer caching
+     */
+    export function createCachedFunction<TArgs extends unknown[], TResult>(
+      fn: (...args: TArgs) => Promise<TResult>,
+      keyParts: string[],
+      options: {
+        revalidate?: number | false;
+        tags?: string[];
+      } = {}
+    ) {
+      return unstable_cache(
+        fn,
+        keyParts,
+        {
+          revalidate: options.revalidate,
+          tags: options.tags,
+        }
+      );
+    }
+
+    /**
+     * Database query caching example
+     */
+    export const getCachedPosts = createCachedFunction(
+      async (limit: number = 10) => {
+        // Simulated database call
+        // In real app: return prisma.post.findMany({ take: limit });
+        return [
+          { id: "1", title: "Post 1", slug: "post-1" },
+          { id: "2", title: "Post 2", slug: "post-2" },
+        ];
+      },
+      ["posts", "list"],
+      {
+        revalidate: REVALIDATE.FIVE_MINUTES,
+        tags: ["posts"],
+      }
+    );
+
+    export const getCachedPost = createCachedFunction(
+      async (slug: string) => {
+        // Simulated database call
+        return {
+          id: "1",
+          title: "Example Post",
+          slug,
+          content: "This is the content...",
+          publishedAt: new Date().toISOString(),
+        };
+      },
+      ["posts", "detail"],
+      {
+        revalidate: REVALIDATE.HOUR,
+        tags: ["posts"],
+      }
+    );
+
+  app/blog/[slug]/page.tsx: |
+    import { Metadata } from "next";
+    import { notFound } from "next/navigation";
+    import { getCachedPost, getCachedPosts, REVALIDATE } from "@/lib/cache-utils";
+
+    interface PageProps {
+      params: Promise<{ slug: string }>;
+    }
+
+    /**
+     * ISR: Revalidate every hour
+     * This sets the default for the entire route
+     */
+    export const revalidate = REVALIDATE.HOUR;
+
+    /**
+     * Generate static params for pre-rendering
+     * These pages are built at build time
+     */
+    export async function generateStaticParams() {
+      const posts = await getCachedPosts(100);
+
+      return posts.map((post) => ({
+        slug: post.slug,
+      }));
+    }
+
+    /**
+     * Dynamic metadata with caching
+     */
+    export async function generateMetadata({ params }: PageProps): Promise<Metadata> {
+      const { slug } = await params;
+      const post = await getCachedPost(slug);
+
+      if (!post) {
+        return { title: "Post Not Found" };
+      }
+
+      return {
+        title: post.title,
+        description: post.content.slice(0, 160),
+        openGraph: {
+          title: post.title,
+          type: "article",
+          publishedTime: post.publishedAt,
+        },
+      };
+    }
+
+    export default async function BlogPostPage({ params }: PageProps) {
+      const { slug } = await params;
+      const post = await getCachedPost(slug);
+
+      if (!post) {
+        notFound();
+      }
+
+      return (
+        <article className="max-w-2xl mx-auto py-8">
+          <h1 className="text-3xl font-bold mb-4">{post.title}</h1>
+          <time className="text-gray-500 block mb-8">
+            {new Date(post.publishedAt).toLocaleDateString()}
+          </time>
+          <div className="prose">
+            {post.content}
+          </div>
+        </article>
+      );
+    }
+
+  app/products/page.tsx: |
+    import { Suspense } from "react";
+    import { REVALIDATE, cachedFetch } from "@/lib/cache-utils";
+
+    interface Product {
+      id: string;
+      name: string;
+      price: number;
+      category: string;
+    }
+
+    /**
+     * SSG with periodic revalidation
+     */
+    export const revalidate = REVALIDATE.FIVE_MINUTES;
+
+    /**
+     * Force static generation
+     */
+    export const dynamic = "force-static";
+
+    async function getProducts(): Promise<Product[]> {
+      // Using fetch with Next.js cache
+      // In real app, this would be your API or database
+      return [
+        { id: "1", name: "Product 1", price: 29.99, category: "electronics" },
+        { id: "2", name: "Product 2", price: 49.99, category: "clothing" },
+        { id: "3", name: "Product 3", price: 19.99, category: "electronics" },
+      ];
+    }
+
+    async function ProductList() {
+      const products = await getProducts();
+
+      return (
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+          {products.map((product) => (
+            <div key={product.id} className="border rounded-lg p-4">
+              <h2 className="font-semibold">{product.name}</h2>
+              <p className="text-gray-600">${product.price}</p>
+              <span className="text-sm text-blue-600">{product.category}</span>
+            </div>
+          ))}
+        </div>
+      );
+    }
+
+    export default function ProductsPage() {
+      return (
+        <div className="container mx-auto py-8">
+          <h1 className="text-2xl font-bold mb-6">Products</h1>
+          <Suspense fallback={<div>Loading products...</div>}>
+            <ProductList />
+          </Suspense>
+        </div>
+      );
+    }
+
+  app/api/revalidate/route.ts: |
+    import { revalidatePath, revalidateTag } from "next/cache";
+    import { NextRequest, NextResponse } from "next/server";
+
+    /**
+     * On-demand revalidation API
+     *
+     * Usage:
+     * POST /api/revalidate
+     * Body: { "type": "path", "value": "/blog/my-post" }
+     * or:   { "type": "tag", "value": "posts" }
+     */
+    export async function POST(request: NextRequest) {
+      // Verify secret token
+      const secret = request.headers.get("x-revalidate-secret");
+      if (secret !== process.env.REVALIDATE_SECRET) {
+        return NextResponse.json(
+          { error: "Invalid secret" },
+          { status: 401 }
+        );
+      }
+
+      try {
+        const body = await request.json();
+        const { type, value } = body;
+
+        if (!type || !value) {
+          return NextResponse.json(
+            { error: "Missing type or value" },
+            { status: 400 }
+          );
+        }
+
+        if (type === "path") {
+          // Revalidate a specific path
+          revalidatePath(value);
+          return NextResponse.json({
+            revalidated: true,
+            type: "path",
+            value,
+            timestamp: Date.now(),
+          });
+        }
+
+        if (type === "tag") {
+          // Revalidate all pages with this tag
+          revalidateTag(value);
+          return NextResponse.json({
+            revalidated: true,
+            type: "tag",
+            value,
+            timestamp: Date.now(),
+          });
+        }
+
+        return NextResponse.json(
+          { error: "Invalid type. Use 'path' or 'tag'" },
+          { status: 400 }
+        );
+      } catch (error) {
+        return NextResponse.json(
+          { error: "Invalid request body" },
+          { status: 400 }
+        );
+      }
+    }
+
+    /**
+     * Webhook handler for CMS updates
+     */
+    export async function PUT(request: NextRequest) {
+      const secret = request.headers.get("x-revalidate-secret");
+      if (secret !== process.env.REVALIDATE_SECRET) {
+        return NextResponse.json({ error: "Invalid secret" }, { status: 401 });
+      }
+
+      try {
+        const body = await request.json();
+
+        // Handle different webhook events
+        switch (body.event) {
+          case "post.created":
+          case "post.updated":
+          case "post.deleted":
+            revalidateTag("posts");
+            if (body.slug) {
+              revalidatePath(`/blog/${body.slug}`);
+            }
+            break;
+
+          case "product.updated":
+            revalidateTag("products");
+            revalidatePath("/products");
+            break;
+
+          default:
+            // Revalidate everything for unknown events
+            revalidatePath("/", "layout");
+        }
+
+        return NextResponse.json({
+          revalidated: true,
+          event: body.event,
+          timestamp: Date.now(),
+        });
+      } catch (error) {
+        return NextResponse.json(
+          { error: "Webhook processing failed" },
+          { status: 500 }
+        );
+      }
+    }
+
+  app/dashboard/page.tsx: |
+    import { headers } from "next/headers";
+
+    /**
+     * Dynamic route - no caching
+     * Use for personalized or real-time data
+     */
+    export const dynamic = "force-dynamic";
+    export const revalidate = 0;
+
+    async function getUserData() {
+      // This would typically check auth and fetch user data
+      const headersList = await headers();
+      const userId = headersList.get("x-user-id") || "anonymous";
+
+      return {
+        userId,
+        lastLogin: new Date().toISOString(),
+        notifications: 5,
+      };
+    }
+
+    export default async function DashboardPage() {
+      const userData = await getUserData();
+
+      return (
+        <div className="container mx-auto py-8">
+          <h1 className="text-2xl font-bold mb-6">Dashboard</h1>
+          <div className="bg-white rounded-lg shadow p-6">
+            <p>User ID: {userData.userId}</p>
+            <p>Last Login: {userData.lastLogin}</p>
+            <p>Notifications: {userData.notifications}</p>
+          </div>
+          <p className="text-sm text-gray-500 mt-4">
+            This page is dynamically rendered on every request.
+          </p>
+        </div>
+      );
+    }
+
+edge_cases:
+  - id: stale-data-after-deploy
+    symptom: "Old content shown after deployment"
+    cause: "CDN cache not invalidated"
+    solution: |
+      1. Use revalidateTag in your deployment webhook
+      2. Set appropriate Cache-Control headers
+      3. Use Vercel's deployment hooks for auto-invalidation
+
+      // In deployment script
+      await fetch('/api/revalidate', {
+        method: 'POST',
+        headers: { 'x-revalidate-secret': process.env.REVALIDATE_SECRET },
+        body: JSON.stringify({ type: 'path', value: '/' }),
+      });
+
+  - id: isr-not-working
+    symptom: "Pages not revalidating as expected"
+    cause: "Incorrect revalidate configuration"
+    solution: |
+      1. Ensure revalidate is exported at route level
+      2. Check fetch calls have correct next.revalidate
+      3. For dynamic routes, use generateStaticParams
+
+      // Route-level
+      export const revalidate = 3600;
+
+      // Fetch-level
+      fetch(url, { next: { revalidate: 3600 } });
+
+  - id: build-timeout
+    symptom: "Build times out with many static pages"
+    cause: "Too many pages generated at build time"
+    solution: |
+      Limit generateStaticParams:
+      export async function generateStaticParams() {
+        // Only pre-build most popular pages
+        const posts = await getPopularPosts(100);
+        return posts.map(p => ({ slug: p.slug }));
+      }
+
+      // Allow dynamic rendering for others
+      export const dynamicParams = true;
+
+  - id: cache-not-invalidating
+    symptom: "revalidateTag not working"
+    cause: "Tags not properly set on fetches"
+    solution: |
+      Ensure tags are set on all related fetches:
+      fetch(url, {
+        next: {
+          tags: ['posts', `post-${id}`]
+        }
+      });
+
+      // Then invalidate
+      revalidateTag('posts');
+
+validation:
+  manual_test:
+    - "Build the project: npm run build"
+    - "Start production server: npm start"
+    - "Visit /blog/post-1 - check response headers for cache status"
+    - "Wait for revalidate period, refresh - verify new version"
+    - "POST to /api/revalidate with tag - verify immediate update"
+    - "Visit /dashboard - verify no caching (dynamic)"
+    - "Use Next.js build output to verify static pages generated"

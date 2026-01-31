@@ -1,0 +1,641 @@
+id: memoization-patterns
+version: "1.0.0"
+updated_at: "2026-01-31"
+author: "nyko-team"
+status: beta
+
+name: "React and Lodash Memoization Patterns"
+description: "Memoization techniques for React components and utility functions"
+
+category: cache
+tags:
+  - memoization
+  - react
+  - lodash
+  - performance
+  - optimization
+
+difficulty: intermediate
+time_estimate: "20-25 min"
+
+stack:
+  required:
+    - name: "react"
+      version: "^19.0.0"
+      reason: "React hooks for memoization"
+    - name: "lodash"
+      version: "^4.17.0"
+      reason: "Utility memoization functions"
+    - name: "@types/lodash"
+      version: "^4.17.0"
+      reason: "TypeScript definitions"
+
+requires: []
+
+enables: []
+
+env_vars:
+  required: []
+
+external_setup: []
+
+files:
+  - path: "lib/memoize.ts"
+    action: create
+    description: "Custom memoization utilities"
+    priority: 1
+
+  - path: "hooks/use-memoized.ts"
+    action: create
+    description: "React hooks for memoization"
+    priority: 2
+
+  - path: "components/memoized-list.tsx"
+    action: create
+    description: "Example memoized list component"
+    priority: 3
+
+  - path: "lib/selectors.ts"
+    action: create
+    description: "Memoized selector functions"
+    priority: 4
+
+code:
+  lib/memoize.ts: |
+    import memoize from "lodash/memoize";
+    import debounce from "lodash/debounce";
+    import throttle from "lodash/throttle";
+
+    /**
+     * Memoize with custom cache key resolver
+     * Good for functions with complex arguments
+     */
+    export function memoizeWithKey<TArgs extends unknown[], TResult>(
+      fn: (...args: TArgs) => TResult,
+      resolver: (...args: TArgs) => string
+    ): ((...args: TArgs) => TResult) & { cache: Map<string, TResult> } {
+      const memoized = memoize(fn, resolver);
+      return memoized as ((...args: TArgs) => TResult) & { cache: Map<string, TResult> };
+    }
+
+    /**
+     * Memoize with TTL (time to live)
+     * Automatically expires cached values
+     */
+    export function memoizeWithTTL<TArgs extends unknown[], TResult>(
+      fn: (...args: TArgs) => TResult,
+      ttlMs: number,
+      resolver?: (...args: TArgs) => string
+    ): (...args: TArgs) => TResult {
+      const cache = new Map<string, { value: TResult; expiry: number }>();
+
+      return (...args: TArgs): TResult => {
+        const key = resolver ? resolver(...args) : JSON.stringify(args);
+        const now = Date.now();
+        const cached = cache.get(key);
+
+        if (cached && cached.expiry > now) {
+          return cached.value;
+        }
+
+        const result = fn(...args);
+        cache.set(key, { value: result, expiry: now + ttlMs });
+
+        // Cleanup expired entries periodically
+        if (cache.size > 100) {
+          for (const [k, v] of cache.entries()) {
+            if (v.expiry <= now) cache.delete(k);
+          }
+        }
+
+        return result;
+      };
+    }
+
+    /**
+     * Memoize with max cache size (LRU-like)
+     */
+    export function memoizeWithSize<TArgs extends unknown[], TResult>(
+      fn: (...args: TArgs) => TResult,
+      maxSize: number,
+      resolver?: (...args: TArgs) => string
+    ): (...args: TArgs) => TResult {
+      const cache = new Map<string, TResult>();
+
+      return (...args: TArgs): TResult => {
+        const key = resolver ? resolver(...args) : JSON.stringify(args);
+
+        if (cache.has(key)) {
+          // Move to end (most recently used)
+          const value = cache.get(key)!;
+          cache.delete(key);
+          cache.set(key, value);
+          return value;
+        }
+
+        const result = fn(...args);
+        cache.set(key, result);
+
+        // Remove oldest if over size limit
+        if (cache.size > maxSize) {
+          const firstKey = cache.keys().next().value;
+          if (firstKey) cache.delete(firstKey);
+        }
+
+        return result;
+      };
+    }
+
+    /**
+     * Memoize async functions
+     */
+    export function memoizeAsync<TArgs extends unknown[], TResult>(
+      fn: (...args: TArgs) => Promise<TResult>,
+      resolver?: (...args: TArgs) => string
+    ): (...args: TArgs) => Promise<TResult> {
+      const cache = new Map<string, Promise<TResult>>();
+
+      return async (...args: TArgs): Promise<TResult> => {
+        const key = resolver ? resolver(...args) : JSON.stringify(args);
+
+        if (cache.has(key)) {
+          return cache.get(key)!;
+        }
+
+        const promise = fn(...args);
+        cache.set(key, promise);
+
+        try {
+          return await promise;
+        } catch (error) {
+          // Remove failed promises from cache
+          cache.delete(key);
+          throw error;
+        }
+      };
+    }
+
+    /**
+     * Create a debounced function
+     */
+    export function createDebouncedFn<TArgs extends unknown[], TResult>(
+      fn: (...args: TArgs) => TResult,
+      waitMs: number,
+      options?: { leading?: boolean; trailing?: boolean; maxWait?: number }
+    ) {
+      return debounce(fn, waitMs, options);
+    }
+
+    /**
+     * Create a throttled function
+     */
+    export function createThrottledFn<TArgs extends unknown[], TResult>(
+      fn: (...args: TArgs) => TResult,
+      waitMs: number,
+      options?: { leading?: boolean; trailing?: boolean }
+    ) {
+      return throttle(fn, waitMs, options);
+    }
+
+    /**
+     * Expensive computation example
+     */
+    export const expensiveCalculation = memoizeWithTTL(
+      (data: number[]): { sum: number; average: number; max: number } => {
+        console.log("Computing...");
+        const sum = data.reduce((a, b) => a + b, 0);
+        return {
+          sum,
+          average: sum / data.length,
+          max: Math.max(...data),
+        };
+      },
+      5000, // 5 second TTL
+      (data) => data.join(",")
+    );
+
+  hooks/use-memoized.ts: |
+    "use client";
+
+    import { useMemo, useCallback, useRef, useEffect } from "react";
+
+    /**
+     * useMemo with deep comparison
+     * Useful when dependencies are objects/arrays that may be recreated
+     */
+    export function useDeepMemo<T>(factory: () => T, deps: unknown[]): T {
+      const ref = useRef<{ deps: unknown[]; value: T }>();
+
+      if (!ref.current || !deepEqual(deps, ref.current.deps)) {
+        ref.current = { deps, value: factory() };
+      }
+
+      return ref.current.value;
+    }
+
+    /**
+     * useCallback with deep comparison
+     */
+    export function useDeepCallback<T extends (...args: unknown[]) => unknown>(
+      callback: T,
+      deps: unknown[]
+    ): T {
+      const ref = useRef<{ deps: unknown[]; callback: T }>();
+
+      if (!ref.current || !deepEqual(deps, ref.current.deps)) {
+        ref.current = { deps, callback };
+      }
+
+      return ref.current.callback;
+    }
+
+    /**
+     * Memoize expensive computations with automatic cache invalidation
+     */
+    export function useMemoizedValue<T>(
+      compute: () => T,
+      deps: unknown[],
+      options: { ttl?: number } = {}
+    ): T {
+      const cacheRef = useRef<{ value: T; timestamp: number } | null>(null);
+      const depsRef = useRef<unknown[]>(deps);
+
+      const depsChanged = !deepEqual(deps, depsRef.current);
+      const expired = options.ttl
+        ? Date.now() - (cacheRef.current?.timestamp ?? 0) > options.ttl
+        : false;
+
+      if (depsChanged || expired || !cacheRef.current) {
+        cacheRef.current = { value: compute(), timestamp: Date.now() };
+        depsRef.current = deps;
+      }
+
+      return cacheRef.current.value;
+    }
+
+    /**
+     * Memoize a callback that only changes when specific props change
+     */
+    export function useStableCallback<T extends (...args: unknown[]) => unknown>(
+      callback: T
+    ): T {
+      const callbackRef = useRef(callback);
+
+      useEffect(() => {
+        callbackRef.current = callback;
+      });
+
+      return useCallback(
+        ((...args: unknown[]) => callbackRef.current(...args)) as T,
+        []
+      );
+    }
+
+    /**
+     * Debounced value hook
+     */
+    export function useDebouncedValue<T>(value: T, delay: number): T {
+      const [debouncedValue, setDebouncedValue] = useState(value);
+
+      useEffect(() => {
+        const timer = setTimeout(() => setDebouncedValue(value), delay);
+        return () => clearTimeout(timer);
+      }, [value, delay]);
+
+      return debouncedValue;
+    }
+
+    /**
+     * Throttled value hook
+     */
+    export function useThrottledValue<T>(value: T, limit: number): T {
+      const [throttledValue, setThrottledValue] = useState(value);
+      const lastRan = useRef(Date.now());
+
+      useEffect(() => {
+        const handler = setTimeout(() => {
+          if (Date.now() - lastRan.current >= limit) {
+            setThrottledValue(value);
+            lastRan.current = Date.now();
+          }
+        }, limit - (Date.now() - lastRan.current));
+
+        return () => clearTimeout(handler);
+      }, [value, limit]);
+
+      return throttledValue;
+    }
+
+    // Helper: Deep equality check
+    function deepEqual(a: unknown, b: unknown): boolean {
+      if (a === b) return true;
+      if (typeof a !== typeof b) return false;
+      if (typeof a !== "object" || a === null || b === null) return false;
+
+      const keysA = Object.keys(a as object);
+      const keysB = Object.keys(b as object);
+
+      if (keysA.length !== keysB.length) return false;
+
+      for (const key of keysA) {
+        if (!deepEqual((a as Record<string, unknown>)[key], (b as Record<string, unknown>)[key])) {
+          return false;
+        }
+      }
+
+      return true;
+    }
+
+    // Re-export useState for useDebouncedValue and useThrottledValue
+    import { useState } from "react";
+
+  components/memoized-list.tsx: |
+    "use client";
+
+    import React, { memo, useMemo, useCallback, useState } from "react";
+
+    interface Item {
+      id: string;
+      name: string;
+      category: string;
+      price: number;
+    }
+
+    interface ItemProps {
+      item: Item;
+      onSelect: (id: string) => void;
+      isSelected: boolean;
+    }
+
+    /**
+     * Memoized list item - only re-renders when props change
+     */
+    const ListItem = memo(function ListItem({
+      item,
+      onSelect,
+      isSelected,
+    }: ItemProps) {
+      console.log(`Rendering item: ${item.id}`);
+
+      return (
+        <div
+          className={`p-4 border rounded cursor-pointer ${
+            isSelected ? "bg-blue-100 border-blue-500" : "bg-white"
+          }`}
+          onClick={() => onSelect(item.id)}
+        >
+          <h3 className="font-medium">{item.name}</h3>
+          <p className="text-sm text-gray-500">{item.category}</p>
+          <p className="text-lg font-bold">${item.price}</p>
+        </div>
+      );
+    });
+
+    /**
+     * Custom comparison function for memo
+     */
+    const ListItemWithCustomCompare = memo(
+      function ListItem({ item, onSelect, isSelected }: ItemProps) {
+        return (
+          <div onClick={() => onSelect(item.id)}>
+            {item.name} - ${item.price}
+          </div>
+        );
+      },
+      (prevProps, nextProps) => {
+        // Only re-render if these specific props change
+        return (
+          prevProps.item.id === nextProps.item.id &&
+          prevProps.item.name === nextProps.item.name &&
+          prevProps.item.price === nextProps.item.price &&
+          prevProps.isSelected === nextProps.isSelected
+        );
+      }
+    );
+
+    interface MemoizedListProps {
+      items: Item[];
+      filterCategory?: string;
+      sortBy?: "name" | "price";
+    }
+
+    export function MemoizedList({
+      items,
+      filterCategory,
+      sortBy = "name",
+    }: MemoizedListProps) {
+      const [selectedId, setSelectedId] = useState<string | null>(null);
+
+      // Memoize filtered items
+      const filteredItems = useMemo(() => {
+        console.log("Filtering items...");
+        if (!filterCategory) return items;
+        return items.filter((item) => item.category === filterCategory);
+      }, [items, filterCategory]);
+
+      // Memoize sorted items
+      const sortedItems = useMemo(() => {
+        console.log("Sorting items...");
+        return [...filteredItems].sort((a, b) => {
+          if (sortBy === "price") return a.price - b.price;
+          return a.name.localeCompare(b.name);
+        });
+      }, [filteredItems, sortBy]);
+
+      // Memoize statistics
+      const stats = useMemo(() => {
+        console.log("Calculating stats...");
+        const total = sortedItems.reduce((sum, item) => sum + item.price, 0);
+        return {
+          count: sortedItems.length,
+          total,
+          average: total / sortedItems.length || 0,
+        };
+      }, [sortedItems]);
+
+      // Stable callback reference
+      const handleSelect = useCallback((id: string) => {
+        setSelectedId((prev) => (prev === id ? null : id));
+      }, []);
+
+      return (
+        <div className="space-y-4">
+          <div className="text-sm text-gray-500">
+            {stats.count} items | Total: ${stats.total.toFixed(2)} | Avg: $
+            {stats.average.toFixed(2)}
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+            {sortedItems.map((item) => (
+              <ListItem
+                key={item.id}
+                item={item}
+                onSelect={handleSelect}
+                isSelected={selectedId === item.id}
+              />
+            ))}
+          </div>
+        </div>
+      );
+    }
+
+  lib/selectors.ts: |
+    import memoize from "lodash/memoize";
+
+    /**
+     * Selector pattern for derived state
+     * Similar to Redux selectors / Reselect
+     */
+
+    interface User {
+      id: string;
+      name: string;
+      email: string;
+      role: "admin" | "user";
+    }
+
+    interface Post {
+      id: string;
+      authorId: string;
+      title: string;
+      published: boolean;
+    }
+
+    interface State {
+      users: Record<string, User>;
+      posts: Record<string, Post>;
+    }
+
+    // Basic selectors
+    export const selectUsers = (state: State) => state.users;
+    export const selectPosts = (state: State) => state.posts;
+
+    // Memoized derived selectors
+    export const selectUserList = memoize(
+      (state: State): User[] => Object.values(state.users),
+      (state) => JSON.stringify(state.users)
+    );
+
+    export const selectAdminUsers = memoize(
+      (state: State): User[] =>
+        Object.values(state.users).filter((user) => user.role === "admin"),
+      (state) => JSON.stringify(state.users)
+    );
+
+    export const selectPublishedPosts = memoize(
+      (state: State): Post[] =>
+        Object.values(state.posts).filter((post) => post.published),
+      (state) => JSON.stringify(state.posts)
+    );
+
+    // Parameterized selectors
+    export const selectUserById = memoize(
+      (state: State, userId: string): User | undefined => state.users[userId],
+      (state, userId) => `${userId}-${JSON.stringify(state.users[userId])}`
+    );
+
+    export const selectPostsByAuthor = memoize(
+      (state: State, authorId: string): Post[] =>
+        Object.values(state.posts).filter((post) => post.authorId === authorId),
+      (state, authorId) => `${authorId}-${JSON.stringify(state.posts)}`
+    );
+
+    // Composed selectors
+    export const selectPostsWithAuthors = memoize(
+      (state: State): Array<Post & { author: User | undefined }> =>
+        Object.values(state.posts).map((post) => ({
+          ...post,
+          author: state.users[post.authorId],
+        })),
+      (state) => JSON.stringify({ users: state.users, posts: state.posts })
+    );
+
+    /**
+     * Create a selector with automatic memoization
+     */
+    export function createSelector<TState, TArgs extends unknown[], TResult>(
+      selector: (state: TState, ...args: TArgs) => TResult,
+      resolver: (state: TState, ...args: TArgs) => string
+    ): (state: TState, ...args: TArgs) => TResult {
+      return memoize(selector, resolver);
+    }
+
+    // Usage example
+    export const selectFilteredPosts = createSelector(
+      (state: State, filter: { published?: boolean; authorId?: string }) => {
+        let posts = Object.values(state.posts);
+
+        if (filter.published !== undefined) {
+          posts = posts.filter((p) => p.published === filter.published);
+        }
+        if (filter.authorId) {
+          posts = posts.filter((p) => p.authorId === filter.authorId);
+        }
+
+        return posts;
+      },
+      (state, filter) => JSON.stringify({ posts: state.posts, filter })
+    );
+
+edge_cases:
+  - id: stale-closure
+    symptom: "Callback uses old state value"
+    cause: "Closure captures stale reference"
+    solution: |
+      Use useStableCallback or functional updates:
+      // Instead of
+      onClick={() => setCount(count + 1)}
+
+      // Use
+      onClick={() => setCount(prev => prev + 1)}
+
+      // Or useStableCallback for complex callbacks
+      const stableOnClick = useStableCallback(handleClick);
+
+  - id: over-memoization
+    symptom: "Code is slow despite memoization"
+    cause: "Memoization overhead exceeds computation cost"
+    solution: |
+      Only memoize when:
+      1. Computation is expensive (>1ms)
+      2. Result is used multiple times
+      3. Inputs change less often than renders
+
+      // Don't memoize simple operations
+      const total = a + b; // Fast, no memo needed
+
+      // Do memoize expensive operations
+      const result = useMemo(() => expensiveSort(items), [items]);
+
+  - id: memory-leak
+    symptom: "Memory grows with memoized functions"
+    cause: "Cache grows unbounded"
+    solution: |
+      Use memoizeWithSize or memoizeWithTTL:
+      const memoized = memoizeWithSize(fn, 100); // Max 100 entries
+      const memoized = memoizeWithTTL(fn, 60000); // 1 minute TTL
+
+      Or clear cache periodically:
+      memoized.cache.clear();
+
+  - id: reference-equality
+    symptom: "Memo not working with object dependencies"
+    cause: "New object reference created each render"
+    solution: |
+      Use useDeepMemo or stable references:
+      // Bad - new object each render
+      useMemo(() => compute(filter), [{ status: "active" }]);
+
+      // Good - primitive or memoized dependency
+      const filter = useMemo(() => ({ status: "active" }), []);
+      useMemo(() => compute(filter), [filter]);
+
+validation:
+  manual_test:
+    - "Add memoization to a list component"
+    - "Open React DevTools Profiler"
+    - "Trigger a state change"
+    - "Verify memoized components don't re-render"
+    - "Check console.log in memoized functions"
+    - "Compare render counts before/after memoization"
+    - "Test with large datasets (1000+ items)"

@@ -1,0 +1,512 @@
+id: react-query-caching
+version: "1.0.0"
+updated_at: "2026-01-31"
+author: "nyko-team"
+status: beta
+
+name: "TanStack React Query Caching"
+description: "Client-side caching configuration with TanStack React Query for optimal performance"
+
+category: cache
+tags:
+  - react-query
+  - tanstack
+  - cache
+  - client
+  - nextjs
+
+difficulty: intermediate
+time_estimate: "20-25 min"
+
+stack:
+  required:
+    - name: "next"
+      version: "^15.1.0"
+      reason: "App Router with client components"
+    - name: "@tanstack/react-query"
+      version: "^5.90.0"
+      reason: "Data fetching and caching library"
+
+requires: []
+
+enables:
+  - optimistic-updates
+
+env_vars:
+  required: []
+
+external_setup: []
+
+files:
+  - path: "lib/query-client.ts"
+    action: create
+    description: "Query client factory with optimal defaults"
+    priority: 1
+
+  - path: "components/providers/query-provider.tsx"
+    action: create
+    description: "React Query provider for App Router"
+    priority: 2
+
+  - path: "lib/query-keys.ts"
+    action: create
+    description: "Type-safe query key factory"
+    priority: 3
+
+  - path: "hooks/use-cached-query.ts"
+    action: create
+    description: "Custom hooks with caching strategies"
+    priority: 4
+
+  - path: "app/layout.tsx"
+    action: modify
+    description: "Add QueryProvider to layout"
+    priority: 5
+
+code:
+  lib/query-client.ts: |
+    import { QueryClient, defaultShouldDehydrateQuery } from "@tanstack/react-query";
+
+    /**
+     * Query client factory with optimal caching defaults
+     */
+    function makeQueryClient() {
+      return new QueryClient({
+        defaultOptions: {
+          queries: {
+            // Stale time: how long data is considered fresh
+            staleTime: 60 * 1000, // 1 minute
+
+            // GC time: how long inactive queries stay in cache
+            gcTime: 5 * 60 * 1000, // 5 minutes
+
+            // Retry configuration
+            retry: 1,
+            retryDelay: (attemptIndex) => Math.min(1000 * 2 ** attemptIndex, 30000),
+
+            // Refetch behavior
+            refetchOnWindowFocus: false,
+            refetchOnReconnect: true,
+            refetchOnMount: true,
+
+            // Network mode
+            networkMode: "offlineFirst",
+          },
+          mutations: {
+            retry: 1,
+            networkMode: "offlineFirst",
+          },
+          dehydrate: {
+            shouldDehydrateQuery: (query) =>
+              defaultShouldDehydrateQuery(query) ||
+              query.state.status === "pending",
+          },
+        },
+      });
+    }
+
+    let browserQueryClient: QueryClient | undefined = undefined;
+
+    /**
+     * Get or create query client
+     * Server: always creates new client
+     * Browser: singleton pattern
+     */
+    export function getQueryClient() {
+      if (typeof window === "undefined") {
+        // Server: always make a new query client
+        return makeQueryClient();
+      } else {
+        // Browser: singleton pattern
+        if (!browserQueryClient) {
+          browserQueryClient = makeQueryClient();
+        }
+        return browserQueryClient;
+      }
+    }
+
+    /**
+     * Cache time presets for different data types
+     */
+    export const cachePresets = {
+      // Static data that rarely changes
+      static: {
+        staleTime: 24 * 60 * 60 * 1000, // 24 hours
+        gcTime: 7 * 24 * 60 * 60 * 1000, // 7 days
+      },
+      // Semi-static data (config, categories)
+      semiStatic: {
+        staleTime: 60 * 60 * 1000, // 1 hour
+        gcTime: 24 * 60 * 60 * 1000, // 24 hours
+      },
+      // Dynamic data (user data, lists)
+      dynamic: {
+        staleTime: 60 * 1000, // 1 minute
+        gcTime: 5 * 60 * 1000, // 5 minutes
+      },
+      // Real-time data (chat, notifications)
+      realtime: {
+        staleTime: 0, // Always stale
+        gcTime: 60 * 1000, // 1 minute
+        refetchInterval: 10 * 1000, // Poll every 10 seconds
+      },
+      // One-time data (search results)
+      ephemeral: {
+        staleTime: 0,
+        gcTime: 0, // Remove immediately when unused
+      },
+    } as const;
+
+  components/providers/query-provider.tsx: |
+    "use client";
+
+    import { QueryClientProvider } from "@tanstack/react-query";
+    import { ReactQueryDevtools } from "@tanstack/react-query-devtools";
+    import { getQueryClient } from "@/lib/query-client";
+
+    interface QueryProviderProps {
+      children: React.ReactNode;
+    }
+
+    export function QueryProvider({ children }: QueryProviderProps) {
+      const queryClient = getQueryClient();
+
+      return (
+        <QueryClientProvider client={queryClient}>
+          {children}
+          {process.env.NODE_ENV === "development" && (
+            <ReactQueryDevtools initialIsOpen={false} />
+          )}
+        </QueryClientProvider>
+      );
+    }
+
+  lib/query-keys.ts: |
+    /**
+     * Type-safe query key factory
+     * Ensures consistent keys and enables granular invalidation
+     */
+    export const queryKeys = {
+      // Users
+      users: {
+        all: ["users"] as const,
+        lists: () => [...queryKeys.users.all, "list"] as const,
+        list: (filters: Record<string, unknown>) =>
+          [...queryKeys.users.lists(), filters] as const,
+        details: () => [...queryKeys.users.all, "detail"] as const,
+        detail: (id: string) => [...queryKeys.users.details(), id] as const,
+        profile: (id: string) =>
+          [...queryKeys.users.detail(id), "profile"] as const,
+      },
+
+      // Posts
+      posts: {
+        all: ["posts"] as const,
+        lists: () => [...queryKeys.posts.all, "list"] as const,
+        list: (filters: { authorId?: string; status?: string }) =>
+          [...queryKeys.posts.lists(), filters] as const,
+        details: () => [...queryKeys.posts.all, "detail"] as const,
+        detail: (id: string) => [...queryKeys.posts.details(), id] as const,
+        comments: (postId: string) =>
+          [...queryKeys.posts.detail(postId), "comments"] as const,
+      },
+
+      // Products
+      products: {
+        all: ["products"] as const,
+        lists: () => [...queryKeys.products.all, "list"] as const,
+        list: (filters: { category?: string; search?: string }) =>
+          [...queryKeys.products.lists(), filters] as const,
+        details: () => [...queryKeys.products.all, "detail"] as const,
+        detail: (id: string) => [...queryKeys.products.details(), id] as const,
+        inventory: (id: string) =>
+          [...queryKeys.products.detail(id), "inventory"] as const,
+      },
+
+      // Settings (static data)
+      settings: {
+        all: ["settings"] as const,
+        app: () => [...queryKeys.settings.all, "app"] as const,
+        user: (userId: string) =>
+          [...queryKeys.settings.all, "user", userId] as const,
+      },
+
+      // Search (ephemeral)
+      search: {
+        all: ["search"] as const,
+        results: (query: string) => [...queryKeys.search.all, query] as const,
+      },
+    } as const;
+
+    /**
+     * Invalidation helpers
+     */
+    export const invalidateKeys = {
+      // Invalidate all user-related queries
+      allUsers: () => queryKeys.users.all,
+      // Invalidate specific user
+      user: (id: string) => queryKeys.users.detail(id),
+      // Invalidate all posts
+      allPosts: () => queryKeys.posts.all,
+      // Invalidate user's posts
+      userPosts: (authorId: string) =>
+        queryKeys.posts.list({ authorId }),
+    };
+
+  hooks/use-cached-query.ts: |
+    import {
+      useQuery,
+      useMutation,
+      useQueryClient,
+      type UseQueryOptions,
+      type UseMutationOptions,
+    } from "@tanstack/react-query";
+    import { cachePresets } from "@/lib/query-client";
+    import { queryKeys } from "@/lib/query-keys";
+
+    /**
+     * Fetch with error handling
+     */
+    async function fetchApi<T>(url: string, init?: RequestInit): Promise<T> {
+      const response = await fetch(url, {
+        ...init,
+        headers: {
+          "Content-Type": "application/json",
+          ...init?.headers,
+        },
+      });
+
+      if (!response.ok) {
+        const error = await response.json().catch(() => ({}));
+        throw new Error(error.message || `HTTP ${response.status}`);
+      }
+
+      return response.json();
+    }
+
+    /**
+     * Cached user query with semi-static preset
+     */
+    export function useUser(userId: string) {
+      return useQuery({
+        queryKey: queryKeys.users.detail(userId),
+        queryFn: () => fetchApi(`/api/users/${userId}`),
+        ...cachePresets.semiStatic,
+        enabled: !!userId,
+      });
+    }
+
+    /**
+     * Cached list query with dynamic preset
+     */
+    export function usePosts(filters: { authorId?: string; status?: string } = {}) {
+      return useQuery({
+        queryKey: queryKeys.posts.list(filters),
+        queryFn: () => {
+          const params = new URLSearchParams();
+          if (filters.authorId) params.set("authorId", filters.authorId);
+          if (filters.status) params.set("status", filters.status);
+          return fetchApi(`/api/posts?${params}`);
+        },
+        ...cachePresets.dynamic,
+      });
+    }
+
+    /**
+     * Cached search with ephemeral preset
+     */
+    export function useSearch(query: string) {
+      return useQuery({
+        queryKey: queryKeys.search.results(query),
+        queryFn: () => fetchApi(`/api/search?q=${encodeURIComponent(query)}`),
+        ...cachePresets.ephemeral,
+        enabled: query.length >= 2,
+      });
+    }
+
+    /**
+     * Real-time notifications with polling
+     */
+    export function useNotifications(userId: string) {
+      return useQuery({
+        queryKey: ["notifications", userId],
+        queryFn: () => fetchApi(`/api/users/${userId}/notifications`),
+        ...cachePresets.realtime,
+        enabled: !!userId,
+      });
+    }
+
+    /**
+     * Mutation with cache invalidation
+     */
+    export function useCreatePost() {
+      const queryClient = useQueryClient();
+
+      return useMutation({
+        mutationFn: (data: { title: string; content: string }) =>
+          fetchApi("/api/posts", {
+            method: "POST",
+            body: JSON.stringify(data),
+          }),
+        onSuccess: () => {
+          // Invalidate all post lists
+          queryClient.invalidateQueries({ queryKey: queryKeys.posts.lists() });
+        },
+      });
+    }
+
+    /**
+     * Mutation with optimistic update
+     */
+    export function useUpdatePost() {
+      const queryClient = useQueryClient();
+
+      return useMutation({
+        mutationFn: ({ id, ...data }: { id: string; title?: string; content?: string }) =>
+          fetchApi(`/api/posts/${id}`, {
+            method: "PATCH",
+            body: JSON.stringify(data),
+          }),
+        onMutate: async (newPost) => {
+          // Cancel outgoing refetches
+          await queryClient.cancelQueries({
+            queryKey: queryKeys.posts.detail(newPost.id),
+          });
+
+          // Snapshot previous value
+          const previousPost = queryClient.getQueryData(
+            queryKeys.posts.detail(newPost.id)
+          );
+
+          // Optimistically update
+          queryClient.setQueryData(
+            queryKeys.posts.detail(newPost.id),
+            (old: Record<string, unknown>) => ({ ...old, ...newPost })
+          );
+
+          return { previousPost };
+        },
+        onError: (_err, newPost, context) => {
+          // Rollback on error
+          if (context?.previousPost) {
+            queryClient.setQueryData(
+              queryKeys.posts.detail(newPost.id),
+              context.previousPost
+            );
+          }
+        },
+        onSettled: (_data, _error, variables) => {
+          // Refetch to ensure consistency
+          queryClient.invalidateQueries({
+            queryKey: queryKeys.posts.detail(variables.id),
+          });
+        },
+      });
+    }
+
+    /**
+     * Prefetch helper for navigation
+     */
+    export function usePrefetch() {
+      const queryClient = useQueryClient();
+
+      return {
+        prefetchUser: (userId: string) =>
+          queryClient.prefetchQuery({
+            queryKey: queryKeys.users.detail(userId),
+            queryFn: () => fetchApi(`/api/users/${userId}`),
+            ...cachePresets.semiStatic,
+          }),
+
+        prefetchPost: (postId: string) =>
+          queryClient.prefetchQuery({
+            queryKey: queryKeys.posts.detail(postId),
+            queryFn: () => fetchApi(`/api/posts/${postId}`),
+            ...cachePresets.dynamic,
+          }),
+      };
+    }
+
+  app/layout.tsx: |
+    // Add QueryProvider to your root layout
+    import { QueryProvider } from "@/components/providers/query-provider";
+
+    export default function RootLayout({
+      children,
+    }: {
+      children: React.ReactNode;
+    }) {
+      return (
+        <html lang="en">
+          <body>
+            <QueryProvider>
+              {children}
+            </QueryProvider>
+          </body>
+        </html>
+      );
+    }
+
+edge_cases:
+  - id: hydration-mismatch
+    symptom: "Hydration failed because the initial UI does not match server"
+    cause: "Server/client data mismatch during hydration"
+    solution: |
+      Use HydrationBoundary for SSR:
+      import { HydrationBoundary, dehydrate } from "@tanstack/react-query";
+
+      export default async function Page() {
+        const queryClient = getQueryClient();
+        await queryClient.prefetchQuery({...});
+
+        return (
+          <HydrationBoundary state={dehydrate(queryClient)}>
+            <YourComponent />
+          </HydrationBoundary>
+        );
+      }
+
+  - id: stale-data-after-mutation
+    symptom: "List doesn't update after creating/updating item"
+    cause: "Query not invalidated after mutation"
+    solution: |
+      Invalidate related queries in mutation:
+      useMutation({
+        mutationFn: createPost,
+        onSuccess: () => {
+          queryClient.invalidateQueries({ queryKey: ["posts"] });
+        },
+      });
+
+  - id: infinite-refetch-loop
+    symptom: "Query keeps refetching endlessly"
+    cause: "Query key or queryFn changes on every render"
+    solution: |
+      Memoize query key and ensure stable queryFn:
+      // Bad
+      queryKey: [{ filter }] // New object each render
+
+      // Good
+      queryKey: ["posts", filter] // Primitive values
+
+  - id: memory-leak
+    symptom: "Memory usage grows over time"
+    cause: "gcTime too high or unused queries not removed"
+    solution: |
+      Adjust gcTime based on data type:
+      // For search results
+      gcTime: 0 // Remove immediately when unused
+
+      // Or clear cache on navigation
+      queryClient.clear();
+
+validation:
+  manual_test:
+    - "Install @tanstack/react-query and devtools"
+    - "Add QueryProvider to layout"
+    - "Create a query hook with usePosts"
+    - "Open React Query Devtools (bottom right)"
+    - "Verify queries appear with correct stale/fresh status"
+    - "Navigate away and back - verify cache hit"
+    - "Create a post - verify list invalidates"
+    - "Test offline behavior with devtools"
