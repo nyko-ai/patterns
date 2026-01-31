@@ -1,5 +1,5 @@
 {
-  "version": "1.4.0",
+  "version": "1.5.0",
   "updated_at": "2026-01-31",
   "patterns": [
     {
@@ -422,6 +422,96 @@
       "name": "Password Reset Flow",
       "description": "Complete password reset flow with secure token handling",
       "tags": ["password-reset", "email", "security", "authentication", "recovery"],
+      "difficulty": "intermediate",
+      "status": "beta"
+    },
+    {
+      "id": "resend-react-email",
+      "category": "email",
+      "name": "React Email with Resend",
+      "description": "Beautiful email templates using React Email and Resend",
+      "tags": ["resend", "react-email", "templates", "transactional", "email"],
+      "difficulty": "intermediate",
+      "status": "beta"
+    },
+    {
+      "id": "newsletter-loops",
+      "category": "email",
+      "name": "Newsletter with Loops.so",
+      "description": "Newsletter subscription and management with Loops.so",
+      "tags": ["loops", "newsletter", "subscription", "marketing", "email"],
+      "difficulty": "beginner",
+      "status": "beta"
+    },
+    {
+      "id": "email-verification-token",
+      "category": "email",
+      "name": "Email Verification Flow",
+      "description": "Complete email verification flow with secure tokens",
+      "tags": ["email", "verification", "token", "security", "authentication"],
+      "difficulty": "intermediate",
+      "status": "beta"
+    },
+    {
+      "id": "unsubscribe-handling",
+      "category": "email",
+      "name": "One-Click Unsubscribe",
+      "description": "RFC 8058 compliant one-click unsubscribe with List-Unsubscribe headers",
+      "tags": ["unsubscribe", "email", "headers", "compliance", "rfc8058"],
+      "difficulty": "intermediate",
+      "status": "beta"
+    },
+    {
+      "id": "vitest-setup",
+      "category": "testing",
+      "name": "Vitest Configuration for Next.js",
+      "description": "Complete Vitest setup for Next.js with coverage and path aliases",
+      "tags": ["vitest", "testing", "unit-tests", "coverage", "nextjs"],
+      "difficulty": "beginner",
+      "status": "beta"
+    },
+    {
+      "id": "playwright-e2e",
+      "category": "testing",
+      "name": "Playwright E2E Testing",
+      "description": "End-to-end testing with Playwright for Next.js applications",
+      "tags": ["playwright", "e2e", "testing", "browser", "automation"],
+      "difficulty": "intermediate",
+      "status": "beta"
+    },
+    {
+      "id": "msw-mocking",
+      "category": "testing",
+      "name": "MSW API Mocking",
+      "description": "Mock Service Worker for API mocking in tests and development",
+      "tags": ["msw", "mocking", "api", "testing", "development"],
+      "difficulty": "intermediate",
+      "status": "beta"
+    },
+    {
+      "id": "testing-library-react",
+      "category": "testing",
+      "name": "React Testing Library",
+      "description": "Component testing with React Testing Library and Vitest",
+      "tags": ["testing-library", "react", "components", "unit-tests", "accessibility"],
+      "difficulty": "beginner",
+      "status": "beta"
+    },
+    {
+      "id": "github-actions-ci",
+      "category": "devops",
+      "name": "GitHub Actions CI Pipeline",
+      "description": "Complete CI pipeline with testing, linting, and deployment",
+      "tags": ["github-actions", "ci", "automation", "testing", "deployment"],
+      "difficulty": "intermediate",
+      "status": "beta"
+    },
+    {
+      "id": "docker-production",
+      "category": "devops",
+      "name": "Production Docker Setup",
+      "description": "Multi-stage Dockerfile for Next.js production deployment",
+      "tags": ["docker", "production", "nextjs", "deployment", "containers"],
       "difficulty": "intermediate",
       "status": "beta"
     }

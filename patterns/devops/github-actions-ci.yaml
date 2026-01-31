@@ -1,0 +1,590 @@
+id: github-actions-ci
+version: "1.0.0"
+updated_at: "2026-01-31"
+author: "nyko-team"
+status: beta
+
+name: "GitHub Actions CI Pipeline"
+description: "Complete CI pipeline with testing, linting, and deployment"
+
+category: devops
+tags:
+  - github-actions
+  - ci
+  - automation
+  - testing
+  - deployment
+
+difficulty: intermediate
+time_estimate: "20-30 min"
+
+stack:
+  required:
+    - name: "next"
+      version: "^15.1.0"
+      reason: "Next.js App Router"
+
+requires: []
+
+enables:
+  - docker-production
+
+env_vars:
+  required: []
+  optional:
+    - key: VERCEL_TOKEN
+      description: "Vercel deployment token"
+      default: ""
+    - key: VERCEL_ORG_ID
+      description: "Vercel organization ID"
+      default: ""
+    - key: VERCEL_PROJECT_ID
+      description: "Vercel project ID"
+      default: ""
+
+external_setup:
+  - service: "GitHub Actions"
+    url: "https://github.com/settings/tokens"
+    steps:
+      - "Go to repository Settings > Secrets and variables > Actions"
+      - "Add required secrets (VERCEL_TOKEN, etc.)"
+      - "Ensure Actions are enabled for the repository"
+
+files:
+  - path: ".github/workflows/ci.yml"
+    action: create
+    description: "Main CI workflow"
+    priority: 1
+
+  - path: ".github/workflows/pr.yml"
+    action: create
+    description: "Pull request checks"
+    priority: 2
+
+  - path: ".github/workflows/release.yml"
+    action: create
+    description: "Release workflow"
+    priority: 3
+
+  - path: ".github/dependabot.yml"
+    action: create
+    description: "Dependabot configuration"
+    priority: 4
+
+code:
+  .github/workflows/ci.yml: |
+    name: CI
+
+    on:
+      push:
+        branches: [main, develop]
+      pull_request:
+        branches: [main, develop]
+
+    concurrency:
+      group: ${{ github.workflow }}-${{ github.ref }}
+      cancel-in-progress: true
+
+    env:
+      NODE_VERSION: "20"
+      PNPM_VERSION: "9"
+
+    jobs:
+      # Install dependencies and cache
+      setup:
+        name: Setup
+        runs-on: ubuntu-latest
+        outputs:
+          cache-hit: ${{ steps.cache.outputs.cache-hit }}
+        steps:
+          - name: Checkout
+            uses: actions/checkout@v4
+
+          - name: Setup pnpm
+            uses: pnpm/action-setup@v4
+            with:
+              version: ${{ env.PNPM_VERSION }}
+
+          - name: Setup Node.js
+            uses: actions/setup-node@v4
+            with:
+              node-version: ${{ env.NODE_VERSION }}
+              cache: "pnpm"
+
+          - name: Get pnpm store directory
+            id: pnpm-cache
+            shell: bash
+            run: |
+              echo "STORE_PATH=$(pnpm store path)" >> $GITHUB_OUTPUT
+
+          - name: Cache dependencies
+            id: cache
+            uses: actions/cache@v4
+            with:
+              path: |
+                ${{ steps.pnpm-cache.outputs.STORE_PATH }}
+                node_modules
+                .next/cache
+              key: ${{ runner.os }}-pnpm-${{ hashFiles('**/pnpm-lock.yaml') }}
+              restore-keys: |
+                ${{ runner.os }}-pnpm-
+
+          - name: Install dependencies
+            run: pnpm install --frozen-lockfile
+
+      # Type checking
+      typecheck:
+        name: Type Check
+        runs-on: ubuntu-latest
+        needs: setup
+        steps:
+          - name: Checkout
+            uses: actions/checkout@v4
+
+          - name: Setup pnpm
+            uses: pnpm/action-setup@v4
+            with:
+              version: ${{ env.PNPM_VERSION }}
+
+          - name: Setup Node.js
+            uses: actions/setup-node@v4
+            with:
+              node-version: ${{ env.NODE_VERSION }}
+              cache: "pnpm"
+
+          - name: Restore cache
+            uses: actions/cache@v4
+            with:
+              path: |
+                node_modules
+                .next/cache
+              key: ${{ runner.os }}-pnpm-${{ hashFiles('**/pnpm-lock.yaml') }}
+
+          - name: Install dependencies
+            run: pnpm install --frozen-lockfile
+
+          - name: Run type check
+            run: pnpm tsc --noEmit
+
+      # Linting
+      lint:
+        name: Lint
+        runs-on: ubuntu-latest
+        needs: setup
+        steps:
+          - name: Checkout
+            uses: actions/checkout@v4
+
+          - name: Setup pnpm
+            uses: pnpm/action-setup@v4
+            with:
+              version: ${{ env.PNPM_VERSION }}
+
+          - name: Setup Node.js
+            uses: actions/setup-node@v4
+            with:
+              node-version: ${{ env.NODE_VERSION }}
+              cache: "pnpm"
+
+          - name: Restore cache
+            uses: actions/cache@v4
+            with:
+              path: |
+                node_modules
+                .next/cache
+              key: ${{ runner.os }}-pnpm-${{ hashFiles('**/pnpm-lock.yaml') }}
+
+          - name: Install dependencies
+            run: pnpm install --frozen-lockfile
+
+          - name: Run ESLint
+            run: pnpm lint
+
+          - name: Run Prettier check
+            run: pnpm format:check
+
+      # Unit tests
+      test:
+        name: Unit Tests
+        runs-on: ubuntu-latest
+        needs: setup
+        steps:
+          - name: Checkout
+            uses: actions/checkout@v4
+
+          - name: Setup pnpm
+            uses: pnpm/action-setup@v4
+            with:
+              version: ${{ env.PNPM_VERSION }}
+
+          - name: Setup Node.js
+            uses: actions/setup-node@v4
+            with:
+              node-version: ${{ env.NODE_VERSION }}
+              cache: "pnpm"
+
+          - name: Restore cache
+            uses: actions/cache@v4
+            with:
+              path: |
+                node_modules
+                .next/cache
+              key: ${{ runner.os }}-pnpm-${{ hashFiles('**/pnpm-lock.yaml') }}
+
+          - name: Install dependencies
+            run: pnpm install --frozen-lockfile
+
+          - name: Run tests
+            run: pnpm test:ci
+
+          - name: Upload coverage
+            uses: codecov/codecov-action@v4
+            with:
+              token: ${{ secrets.CODECOV_TOKEN }}
+              files: ./coverage/lcov.info
+              fail_ci_if_error: false
+
+      # E2E tests
+      e2e:
+        name: E2E Tests
+        runs-on: ubuntu-latest
+        needs: [typecheck, lint, test]
+        steps:
+          - name: Checkout
+            uses: actions/checkout@v4
+
+          - name: Setup pnpm
+            uses: pnpm/action-setup@v4
+            with:
+              version: ${{ env.PNPM_VERSION }}
+
+          - name: Setup Node.js
+            uses: actions/setup-node@v4
+            with:
+              node-version: ${{ env.NODE_VERSION }}
+              cache: "pnpm"
+
+          - name: Restore cache
+            uses: actions/cache@v4
+            with:
+              path: |
+                node_modules
+                .next/cache
+              key: ${{ runner.os }}-pnpm-${{ hashFiles('**/pnpm-lock.yaml') }}
+
+          - name: Install dependencies
+            run: pnpm install --frozen-lockfile
+
+          - name: Install Playwright browsers
+            run: pnpm exec playwright install --with-deps chromium
+
+          - name: Build application
+            run: pnpm build
+            env:
+              SKIP_ENV_VALIDATION: true
+
+          - name: Run E2E tests
+            run: pnpm e2e --project=chromium
+
+          - name: Upload test results
+            uses: actions/upload-artifact@v4
+            if: failure()
+            with:
+              name: playwright-report
+              path: playwright-report/
+              retention-days: 7
+
+      # Build
+      build:
+        name: Build
+        runs-on: ubuntu-latest
+        needs: [typecheck, lint, test]
+        steps:
+          - name: Checkout
+            uses: actions/checkout@v4
+
+          - name: Setup pnpm
+            uses: pnpm/action-setup@v4
+            with:
+              version: ${{ env.PNPM_VERSION }}
+
+          - name: Setup Node.js
+            uses: actions/setup-node@v4
+            with:
+              node-version: ${{ env.NODE_VERSION }}
+              cache: "pnpm"
+
+          - name: Restore cache
+            uses: actions/cache@v4
+            with:
+              path: |
+                node_modules
+                .next/cache
+              key: ${{ runner.os }}-pnpm-${{ hashFiles('**/pnpm-lock.yaml') }}
+
+          - name: Install dependencies
+            run: pnpm install --frozen-lockfile
+
+          - name: Build
+            run: pnpm build
+            env:
+              SKIP_ENV_VALIDATION: true
+
+          - name: Upload build artifacts
+            uses: actions/upload-artifact@v4
+            with:
+              name: build
+              path: |
+                .next
+                !.next/cache
+              retention-days: 1
+
+      # Deploy to Vercel (production)
+      deploy:
+        name: Deploy
+        runs-on: ubuntu-latest
+        needs: [build, e2e]
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        environment:
+          name: production
+          url: ${{ steps.deploy.outputs.url }}
+        steps:
+          - name: Checkout
+            uses: actions/checkout@v4
+
+          - name: Setup pnpm
+            uses: pnpm/action-setup@v4
+            with:
+              version: ${{ env.PNPM_VERSION }}
+
+          - name: Setup Node.js
+            uses: actions/setup-node@v4
+            with:
+              node-version: ${{ env.NODE_VERSION }}
+              cache: "pnpm"
+
+          - name: Install Vercel CLI
+            run: pnpm add -g vercel@latest
+
+          - name: Pull Vercel Environment
+            run: vercel pull --yes --environment=production --token=${{ secrets.VERCEL_TOKEN }}
+
+          - name: Build Project
+            run: vercel build --prod --token=${{ secrets.VERCEL_TOKEN }}
+
+          - name: Deploy to Vercel
+            id: deploy
+            run: |
+              url=$(vercel deploy --prebuilt --prod --token=${{ secrets.VERCEL_TOKEN }})
+              echo "url=$url" >> $GITHUB_OUTPUT
+
+  .github/workflows/pr.yml: |
+    name: PR Checks
+
+    on:
+      pull_request:
+        types: [opened, synchronize, reopened]
+
+    jobs:
+      # Size check
+      size:
+        name: Bundle Size
+        runs-on: ubuntu-latest
+        steps:
+          - name: Checkout
+            uses: actions/checkout@v4
+
+          - name: Setup pnpm
+            uses: pnpm/action-setup@v4
+            with:
+              version: 9
+
+          - name: Setup Node.js
+            uses: actions/setup-node@v4
+            with:
+              node-version: 20
+              cache: "pnpm"
+
+          - name: Install dependencies
+            run: pnpm install --frozen-lockfile
+
+          - name: Build
+            run: pnpm build
+            env:
+              SKIP_ENV_VALIDATION: true
+
+          - name: Analyze bundle
+            run: |
+              echo "## Bundle Analysis" >> $GITHUB_STEP_SUMMARY
+              echo "" >> $GITHUB_STEP_SUMMARY
+              if [ -f .next/analyze/client.html ]; then
+                echo "Bundle analysis generated successfully" >> $GITHUB_STEP_SUMMARY
+              fi
+
+      # Preview deployment
+      preview:
+        name: Preview Deploy
+        runs-on: ubuntu-latest
+        if: github.event.pull_request.head.repo.full_name == github.repository
+        environment:
+          name: preview
+          url: ${{ steps.deploy.outputs.url }}
+        steps:
+          - name: Checkout
+            uses: actions/checkout@v4
+
+          - name: Setup pnpm
+            uses: pnpm/action-setup@v4
+            with:
+              version: 9
+
+          - name: Setup Node.js
+            uses: actions/setup-node@v4
+            with:
+              node-version: 20
+              cache: "pnpm"
+
+          - name: Install Vercel CLI
+            run: pnpm add -g vercel@latest
+
+          - name: Pull Vercel Environment
+            run: vercel pull --yes --environment=preview --token=${{ secrets.VERCEL_TOKEN }}
+
+          - name: Build Project
+            run: vercel build --token=${{ secrets.VERCEL_TOKEN }}
+
+          - name: Deploy to Vercel
+            id: deploy
+            run: |
+              url=$(vercel deploy --prebuilt --token=${{ secrets.VERCEL_TOKEN }})
+              echo "url=$url" >> $GITHUB_OUTPUT
+
+          - name: Comment PR
+            uses: actions/github-script@v7
+            with:
+              script: |
+                github.rest.issues.createComment({
+                  issue_number: context.issue.number,
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  body: `## Preview Deployment\n\n🚀 Deployed to: ${{ steps.deploy.outputs.url }}`
+                })
+
+  .github/workflows/release.yml: |
+    name: Release
+
+    on:
+      push:
+        tags:
+          - "v*"
+
+    permissions:
+      contents: write
+
+    jobs:
+      release:
+        name: Create Release
+        runs-on: ubuntu-latest
+        steps:
+          - name: Checkout
+            uses: actions/checkout@v4
+            with:
+              fetch-depth: 0
+
+          - name: Generate changelog
+            id: changelog
+            uses: orhun/git-cliff-action@v3
+            with:
+              config: cliff.toml
+              args: --latest --strip header
+            env:
+              OUTPUT: CHANGELOG.md
+
+          - name: Create Release
+            uses: softprops/action-gh-release@v2
+            with:
+              body: ${{ steps.changelog.outputs.content }}
+              draft: false
+              prerelease: ${{ contains(github.ref, '-') }}
+            env:
+              GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  .github/dependabot.yml: |
+    version: 2
+    updates:
+      # JavaScript/TypeScript dependencies
+      - package-ecosystem: "npm"
+        directory: "/"
+        schedule:
+          interval: "weekly"
+          day: "monday"
+          time: "09:00"
+        open-pull-requests-limit: 10
+        groups:
+          # Group minor and patch updates
+          production-dependencies:
+            patterns:
+              - "*"
+            exclude-patterns:
+              - "@types/*"
+              - "eslint*"
+              - "prettier*"
+              - "vitest*"
+              - "@testing-library/*"
+              - "playwright*"
+            update-types:
+              - "minor"
+              - "patch"
+          dev-dependencies:
+            patterns:
+              - "@types/*"
+              - "eslint*"
+              - "prettier*"
+              - "vitest*"
+              - "@testing-library/*"
+              - "playwright*"
+            update-types:
+              - "minor"
+              - "patch"
+        commit-message:
+          prefix: "deps"
+          include: "scope"
+
+      # GitHub Actions
+      - package-ecosystem: "github-actions"
+        directory: "/"
+        schedule:
+          interval: "weekly"
+          day: "monday"
+        open-pull-requests-limit: 5
+        commit-message:
+          prefix: "ci"
+
+edge_cases:
+  - id: secrets-not-set
+    symptom: "Deployment fails with auth error"
+    cause: "Required secrets not configured"
+    solution: "Add VERCEL_TOKEN and other secrets in repository settings"
+
+  - id: cache-corruption
+    symptom: "Weird build errors after dependencies change"
+    cause: "Stale cache"
+    solution: "Clear cache by changing cache key or manually in Actions tab"
+
+  - id: concurrent-runs
+    symptom: "Multiple deployments happening"
+    cause: "Multiple pushes in quick succession"
+    solution: "concurrency group cancels previous runs"
+
+  - id: fork-pr-no-secrets
+    symptom: "Preview deploy fails on fork PRs"
+    cause: "Secrets not available to forks"
+    solution: "Check repository ownership before deploying"
+
+validation:
+  manual_test:
+    - "Push to main branch"
+    - "Verify all CI jobs pass"
+    - "Create a PR"
+    - "Check preview deployment"
+    - "Verify Dependabot PRs created"
