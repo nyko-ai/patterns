@@ -1,0 +1,581 @@
+id: msw-mocking
+version: "1.0.0"
+updated_at: "2026-01-31"
+author: "nyko-team"
+status: beta
+
+name: "MSW API Mocking"
+description: "Mock Service Worker for API mocking in tests and development"
+
+category: testing
+tags:
+  - msw
+  - mocking
+  - api
+  - testing
+  - development
+
+difficulty: intermediate
+time_estimate: "20-25 min"
+
+stack:
+  required:
+    - name: "msw"
+      version: "^2.12.7"
+      reason: "API mocking library"
+    - name: "next"
+      version: "^15.1.0"
+      reason: "Next.js App Router"
+
+requires:
+  - vitest-setup
+
+enables: []
+
+env_vars:
+  required: []
+  optional:
+    - key: NEXT_PUBLIC_API_MOCKING
+      description: "Enable API mocking in browser"
+      default: "false"
+
+external_setup: []
+
+files:
+  - path: "mocks/handlers.ts"
+    action: create
+    description: "API mock handlers"
+    priority: 1
+
+  - path: "mocks/server.ts"
+    action: create
+    description: "MSW server for Node.js/tests"
+    priority: 2
+
+  - path: "mocks/browser.ts"
+    action: create
+    description: "MSW browser worker"
+    priority: 3
+
+  - path: "mocks/db.ts"
+    action: create
+    description: "Mock database"
+    priority: 4
+
+  - path: "vitest.setup.ts"
+    action: modify
+    description: "Add MSW setup to tests"
+    priority: 5
+
+  - path: "__tests__/api.test.ts"
+    action: create
+    description: "Example API tests with MSW"
+    priority: 6
+
+code:
+  mocks/handlers.ts: |
+    import { http, HttpResponse, delay } from "msw";
+
+    // Types
+    interface User {
+      id: string;
+      name: string;
+      email: string;
+      role: "user" | "admin";
+      createdAt: string;
+    }
+
+    interface Post {
+      id: string;
+      title: string;
+      content: string;
+      authorId: string;
+      createdAt: string;
+    }
+
+    // Mock data
+    const users: User[] = [
+      {
+        id: "1",
+        name: "John Doe",
+        email: "john@example.com",
+        role: "admin",
+        createdAt: "2024-01-01T00:00:00Z",
+      },
+      {
+        id: "2",
+        name: "Jane Smith",
+        email: "jane@example.com",
+        role: "user",
+        createdAt: "2024-01-02T00:00:00Z",
+      },
+    ];
+
+    const posts: Post[] = [
+      {
+        id: "1",
+        title: "First Post",
+        content: "This is the first post content.",
+        authorId: "1",
+        createdAt: "2024-01-01T00:00:00Z",
+      },
+    ];
+
+    // Base URL - adjust based on your API
+    const API_URL = process.env.NEXT_PUBLIC_API_URL || "";
+
+    // Handlers
+    export const handlers = [
+      // Users
+      http.get(`${API_URL}/api/users`, async () => {
+        await delay(100);
+        return HttpResponse.json(users);
+      }),
+
+      http.get(`${API_URL}/api/users/:id`, async ({ params }) => {
+        await delay(100);
+        const user = users.find((u) => u.id === params.id);
+
+        if (!user) {
+          return HttpResponse.json(
+            { error: "User not found" },
+            { status: 404 }
+          );
+        }
+
+        return HttpResponse.json(user);
+      }),
+
+      http.post(`${API_URL}/api/users`, async ({ request }) => {
+        await delay(100);
+        const body = (await request.json()) as Partial<User>;
+
+        const newUser: User = {
+          id: String(users.length + 1),
+          name: body.name || "New User",
+          email: body.email || "new@example.com",
+          role: body.role || "user",
+          createdAt: new Date().toISOString(),
+        };
+
+        users.push(newUser);
+        return HttpResponse.json(newUser, { status: 201 });
+      }),
+
+      http.patch(`${API_URL}/api/users/:id`, async ({ params, request }) => {
+        await delay(100);
+        const index = users.findIndex((u) => u.id === params.id);
+
+        if (index === -1) {
+          return HttpResponse.json(
+            { error: "User not found" },
+            { status: 404 }
+          );
+        }
+
+        const body = (await request.json()) as Partial<User>;
+        users[index] = { ...users[index], ...body };
+
+        return HttpResponse.json(users[index]);
+      }),
+
+      http.delete(`${API_URL}/api/users/:id`, async ({ params }) => {
+        await delay(100);
+        const index = users.findIndex((u) => u.id === params.id);
+
+        if (index === -1) {
+          return HttpResponse.json(
+            { error: "User not found" },
+            { status: 404 }
+          );
+        }
+
+        users.splice(index, 1);
+        return new HttpResponse(null, { status: 204 });
+      }),
+
+      // Posts
+      http.get(`${API_URL}/api/posts`, async ({ request }) => {
+        await delay(100);
+        const url = new URL(request.url);
+        const authorId = url.searchParams.get("authorId");
+
+        let result = posts;
+        if (authorId) {
+          result = posts.filter((p) => p.authorId === authorId);
+        }
+
+        return HttpResponse.json(result);
+      }),
+
+      http.get(`${API_URL}/api/posts/:id`, async ({ params }) => {
+        await delay(100);
+        const post = posts.find((p) => p.id === params.id);
+
+        if (!post) {
+          return HttpResponse.json(
+            { error: "Post not found" },
+            { status: 404 }
+          );
+        }
+
+        return HttpResponse.json(post);
+      }),
+
+      http.post(`${API_URL}/api/posts`, async ({ request }) => {
+        await delay(100);
+        const body = (await request.json()) as Partial<Post>;
+
+        const newPost: Post = {
+          id: String(posts.length + 1),
+          title: body.title || "New Post",
+          content: body.content || "",
+          authorId: body.authorId || "1",
+          createdAt: new Date().toISOString(),
+        };
+
+        posts.push(newPost);
+        return HttpResponse.json(newPost, { status: 201 });
+      }),
+
+      // Auth
+      http.post(`${API_URL}/api/auth/login`, async ({ request }) => {
+        await delay(200);
+        const body = (await request.json()) as { email: string; password: string };
+
+        if (body.email === "test@example.com" && body.password === "password") {
+          return HttpResponse.json({
+            user: users[0],
+            token: "mock-jwt-token",
+          });
+        }
+
+        return HttpResponse.json(
+          { error: "Invalid credentials" },
+          { status: 401 }
+        );
+      }),
+
+      http.post(`${API_URL}/api/auth/logout`, async () => {
+        await delay(100);
+        return new HttpResponse(null, { status: 204 });
+      }),
+
+      http.get(`${API_URL}/api/auth/me`, async ({ request }) => {
+        await delay(100);
+        const authHeader = request.headers.get("Authorization");
+
+        if (!authHeader || !authHeader.startsWith("Bearer ")) {
+          return HttpResponse.json(
+            { error: "Unauthorized" },
+            { status: 401 }
+          );
+        }
+
+        return HttpResponse.json(users[0]);
+      }),
+
+      // Error simulation handlers
+      http.get(`${API_URL}/api/error/500`, async () => {
+        await delay(100);
+        return HttpResponse.json(
+          { error: "Internal server error" },
+          { status: 500 }
+        );
+      }),
+
+      http.get(`${API_URL}/api/error/timeout`, async () => {
+        await delay(30000); // Simulate timeout
+        return HttpResponse.json({ data: "slow response" });
+      }),
+    ];
+
+  mocks/server.ts: |
+    import { setupServer } from "msw/node";
+    import { handlers } from "./handlers";
+
+    // Setup MSW server for Node.js (tests)
+    export const server = setupServer(...handlers);
+
+    // Export for use in tests
+    export { handlers };
+
+  mocks/browser.ts: |
+    import { setupWorker } from "msw/browser";
+    import { handlers } from "./handlers";
+
+    // Setup MSW worker for browser
+    export const worker = setupWorker(...handlers);
+
+    // Start worker function
+    export async function startMocking() {
+      if (typeof window === "undefined") {
+        return;
+      }
+
+      if (process.env.NEXT_PUBLIC_API_MOCKING !== "true") {
+        return;
+      }
+
+      await worker.start({
+        onUnhandledRequest: "bypass",
+        serviceWorker: {
+          url: "/mockServiceWorker.js",
+        },
+      });
+
+      console.log("[MSW] Mocking enabled");
+    }
+
+  mocks/db.ts: |
+    import { factory, primaryKey, manyOf, oneOf } from "@mswjs/data";
+
+    // Create a mock database with relationships
+    export const db = factory({
+      user: {
+        id: primaryKey(String),
+        name: String,
+        email: String,
+        role: String,
+        createdAt: String,
+        posts: manyOf("post"),
+      },
+      post: {
+        id: primaryKey(String),
+        title: String,
+        content: String,
+        author: oneOf("user"),
+        createdAt: String,
+      },
+      session: {
+        id: primaryKey(String),
+        userId: String,
+        token: String,
+        expiresAt: String,
+      },
+    });
+
+    // Seed initial data
+    export function seedDatabase() {
+      // Create users
+      const john = db.user.create({
+        id: "1",
+        name: "John Doe",
+        email: "john@example.com",
+        role: "admin",
+        createdAt: new Date().toISOString(),
+      });
+
+      const jane = db.user.create({
+        id: "2",
+        name: "Jane Smith",
+        email: "jane@example.com",
+        role: "user",
+        createdAt: new Date().toISOString(),
+      });
+
+      // Create posts
+      db.post.create({
+        id: "1",
+        title: "First Post",
+        content: "This is the first post.",
+        author: john,
+        createdAt: new Date().toISOString(),
+      });
+
+      db.post.create({
+        id: "2",
+        title: "Second Post",
+        content: "This is the second post.",
+        author: jane,
+        createdAt: new Date().toISOString(),
+      });
+    }
+
+    // Reset database
+    export function resetDatabase() {
+      db.user.deleteMany({ where: {} });
+      db.post.deleteMany({ where: {} });
+      db.session.deleteMany({ where: {} });
+    }
+
+  vitest.setup.ts: |
+    // Add to existing vitest.setup.ts
+    import { beforeAll, afterEach, afterAll } from "vitest";
+    import { server } from "./mocks/server";
+
+    // Start server before all tests
+    beforeAll(() => {
+      server.listen({ onUnhandledRequest: "error" });
+    });
+
+    // Reset handlers after each test
+    afterEach(() => {
+      server.resetHandlers();
+    });
+
+    // Close server after all tests
+    afterAll(() => {
+      server.close();
+    });
+
+  __tests__/api.test.ts: |
+    import { describe, it, expect, beforeEach } from "vitest";
+    import { http, HttpResponse } from "msw";
+    import { server } from "@/mocks/server";
+
+    // Mock fetch for API calls
+    async function fetchUsers() {
+      const response = await fetch("/api/users");
+      return response.json();
+    }
+
+    async function fetchUser(id: string) {
+      const response = await fetch(`/api/users/${id}`);
+      if (!response.ok) {
+        throw new Error("User not found");
+      }
+      return response.json();
+    }
+
+    async function createUser(data: { name: string; email: string }) {
+      const response = await fetch("/api/users", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(data),
+      });
+      return response.json();
+    }
+
+    async function login(email: string, password: string) {
+      const response = await fetch("/api/auth/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email, password }),
+      });
+
+      if (!response.ok) {
+        throw new Error("Invalid credentials");
+      }
+
+      return response.json();
+    }
+
+    describe("API with MSW", () => {
+      describe("Users API", () => {
+        it("should fetch all users", async () => {
+          const users = await fetchUsers();
+
+          expect(users).toHaveLength(2);
+          expect(users[0]).toHaveProperty("name");
+          expect(users[0]).toHaveProperty("email");
+        });
+
+        it("should fetch a single user", async () => {
+          const user = await fetchUser("1");
+
+          expect(user.id).toBe("1");
+          expect(user.name).toBe("John Doe");
+        });
+
+        it("should handle user not found", async () => {
+          await expect(fetchUser("999")).rejects.toThrow("User not found");
+        });
+
+        it("should create a new user", async () => {
+          const newUser = await createUser({
+            name: "New User",
+            email: "new@example.com",
+          });
+
+          expect(newUser).toHaveProperty("id");
+          expect(newUser.name).toBe("New User");
+        });
+      });
+
+      describe("Auth API", () => {
+        it("should login with valid credentials", async () => {
+          const result = await login("test@example.com", "password");
+
+          expect(result).toHaveProperty("token");
+          expect(result).toHaveProperty("user");
+        });
+
+        it("should reject invalid credentials", async () => {
+          await expect(login("wrong@example.com", "wrong")).rejects.toThrow(
+            "Invalid credentials"
+          );
+        });
+      });
+
+      describe("Custom handlers per test", () => {
+        it("should override handler for specific test", async () => {
+          // Override the users handler for this test only
+          server.use(
+            http.get("/api/users", () => {
+              return HttpResponse.json([
+                { id: "custom", name: "Custom User", email: "custom@test.com" },
+              ]);
+            })
+          );
+
+          const users = await fetchUsers();
+
+          expect(users).toHaveLength(1);
+          expect(users[0].id).toBe("custom");
+        });
+
+        it("should simulate server error", async () => {
+          server.use(
+            http.get("/api/users", () => {
+              return HttpResponse.json(
+                { error: "Server error" },
+                { status: 500 }
+              );
+            })
+          );
+
+          const response = await fetch("/api/users");
+          expect(response.status).toBe(500);
+        });
+
+        it("should simulate network error", async () => {
+          server.use(
+            http.get("/api/users", () => {
+              return HttpResponse.error();
+            })
+          );
+
+          await expect(fetchUsers()).rejects.toThrow();
+        });
+      });
+    });
+
+edge_cases:
+  - id: handler-not-matching
+    symptom: "Requests not being intercepted"
+    cause: "URL pattern doesn't match"
+    solution: "Check API_URL and ensure handler patterns match request URLs"
+
+  - id: browser-worker-not-found
+    symptom: "Service worker not found error"
+    cause: "mockServiceWorker.js not in public folder"
+    solution: "Run npx msw init public/"
+
+  - id: request-body-already-read
+    symptom: "Cannot read request body"
+    cause: "Body already consumed"
+    solution: "Clone request before reading body"
+
+  - id: handlers-not-reset
+    symptom: "Tests affecting each other"
+    cause: "Custom handlers persisting between tests"
+    solution: "Call server.resetHandlers() in afterEach"
+
+validation:
+  manual_test:
+    - "Run tests with MSW"
+    - "Verify API calls are mocked"
+    - "Test custom handler overrides"
+    - "Enable browser mocking in development"
+    - "Check network tab shows mocked responses"

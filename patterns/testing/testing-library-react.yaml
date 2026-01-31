@@ -1,0 +1,527 @@
+id: testing-library-react
+version: "1.0.0"
+updated_at: "2026-01-31"
+author: "nyko-team"
+status: beta
+
+name: "React Testing Library"
+description: "Component testing with React Testing Library and Vitest"
+
+category: testing
+tags:
+  - testing-library
+  - react
+  - components
+  - unit-tests
+  - accessibility
+
+difficulty: beginner
+time_estimate: "15-20 min"
+
+stack:
+  required:
+    - name: "@testing-library/react"
+      version: "^16.3.2"
+      reason: "React component testing"
+    - name: "@testing-library/jest-dom"
+      version: "^6.9.1"
+      reason: "Custom DOM matchers"
+    - name: "vitest"
+      version: "^4.0.18"
+      reason: "Test runner"
+    - name: "happy-dom"
+      version: "^20.4.0"
+      reason: "DOM environment"
+
+requires:
+  - vitest-setup
+
+enables: []
+
+env_vars:
+  required: []
+  optional: []
+
+external_setup: []
+
+files:
+  - path: "vitest.setup.ts"
+    action: modify
+    description: "Configure Testing Library matchers"
+    priority: 1
+
+  - path: "__tests__/components/button.test.tsx"
+    action: create
+    description: "Example button component test"
+    priority: 2
+
+  - path: "__tests__/components/form.test.tsx"
+    action: create
+    description: "Example form component test"
+    priority: 3
+
+  - path: "__tests__/hooks/use-counter.test.tsx"
+    action: create
+    description: "Example custom hook test"
+    priority: 4
+
+  - path: "test-utils/index.tsx"
+    action: create
+    description: "Custom render utilities"
+    priority: 5
+
+code:
+  vitest.setup.ts: |
+    import { expect, afterEach, vi } from "vitest";
+    import { cleanup } from "@testing-library/react";
+    import * as matchers from "@testing-library/jest-dom/matchers";
+
+    // Extend Vitest's expect with Testing Library matchers
+    expect.extend(matchers);
+
+    // Cleanup after each test
+    afterEach(() => {
+      cleanup();
+    });
+
+    // Mock Next.js router
+    vi.mock("next/navigation", () => ({
+      useRouter: () => ({
+        push: vi.fn(),
+        replace: vi.fn(),
+        prefetch: vi.fn(),
+        back: vi.fn(),
+        forward: vi.fn(),
+        refresh: vi.fn(),
+      }),
+      useSearchParams: () => new URLSearchParams(),
+      usePathname: () => "/",
+      useParams: () => ({}),
+    }));
+
+  __tests__/components/button.test.tsx: |
+    import { describe, it, expect, vi } from "vitest";
+    import { render, screen, fireEvent } from "@testing-library/react";
+    import userEvent from "@testing-library/user-event";
+
+    // Example Button component
+    interface ButtonProps {
+      children: React.ReactNode;
+      onClick?: () => void;
+      disabled?: boolean;
+      variant?: "primary" | "secondary" | "danger";
+      loading?: boolean;
+    }
+
+    function Button({
+      children,
+      onClick,
+      disabled = false,
+      variant = "primary",
+      loading = false,
+    }: ButtonProps) {
+      return (
+        <button
+          onClick={onClick}
+          disabled={disabled || loading}
+          className={`btn btn-${variant}`}
+          aria-busy={loading}
+        >
+          {loading ? "Loading..." : children}
+        </button>
+      );
+    }
+
+    describe("Button Component", () => {
+      it("renders children correctly", () => {
+        render(<Button>Click me</Button>);
+
+        expect(screen.getByRole("button")).toHaveTextContent("Click me");
+      });
+
+      it("calls onClick when clicked", async () => {
+        const user = userEvent.setup();
+        const handleClick = vi.fn();
+
+        render(<Button onClick={handleClick}>Click me</Button>);
+
+        await user.click(screen.getByRole("button"));
+
+        expect(handleClick).toHaveBeenCalledTimes(1);
+      });
+
+      it("does not call onClick when disabled", async () => {
+        const user = userEvent.setup();
+        const handleClick = vi.fn();
+
+        render(
+          <Button onClick={handleClick} disabled>
+            Click me
+          </Button>
+        );
+
+        await user.click(screen.getByRole("button"));
+
+        expect(handleClick).not.toHaveBeenCalled();
+      });
+
+      it("shows loading state", () => {
+        render(<Button loading>Submit</Button>);
+
+        const button = screen.getByRole("button");
+
+        expect(button).toHaveTextContent("Loading...");
+        expect(button).toBeDisabled();
+        expect(button).toHaveAttribute("aria-busy", "true");
+      });
+
+      it("applies variant class", () => {
+        render(<Button variant="danger">Delete</Button>);
+
+        expect(screen.getByRole("button")).toHaveClass("btn-danger");
+      });
+
+      it("is accessible", () => {
+        render(<Button>Accessible Button</Button>);
+
+        const button = screen.getByRole("button", { name: "Accessible Button" });
+
+        expect(button).toBeInTheDocument();
+        expect(button).toBeEnabled();
+        expect(button).toBeVisible();
+      });
+    });
+
+  __tests__/components/form.test.tsx: |
+    import { describe, it, expect, vi } from "vitest";
+    import { render, screen, waitFor } from "@testing-library/react";
+    import userEvent from "@testing-library/user-event";
+
+    // Example Form component
+    interface FormData {
+      name: string;
+      email: string;
+      message: string;
+    }
+
+    interface ContactFormProps {
+      onSubmit: (data: FormData) => Promise<void>;
+    }
+
+    function ContactForm({ onSubmit }: ContactFormProps) {
+      const [loading, setLoading] = useState(false);
+      const [error, setError] = useState("");
+      const [success, setSuccess] = useState(false);
+
+      const handleSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
+        e.preventDefault();
+        setLoading(true);
+        setError("");
+
+        const formData = new FormData(e.currentTarget);
+        const data: FormData = {
+          name: formData.get("name") as string,
+          email: formData.get("email") as string,
+          message: formData.get("message") as string,
+        };
+
+        try {
+          await onSubmit(data);
+          setSuccess(true);
+        } catch (err) {
+          setError(err instanceof Error ? err.message : "Something went wrong");
+        } finally {
+          setLoading(false);
+        }
+      };
+
+      if (success) {
+        return <p role="status">Thank you for your message!</p>;
+      }
+
+      return (
+        <form onSubmit={handleSubmit} aria-label="Contact form">
+          {error && <p role="alert">{error}</p>}
+
+          <div>
+            <label htmlFor="name">Name</label>
+            <input id="name" name="name" required />
+          </div>
+
+          <div>
+            <label htmlFor="email">Email</label>
+            <input id="email" name="email" type="email" required />
+          </div>
+
+          <div>
+            <label htmlFor="message">Message</label>
+            <textarea id="message" name="message" required />
+          </div>
+
+          <button type="submit" disabled={loading}>
+            {loading ? "Sending..." : "Send Message"}
+          </button>
+        </form>
+      );
+    }
+
+    // Need to import useState for the component
+    import { useState } from "react";
+
+    describe("ContactForm Component", () => {
+      it("renders all form fields", () => {
+        render(<ContactForm onSubmit={vi.fn()} />);
+
+        expect(screen.getByLabelText(/name/i)).toBeInTheDocument();
+        expect(screen.getByLabelText(/email/i)).toBeInTheDocument();
+        expect(screen.getByLabelText(/message/i)).toBeInTheDocument();
+        expect(screen.getByRole("button", { name: /send message/i })).toBeInTheDocument();
+      });
+
+      it("submits form with valid data", async () => {
+        const user = userEvent.setup();
+        const handleSubmit = vi.fn().mockResolvedValue(undefined);
+
+        render(<ContactForm onSubmit={handleSubmit} />);
+
+        await user.type(screen.getByLabelText(/name/i), "John Doe");
+        await user.type(screen.getByLabelText(/email/i), "john@example.com");
+        await user.type(screen.getByLabelText(/message/i), "Hello!");
+
+        await user.click(screen.getByRole("button", { name: /send message/i }));
+
+        await waitFor(() => {
+          expect(handleSubmit).toHaveBeenCalledWith({
+            name: "John Doe",
+            email: "john@example.com",
+            message: "Hello!",
+          });
+        });
+      });
+
+      it("shows loading state during submission", async () => {
+        const user = userEvent.setup();
+        const handleSubmit = vi.fn().mockImplementation(
+          () => new Promise((resolve) => setTimeout(resolve, 100))
+        );
+
+        render(<ContactForm onSubmit={handleSubmit} />);
+
+        await user.type(screen.getByLabelText(/name/i), "John");
+        await user.type(screen.getByLabelText(/email/i), "john@example.com");
+        await user.type(screen.getByLabelText(/message/i), "Hi");
+
+        await user.click(screen.getByRole("button"));
+
+        expect(screen.getByRole("button")).toHaveTextContent("Sending...");
+        expect(screen.getByRole("button")).toBeDisabled();
+
+        await waitFor(() => {
+          expect(screen.getByRole("status")).toHaveTextContent("Thank you");
+        });
+      });
+
+      it("shows error message on failure", async () => {
+        const user = userEvent.setup();
+        const handleSubmit = vi.fn().mockRejectedValue(new Error("Network error"));
+
+        render(<ContactForm onSubmit={handleSubmit} />);
+
+        await user.type(screen.getByLabelText(/name/i), "John");
+        await user.type(screen.getByLabelText(/email/i), "john@example.com");
+        await user.type(screen.getByLabelText(/message/i), "Hi");
+
+        await user.click(screen.getByRole("button"));
+
+        await waitFor(() => {
+          expect(screen.getByRole("alert")).toHaveTextContent("Network error");
+        });
+      });
+
+      it("validates required fields", async () => {
+        const user = userEvent.setup();
+        const handleSubmit = vi.fn();
+
+        render(<ContactForm onSubmit={handleSubmit} />);
+
+        // Try to submit without filling fields
+        await user.click(screen.getByRole("button"));
+
+        // Form should not submit
+        expect(handleSubmit).not.toHaveBeenCalled();
+
+        // Check for HTML5 validation
+        expect(screen.getByLabelText(/name/i)).toBeInvalid();
+      });
+    });
+
+  __tests__/hooks/use-counter.test.tsx: |
+    import { describe, it, expect } from "vitest";
+    import { renderHook, act } from "@testing-library/react";
+
+    // Example custom hook
+    function useCounter(initialValue = 0) {
+      const [count, setCount] = useState(initialValue);
+
+      const increment = () => setCount((c) => c + 1);
+      const decrement = () => setCount((c) => c - 1);
+      const reset = () => setCount(initialValue);
+      const set = (value: number) => setCount(value);
+
+      return { count, increment, decrement, reset, set };
+    }
+
+    import { useState } from "react";
+
+    describe("useCounter Hook", () => {
+      it("initializes with default value", () => {
+        const { result } = renderHook(() => useCounter());
+
+        expect(result.current.count).toBe(0);
+      });
+
+      it("initializes with custom value", () => {
+        const { result } = renderHook(() => useCounter(10));
+
+        expect(result.current.count).toBe(10);
+      });
+
+      it("increments count", () => {
+        const { result } = renderHook(() => useCounter());
+
+        act(() => {
+          result.current.increment();
+        });
+
+        expect(result.current.count).toBe(1);
+      });
+
+      it("decrements count", () => {
+        const { result } = renderHook(() => useCounter(5));
+
+        act(() => {
+          result.current.decrement();
+        });
+
+        expect(result.current.count).toBe(4);
+      });
+
+      it("resets count to initial value", () => {
+        const { result } = renderHook(() => useCounter(5));
+
+        act(() => {
+          result.current.increment();
+          result.current.increment();
+        });
+
+        expect(result.current.count).toBe(7);
+
+        act(() => {
+          result.current.reset();
+        });
+
+        expect(result.current.count).toBe(5);
+      });
+
+      it("sets count to specific value", () => {
+        const { result } = renderHook(() => useCounter());
+
+        act(() => {
+          result.current.set(42);
+        });
+
+        expect(result.current.count).toBe(42);
+      });
+
+      it("handles multiple operations", () => {
+        const { result } = renderHook(() => useCounter(0));
+
+        act(() => {
+          result.current.increment();
+          result.current.increment();
+          result.current.decrement();
+        });
+
+        expect(result.current.count).toBe(1);
+      });
+    });
+
+  test-utils/index.tsx: |
+    import { ReactElement, ReactNode } from "react";
+    import { render, RenderOptions } from "@testing-library/react";
+
+    // Add providers that wrap your app here
+    interface ProvidersProps {
+      children: ReactNode;
+    }
+
+    function AllProviders({ children }: ProvidersProps) {
+      return (
+        // Add your providers here
+        // <ThemeProvider>
+        //   <QueryClientProvider client={queryClient}>
+        //     {children}
+        //   </QueryClientProvider>
+        // </ThemeProvider>
+        <>{children}</>
+      );
+    }
+
+    // Custom render function that wraps components with providers
+    function customRender(
+      ui: ReactElement,
+      options?: Omit<RenderOptions, "wrapper">
+    ) {
+      return render(ui, { wrapper: AllProviders, ...options });
+    }
+
+    // Re-export everything from testing-library
+    export * from "@testing-library/react";
+    export { userEvent } from "@testing-library/user-event";
+
+    // Override render with custom render
+    export { customRender as render };
+
+    // Helper to create mock functions with type safety
+    export function createMockFn<T extends (...args: any[]) => any>() {
+      return vi.fn() as unknown as T;
+    }
+
+    // Helper to wait for loading states to resolve
+    export async function waitForLoadingToFinish() {
+      await waitFor(() => {
+        expect(screen.queryByText(/loading/i)).not.toBeInTheDocument();
+      });
+    }
+
+    import { vi } from "vitest";
+    import { screen, waitFor } from "@testing-library/react";
+
+edge_cases:
+  - id: async-state-updates
+    symptom: "Warning about act() or state updates"
+    cause: "Not wrapping state updates in act()"
+    solution: "Use act() for manual state updates, or waitFor() for async"
+
+  - id: query-not-finding-element
+    symptom: "Element not found"
+    cause: "Wrong query or element not rendered"
+    solution: "Use screen.debug() to see current DOM, check queries"
+
+  - id: event-not-firing
+    symptom: "Click handler not called"
+    cause: "Element disabled or not interactive"
+    solution: "Check element state, use userEvent instead of fireEvent"
+
+  - id: provider-missing
+    symptom: "Context value undefined"
+    cause: "Component needs provider wrapper"
+    solution: "Use custom render with providers from test-utils"
+
+validation:
+  manual_test:
+    - "Run npm test"
+    - "Verify component tests pass"
+    - "Check hook tests work"
+    - "Test async operations"
+    - "Verify accessibility queries work"

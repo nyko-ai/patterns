@@ -1,0 +1,478 @@
+id: playwright-e2e
+version: "1.0.0"
+updated_at: "2026-01-31"
+author: "nyko-team"
+status: beta
+
+name: "Playwright E2E Testing"
+description: "End-to-end testing with Playwright for Next.js applications"
+
+category: testing
+tags:
+  - playwright
+  - e2e
+  - testing
+  - browser
+  - automation
+
+difficulty: intermediate
+time_estimate: "20-30 min"
+
+stack:
+  required:
+    - name: "@playwright/test"
+      version: "^1.58.1"
+      reason: "E2E test framework"
+    - name: "next"
+      version: "^15.1.0"
+      reason: "Next.js App Router"
+
+requires: []
+
+enables: []
+
+env_vars:
+  required: []
+  optional:
+    - key: PLAYWRIGHT_BASE_URL
+      description: "Base URL for tests"
+      default: "http://localhost:3000"
+    - key: CI
+      description: "Set to true in CI environment"
+      default: "false"
+
+external_setup:
+  - service: "Playwright Browsers"
+    url: "https://playwright.dev/docs/browsers"
+    steps:
+      - "Run: npx playwright install"
+      - "This installs Chromium, Firefox, and WebKit"
+
+files:
+  - path: "playwright.config.ts"
+    action: create
+    description: "Playwright configuration"
+    priority: 1
+
+  - path: "e2e/example.spec.ts"
+    action: create
+    description: "Example E2E test"
+    priority: 2
+
+  - path: "e2e/auth.setup.ts"
+    action: create
+    description: "Authentication setup"
+    priority: 3
+
+  - path: "e2e/fixtures.ts"
+    action: create
+    description: "Custom test fixtures"
+    priority: 4
+
+  - path: "package.json"
+    action: modify
+    description: "Add E2E test scripts"
+    priority: 5
+
+code:
+  playwright.config.ts: |
+    import { defineConfig, devices } from "@playwright/test";
+
+    const baseURL = process.env.PLAYWRIGHT_BASE_URL || "http://localhost:3000";
+
+    export default defineConfig({
+      // Test directory
+      testDir: "./e2e",
+
+      // Test file pattern
+      testMatch: "**/*.spec.ts",
+
+      // Run tests in parallel
+      fullyParallel: true,
+
+      // Fail the build on CI if you accidentally left test.only in the source code
+      forbidOnly: !!process.env.CI,
+
+      // Retry on CI only
+      retries: process.env.CI ? 2 : 0,
+
+      // Number of workers
+      workers: process.env.CI ? 1 : undefined,
+
+      // Reporter configuration
+      reporter: [
+        ["list"],
+        ["html", { outputFolder: "playwright-report" }],
+        ...(process.env.CI ? [["junit", { outputFile: "e2e-results.xml" }] as const] : []),
+      ],
+
+      // Shared settings for all projects
+      use: {
+        // Base URL for navigation
+        baseURL,
+
+        // Collect trace on failure
+        trace: "on-first-retry",
+
+        // Capture screenshot on failure
+        screenshot: "only-on-failure",
+
+        // Record video on failure
+        video: "on-first-retry",
+
+        // Viewport size
+        viewport: { width: 1280, height: 720 },
+
+        // Ignore HTTPS errors
+        ignoreHTTPSErrors: true,
+
+        // Action timeout
+        actionTimeout: 10000,
+
+        // Navigation timeout
+        navigationTimeout: 30000,
+      },
+
+      // Configure projects for major browsers
+      projects: [
+        // Setup project for authentication
+        {
+          name: "setup",
+          testMatch: /.*\.setup\.ts/,
+        },
+
+        // Desktop browsers
+        {
+          name: "chromium",
+          use: {
+            ...devices["Desktop Chrome"],
+          },
+          dependencies: ["setup"],
+        },
+        {
+          name: "firefox",
+          use: {
+            ...devices["Desktop Firefox"],
+          },
+          dependencies: ["setup"],
+        },
+        {
+          name: "webkit",
+          use: {
+            ...devices["Desktop Safari"],
+          },
+          dependencies: ["setup"],
+        },
+
+        // Mobile viewports
+        {
+          name: "mobile-chrome",
+          use: {
+            ...devices["Pixel 5"],
+          },
+          dependencies: ["setup"],
+        },
+        {
+          name: "mobile-safari",
+          use: {
+            ...devices["iPhone 12"],
+          },
+          dependencies: ["setup"],
+        },
+      ],
+
+      // Run local dev server before tests
+      webServer: {
+        command: "npm run dev",
+        url: baseURL,
+        reuseExistingServer: !process.env.CI,
+        timeout: 120000,
+      },
+
+      // Output folder for test artifacts
+      outputDir: "test-results",
+
+      // Global timeout
+      timeout: 30000,
+
+      // Expect timeout
+      expect: {
+        timeout: 5000,
+      },
+    });
+
+  e2e/example.spec.ts: |
+    import { test, expect } from "@playwright/test";
+
+    test.describe("Homepage", () => {
+      test("should load successfully", async ({ page }) => {
+        await page.goto("/");
+
+        // Check page title
+        await expect(page).toHaveTitle(/Your App/);
+
+        // Check main content is visible
+        await expect(page.locator("main")).toBeVisible();
+      });
+
+      test("should navigate to about page", async ({ page }) => {
+        await page.goto("/");
+
+        // Click on About link
+        await page.click('a[href="/about"]');
+
+        // Verify navigation
+        await expect(page).toHaveURL("/about");
+      });
+    });
+
+    test.describe("Navigation", () => {
+      test("should show mobile menu on small screens", async ({ page }) => {
+        // Set mobile viewport
+        await page.setViewportSize({ width: 375, height: 667 });
+        await page.goto("/");
+
+        // Check mobile menu button is visible
+        const menuButton = page.getByRole("button", { name: /menu/i });
+        await expect(menuButton).toBeVisible();
+
+        // Click to open menu
+        await menuButton.click();
+
+        // Check menu items are visible
+        await expect(page.getByRole("navigation")).toBeVisible();
+      });
+    });
+
+    test.describe("Forms", () => {
+      test("should submit contact form", async ({ page }) => {
+        await page.goto("/contact");
+
+        // Fill form
+        await page.fill('input[name="name"]', "John Doe");
+        await page.fill('input[name="email"]', "john@example.com");
+        await page.fill('textarea[name="message"]', "Hello, this is a test message.");
+
+        // Submit form
+        await page.click('button[type="submit"]');
+
+        // Check success message
+        await expect(page.getByText(/thank you/i)).toBeVisible();
+      });
+
+      test("should show validation errors", async ({ page }) => {
+        await page.goto("/contact");
+
+        // Submit empty form
+        await page.click('button[type="submit"]');
+
+        // Check error messages
+        await expect(page.getByText(/required/i)).toBeVisible();
+      });
+    });
+
+    test.describe("Authentication", () => {
+      test("should redirect to login when not authenticated", async ({ page }) => {
+        await page.goto("/dashboard");
+
+        // Should redirect to login
+        await expect(page).toHaveURL(/\/login/);
+      });
+
+      test("should login successfully", async ({ page }) => {
+        await page.goto("/login");
+
+        // Fill login form
+        await page.fill('input[name="email"]', "test@example.com");
+        await page.fill('input[name="password"]', "password123");
+
+        // Submit
+        await page.click('button[type="submit"]');
+
+        // Should redirect to dashboard
+        await expect(page).toHaveURL("/dashboard");
+      });
+    });
+
+    test.describe("API Interactions", () => {
+      test("should load data from API", async ({ page }) => {
+        // Intercept API call
+        await page.route("**/api/users", async (route) => {
+          await route.fulfill({
+            status: 200,
+            contentType: "application/json",
+            body: JSON.stringify([
+              { id: "1", name: "User 1" },
+              { id: "2", name: "User 2" },
+            ]),
+          });
+        });
+
+        await page.goto("/users");
+
+        // Check data is displayed
+        await expect(page.getByText("User 1")).toBeVisible();
+        await expect(page.getByText("User 2")).toBeVisible();
+      });
+    });
+
+    test.describe("Accessibility", () => {
+      test("should have no accessibility violations on homepage", async ({ page }) => {
+        await page.goto("/");
+
+        // Check for skip link
+        const skipLink = page.getByRole("link", { name: /skip to content/i });
+        await expect(skipLink).toBeAttached();
+
+        // Check heading structure
+        const h1 = page.getByRole("heading", { level: 1 });
+        await expect(h1).toBeVisible();
+
+        // Check images have alt text
+        const images = page.getByRole("img");
+        for (const img of await images.all()) {
+          await expect(img).toHaveAttribute("alt");
+        }
+      });
+    });
+
+  e2e/auth.setup.ts: |
+    import { test as setup, expect } from "@playwright/test";
+    import path from "path";
+
+    const authFile = path.join(__dirname, ".auth/user.json");
+
+    setup("authenticate", async ({ page }) => {
+      // Skip if no auth needed
+      if (process.env.SKIP_AUTH === "true") {
+        return;
+      }
+
+      // Navigate to login page
+      await page.goto("/login");
+
+      // Fill in login credentials
+      await page.fill('input[name="email"]', "test@example.com");
+      await page.fill('input[name="password"]', "testpassword");
+
+      // Click login button
+      await page.click('button[type="submit"]');
+
+      // Wait for navigation to dashboard
+      await page.waitForURL("/dashboard");
+
+      // Verify login was successful
+      await expect(page.getByText(/welcome/i)).toBeVisible();
+
+      // Save authentication state
+      await page.context().storageState({ path: authFile });
+    });
+
+  e2e/fixtures.ts: |
+    import { test as base, expect } from "@playwright/test";
+    import path from "path";
+
+    // Extend base test with custom fixtures
+    export const test = base.extend<{
+      // Add authenticated page fixture
+      authenticatedPage: typeof base;
+      // Add test user data
+      testUser: { email: string; password: string };
+    }>({
+      // Authenticated page fixture
+      authenticatedPage: async ({ browser }, use) => {
+        const context = await browser.newContext({
+          storageState: path.join(__dirname, ".auth/user.json"),
+        });
+        const page = await context.newPage();
+        await use(page as any);
+        await context.close();
+      },
+
+      // Test user data fixture
+      testUser: async ({}, use) => {
+        await use({
+          email: "test@example.com",
+          password: "testpassword",
+        });
+      },
+    });
+
+    // Custom expect matchers
+    expect.extend({
+      async toHaveValidLinks(page) {
+        const links = await page.$$("a[href]");
+        const brokenLinks: string[] = [];
+
+        for (const link of links) {
+          const href = await link.getAttribute("href");
+          if (href && !href.startsWith("#") && !href.startsWith("mailto:")) {
+            try {
+              const response = await page.request.head(href);
+              if (!response.ok()) {
+                brokenLinks.push(href);
+              }
+            } catch {
+              brokenLinks.push(href);
+            }
+          }
+        }
+
+        return {
+          pass: brokenLinks.length === 0,
+          message: () =>
+            brokenLinks.length === 0
+              ? "All links are valid"
+              : `Found broken links: ${brokenLinks.join(", ")}`,
+        };
+      },
+    });
+
+    export { expect };
+
+  package.json: |
+    // Add to scripts section:
+    {
+      "scripts": {
+        "e2e": "playwright test",
+        "e2e:ui": "playwright test --ui",
+        "e2e:headed": "playwright test --headed",
+        "e2e:debug": "playwright test --debug",
+        "e2e:report": "playwright show-report",
+        "e2e:codegen": "playwright codegen localhost:3000",
+        "e2e:chromium": "playwright test --project=chromium",
+        "e2e:firefox": "playwright test --project=firefox",
+        "e2e:webkit": "playwright test --project=webkit"
+      }
+    }
+
+edge_cases:
+  - id: browser-not-installed
+    symptom: "Browser executable not found"
+    cause: "Browsers not installed"
+    solution: "Run npx playwright install"
+
+  - id: server-not-started
+    symptom: "Connection refused errors"
+    cause: "Dev server not running"
+    solution: "Check webServer configuration in playwright.config.ts"
+
+  - id: flaky-tests
+    symptom: "Tests pass sometimes, fail others"
+    cause: "Race conditions or timing issues"
+    solution: "Use proper waits like waitForSelector, waitForURL"
+
+  - id: auth-state-stale
+    symptom: "Authentication tests failing"
+    cause: "Saved auth state expired"
+    solution: "Delete .auth folder and re-run setup"
+
+validation:
+  manual_test:
+    - "Run npx playwright install"
+    - "Run npm run e2e"
+    - "Verify tests pass"
+    - "Run npm run e2e:ui"
+    - "Check visual test runner"
+    - "Run npm run e2e:report"
+    - "View HTML report"

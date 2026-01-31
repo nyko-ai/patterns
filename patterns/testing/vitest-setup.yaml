@@ -1,0 +1,355 @@
+id: vitest-setup
+version: "1.0.0"
+updated_at: "2026-01-31"
+author: "nyko-team"
+status: beta
+
+name: "Vitest Configuration for Next.js"
+description: "Complete Vitest setup for Next.js with coverage and path aliases"
+
+category: testing
+tags:
+  - vitest
+  - testing
+  - unit-tests
+  - coverage
+  - nextjs
+
+difficulty: beginner
+time_estimate: "10-15 min"
+
+stack:
+  required:
+    - name: "vitest"
+      version: "^4.0.18"
+      reason: "Test runner"
+    - name: "@vitest/coverage-v8"
+      version: "^4.0.18"
+      reason: "Code coverage"
+    - name: "next"
+      version: "^15.1.0"
+      reason: "Next.js App Router"
+
+requires: []
+
+enables:
+  - testing-library-react
+  - msw-mocking
+
+env_vars:
+  required: []
+  optional:
+    - key: CI
+      description: "Set to true in CI environment"
+      default: "false"
+
+external_setup: []
+
+files:
+  - path: "vitest.config.ts"
+    action: create
+    description: "Vitest configuration"
+    priority: 1
+
+  - path: "vitest.setup.ts"
+    action: create
+    description: "Test setup file"
+    priority: 2
+
+  - path: "package.json"
+    action: modify
+    description: "Add test scripts"
+    priority: 3
+
+  - path: "__tests__/example.test.ts"
+    action: create
+    description: "Example test file"
+    priority: 4
+
+code:
+  vitest.config.ts: |
+    import { defineConfig } from "vitest/config";
+    import react from "@vitejs/plugin-react";
+    import tsconfigPaths from "vite-tsconfig-paths";
+
+    export default defineConfig({
+      plugins: [react(), tsconfigPaths()],
+      test: {
+        // Test environment
+        environment: "happy-dom",
+
+        // Setup files
+        setupFiles: ["./vitest.setup.ts"],
+
+        // Include patterns
+        include: [
+          "**/*.test.{ts,tsx}",
+          "**/*.spec.{ts,tsx}",
+          "__tests__/**/*.{ts,tsx}",
+        ],
+
+        // Exclude patterns
+        exclude: [
+          "node_modules",
+          ".next",
+          "e2e/**",
+          "playwright/**",
+        ],
+
+        // Coverage configuration
+        coverage: {
+          provider: "v8",
+          reporter: ["text", "json", "html", "lcov"],
+          reportsDirectory: "./coverage",
+          include: [
+            "src/**/*.{ts,tsx}",
+            "lib/**/*.{ts,tsx}",
+            "app/**/*.{ts,tsx}",
+            "components/**/*.{ts,tsx}",
+          ],
+          exclude: [
+            "**/*.d.ts",
+            "**/*.test.{ts,tsx}",
+            "**/*.spec.{ts,tsx}",
+            "**/types/**",
+            "**/node_modules/**",
+          ],
+          thresholds: {
+            statements: 80,
+            branches: 80,
+            functions: 80,
+            lines: 80,
+          },
+        },
+
+        // Globals
+        globals: true,
+
+        // Reporter
+        reporters: ["default", "html"],
+
+        // Pool options
+        pool: "forks",
+
+        // Timeout
+        testTimeout: 10000,
+        hookTimeout: 10000,
+
+        // Watch mode
+        watch: false,
+
+        // Mock reset
+        mockReset: true,
+        restoreMocks: true,
+      },
+      resolve: {
+        alias: {
+          "@": "./",
+        },
+      },
+    });
+
+  vitest.setup.ts: |
+    import { expect, afterEach, vi } from "vitest";
+    import { cleanup } from "@testing-library/react";
+    import * as matchers from "@testing-library/jest-dom/matchers";
+
+    // Extend Vitest's expect with Testing Library matchers
+    expect.extend(matchers);
+
+    // Cleanup after each test
+    afterEach(() => {
+      cleanup();
+    });
+
+    // Mock Next.js router
+    vi.mock("next/navigation", () => ({
+      useRouter: () => ({
+        push: vi.fn(),
+        replace: vi.fn(),
+        prefetch: vi.fn(),
+        back: vi.fn(),
+        forward: vi.fn(),
+        refresh: vi.fn(),
+      }),
+      useSearchParams: () => new URLSearchParams(),
+      usePathname: () => "/",
+      useParams: () => ({}),
+    }));
+
+    // Mock Next.js Image component
+    vi.mock("next/image", () => ({
+      default: ({ src, alt, ...props }: { src: string; alt: string }) => {
+        // eslint-disable-next-line @next/next/no-img-element
+        return <img src={src} alt={alt} {...props} />;
+      },
+    }));
+
+    // Mock Next.js Link component
+    vi.mock("next/link", () => ({
+      default: ({ children, href, ...props }: { children: React.ReactNode; href: string }) => {
+        return <a href={href} {...props}>{children}</a>;
+      },
+    }));
+
+    // Mock environment variables
+    vi.stubEnv("NEXT_PUBLIC_APP_URL", "http://localhost:3000");
+
+    // Mock window.matchMedia
+    Object.defineProperty(window, "matchMedia", {
+      writable: true,
+      value: vi.fn().mockImplementation((query) => ({
+        matches: false,
+        media: query,
+        onchange: null,
+        addListener: vi.fn(),
+        removeListener: vi.fn(),
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+        dispatchEvent: vi.fn(),
+      })),
+    });
+
+    // Mock ResizeObserver
+    global.ResizeObserver = vi.fn().mockImplementation(() => ({
+      observe: vi.fn(),
+      unobserve: vi.fn(),
+      disconnect: vi.fn(),
+    }));
+
+    // Mock IntersectionObserver
+    global.IntersectionObserver = vi.fn().mockImplementation(() => ({
+      observe: vi.fn(),
+      unobserve: vi.fn(),
+      disconnect: vi.fn(),
+    }));
+
+  package.json: |
+    // Add to scripts section:
+    {
+      "scripts": {
+        "test": "vitest",
+        "test:run": "vitest run",
+        "test:watch": "vitest --watch",
+        "test:coverage": "vitest run --coverage",
+        "test:ui": "vitest --ui",
+        "test:ci": "vitest run --coverage --reporter=junit --outputFile=test-results.xml"
+      }
+    }
+
+  __tests__/example.test.ts: |
+    import { describe, it, expect, vi } from "vitest";
+
+    // Example utility function
+    function add(a: number, b: number): number {
+      return a + b;
+    }
+
+    function fetchUser(id: string): Promise<{ id: string; name: string }> {
+      return Promise.resolve({ id, name: "Test User" });
+    }
+
+    describe("Example Tests", () => {
+      describe("add function", () => {
+        it("should add two positive numbers", () => {
+          expect(add(1, 2)).toBe(3);
+        });
+
+        it("should handle negative numbers", () => {
+          expect(add(-1, 1)).toBe(0);
+        });
+
+        it("should handle zero", () => {
+          expect(add(0, 0)).toBe(0);
+        });
+      });
+
+      describe("async operations", () => {
+        it("should fetch user", async () => {
+          const user = await fetchUser("123");
+          expect(user).toEqual({ id: "123", name: "Test User" });
+        });
+      });
+
+      describe("mocking", () => {
+        it("should mock functions", () => {
+          const mockFn = vi.fn().mockReturnValue(42);
+          expect(mockFn()).toBe(42);
+          expect(mockFn).toHaveBeenCalledTimes(1);
+        });
+
+        it("should mock async functions", async () => {
+          const mockAsync = vi.fn().mockResolvedValue({ success: true });
+          const result = await mockAsync();
+          expect(result).toEqual({ success: true });
+        });
+
+        it("should spy on methods", () => {
+          const obj = {
+            method: (x: number) => x * 2,
+          };
+
+          const spy = vi.spyOn(obj, "method");
+          obj.method(5);
+
+          expect(spy).toHaveBeenCalledWith(5);
+          expect(spy).toHaveReturnedWith(10);
+        });
+      });
+
+      describe("matchers", () => {
+        it("should match objects", () => {
+          const user = { name: "John", age: 30, email: "john@example.com" };
+          expect(user).toMatchObject({ name: "John", age: 30 });
+        });
+
+        it("should match arrays", () => {
+          const items = [1, 2, 3, 4, 5];
+          expect(items).toContain(3);
+          expect(items).toHaveLength(5);
+        });
+
+        it("should match strings", () => {
+          const message = "Hello, World!";
+          expect(message).toMatch(/World/);
+          expect(message).toContain("Hello");
+        });
+
+        it("should handle errors", () => {
+          const throwError = () => {
+            throw new Error("Test error");
+          };
+          expect(throwError).toThrow("Test error");
+        });
+      });
+    });
+
+edge_cases:
+  - id: path-alias-not-resolved
+    symptom: "Module not found errors"
+    cause: "vite-tsconfig-paths not configured"
+    solution: "Add tsconfigPaths() to plugins array"
+
+  - id: jsx-not-transformed
+    symptom: "React JSX syntax errors"
+    cause: "@vitejs/plugin-react not configured"
+    solution: "Add react() to plugins array"
+
+  - id: coverage-threshold-fail
+    symptom: "Tests pass but coverage fails"
+    cause: "Coverage below threshold"
+    solution: "Add more tests or adjust thresholds during development"
+
+  - id: mock-not-reset
+    symptom: "Tests affecting each other"
+    cause: "Mocks persisting between tests"
+    solution: "Enable mockReset and restoreMocks in config"
+
+validation:
+  manual_test:
+    - "Run npm test"
+    - "Verify tests pass"
+    - "Run npm run test:coverage"
+    - "Check coverage report"
+    - "Run npm run test:ui"
+    - "Verify UI opens in browser"
