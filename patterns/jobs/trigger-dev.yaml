@@ -1,0 +1,703 @@
+id: trigger-dev
+version: "1.0.0"
+updated_at: "2026-01-31"
+author: "nyko-team"
+status: beta
+
+name: "Trigger.dev Background Jobs"
+description: "Serverless background jobs with Trigger.dev including scheduling, webhooks, and integrations"
+
+category: jobs
+tags:
+  - trigger.dev
+  - background-jobs
+  - serverless
+  - workflows
+  - scheduling
+
+difficulty: intermediate
+time_estimate: "25-30 min"
+
+stack:
+  required:
+    - name: "next"
+      version: "^15.1.0"
+      reason: "App Router"
+    - name: "@trigger.dev/sdk"
+      version: "^4.3.3"
+      reason: "Trigger.dev SDK"
+    - name: "@trigger.dev/nextjs"
+      version: "^3.3.12"
+      reason: "Next.js integration"
+
+requires: []
+
+enables: []
+
+env_vars:
+  required:
+    - key: TRIGGER_SECRET_KEY
+      description: "Trigger.dev secret key"
+      format: "tr_dev_xxxx or tr_prod_xxxx"
+      where_to_find: "Trigger.dev Dashboard > Project > API Keys"
+
+external_setup:
+  - service: "Trigger.dev"
+    url: "https://cloud.trigger.dev"
+    steps:
+      - "Create account at trigger.dev"
+      - "Create a new project"
+      - "Copy Secret Key from project settings"
+      - "For local dev: npx trigger.dev@latest dev"
+
+files:
+  - path: "trigger.config.ts"
+    action: create
+    description: "Trigger.dev configuration"
+    priority: 1
+
+  - path: "lib/trigger/client.ts"
+    action: create
+    description: "Trigger.dev client"
+    priority: 2
+
+  - path: "lib/trigger/tasks/email.ts"
+    action: create
+    description: "Email tasks"
+    priority: 3
+
+  - path: "lib/trigger/tasks/processing.ts"
+    action: create
+    description: "Processing tasks"
+    priority: 4
+
+  - path: "lib/trigger/tasks/scheduled.ts"
+    action: create
+    description: "Scheduled tasks"
+    priority: 5
+
+  - path: "lib/trigger/index.ts"
+    action: create
+    description: "Tasks export"
+    priority: 6
+
+code:
+  trigger.config.ts: |
+    import type { TriggerConfig } from "@trigger.dev/sdk/v3";
+
+    export const config: TriggerConfig = {
+      project: "my-project", // Your project ref from dashboard
+      logLevel: "log",
+      retries: {
+        enabledInDev: true,
+        default: {
+          maxAttempts: 3,
+          minTimeoutInMs: 1000,
+          maxTimeoutInMs: 10000,
+          factor: 2,
+          randomize: true,
+        },
+      },
+      // Configure which directories contain tasks
+      dirs: ["./lib/trigger/tasks"],
+    };
+
+  lib/trigger/client.ts: |
+    import { tasks } from "@trigger.dev/sdk/v3";
+
+    // Import task types for triggering
+    import type { sendWelcomeEmail, sendNotificationEmail } from "./tasks/email";
+    import type { processImage, processVideo } from "./tasks/processing";
+    import type { dailyCleanup } from "./tasks/scheduled";
+
+    /**
+     * Trigger a task by ID
+     */
+    export async function triggerTask<T>(
+      taskId: string,
+      payload: T,
+      options?: {
+        delay?: string | Date;
+        idempotencyKey?: string;
+        queue?: { name: string; concurrencyLimit?: number };
+      }
+    ) {
+      return tasks.trigger(taskId, payload, options);
+    }
+
+    /**
+     * Trigger multiple tasks at once
+     */
+    export async function batchTrigger<T>(
+      taskId: string,
+      payloads: T[],
+      options?: {
+        idempotencyKeys?: string[];
+      }
+    ) {
+      return tasks.batchTrigger(
+        payloads.map((payload, index) => ({
+          id: taskId,
+          payload,
+          options: options?.idempotencyKeys?.[index]
+            ? { idempotencyKey: options.idempotencyKeys[index] }
+            : undefined,
+        }))
+      );
+    }
+
+    /**
+     * Get task run status
+     */
+    export async function getRunStatus(runId: string) {
+      return tasks.getRun(runId);
+    }
+
+    /**
+     * Cancel a running task
+     */
+    export async function cancelRun(runId: string) {
+      return tasks.cancel(runId);
+    }
+
+    /**
+     * Reschedule a task
+     */
+    export async function rescheduleRun(runId: string, delay: string | Date) {
+      return tasks.reschedule(runId, { delay });
+    }
+
+    // Export typed trigger functions
+    export const emailTasks = {
+      sendWelcome: (payload: Parameters<typeof sendWelcomeEmail.trigger>[0]) =>
+        triggerTask("send-welcome-email", payload),
+      sendNotification: (payload: Parameters<typeof sendNotificationEmail.trigger>[0]) =>
+        triggerTask("send-notification-email", payload),
+    };
+
+    export const processingTasks = {
+      processImage: (payload: Parameters<typeof processImage.trigger>[0]) =>
+        triggerTask("process-image", payload),
+      processVideo: (payload: Parameters<typeof processVideo.trigger>[0]) =>
+        triggerTask("process-video", payload),
+    };
+
+  lib/trigger/tasks/email.ts: |
+    import { task, logger, wait } from "@trigger.dev/sdk/v3";
+
+    /**
+     * Send welcome email task
+     */
+    export const sendWelcomeEmail = task({
+      id: "send-welcome-email",
+      retry: {
+        maxAttempts: 3,
+      },
+      run: async (payload: {
+        userId: string;
+        email: string;
+        name: string;
+      }) => {
+        logger.info("Sending welcome email", { email: payload.email });
+
+        // Simulate email sending
+        // Replace with your email service (Resend, SendGrid, etc.)
+        // const { data, error } = await resend.emails.send({
+        //   from: "noreply@yourapp.com",
+        //   to: payload.email,
+        //   subject: `Welcome to Our App, ${payload.name}!`,
+        //   react: WelcomeEmail({ name: payload.name }),
+        // });
+
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+
+        logger.info("Welcome email sent", { userId: payload.userId });
+
+        return {
+          success: true,
+          sentAt: new Date().toISOString(),
+        };
+      },
+    });
+
+    /**
+     * Send notification email task
+     */
+    export const sendNotificationEmail = task({
+      id: "send-notification-email",
+      retry: {
+        maxAttempts: 3,
+      },
+      queue: {
+        name: "email-queue",
+        concurrencyLimit: 10,
+      },
+      run: async (payload: {
+        userId: string;
+        email: string;
+        subject: string;
+        body: string;
+        priority?: "high" | "normal" | "low";
+      }) => {
+        const { email, subject, body, priority = "normal" } = payload;
+
+        logger.info("Sending notification email", { email, subject, priority });
+
+        // Rate limit for low priority emails
+        if (priority === "low") {
+          await wait.for({ seconds: 5 });
+        }
+
+        // Send email
+        // await resend.emails.send({
+        //   from: "notifications@yourapp.com",
+        //   to: email,
+        //   subject,
+        //   html: body,
+        // });
+
+        return { success: true };
+      },
+    });
+
+    /**
+     * Send digest email - aggregates items and sends summary
+     */
+    export const sendDigestEmail = task({
+      id: "send-digest-email",
+      run: async (payload: {
+        userId: string;
+        email: string;
+        items: { title: string; url: string; description?: string }[];
+      }) => {
+        const { email, items } = payload;
+
+        if (items.length === 0) {
+          logger.info("No items for digest, skipping", { email });
+          return { skipped: true, reason: "no-items" };
+        }
+
+        logger.info("Sending digest email", {
+          email,
+          itemCount: items.length,
+        });
+
+        // Generate and send digest
+        // await resend.emails.send({
+        //   from: "digest@yourapp.com",
+        //   to: email,
+        //   subject: `Your Daily Digest - ${items.length} new items`,
+        //   react: DigestEmail({ items }),
+        // });
+
+        return {
+          success: true,
+          itemsSent: items.length,
+        };
+      },
+    });
+
+  lib/trigger/tasks/processing.ts: |
+    import { task, logger } from "@trigger.dev/sdk/v3";
+
+    /**
+     * Process image task
+     */
+    export const processImage = task({
+      id: "process-image",
+      retry: {
+        maxAttempts: 5,
+      },
+      machine: {
+        preset: "medium-1x", // More resources for image processing
+      },
+      run: async (payload: {
+        imageId: string;
+        imageUrl: string;
+        operations: Array<{
+          type: "resize" | "compress" | "convert" | "watermark";
+          params?: Record<string, unknown>;
+        }>;
+        outputFormat?: "jpeg" | "png" | "webp" | "avif";
+      }) => {
+        const { imageId, imageUrl, operations, outputFormat = "webp" } = payload;
+
+        logger.info("Starting image processing", {
+          imageId,
+          operationCount: operations.length,
+        });
+
+        const results: Record<string, unknown> = {};
+
+        for (const operation of operations) {
+          logger.info(`Executing operation: ${operation.type}`, operation.params);
+
+          // Replace with actual image processing (Sharp, Cloudinary, etc.)
+          switch (operation.type) {
+            case "resize":
+              // await sharp(imageBuffer).resize(params.width, params.height);
+              results.resize = { width: 800, height: 600 };
+              break;
+            case "compress":
+              // await sharp(imageBuffer).quality(params.quality || 80);
+              results.compress = { quality: 80 };
+              break;
+            case "convert":
+              // await sharp(imageBuffer).toFormat(outputFormat);
+              results.convert = { format: outputFormat };
+              break;
+            case "watermark":
+              // await addWatermark(imageBuffer, params.text);
+              results.watermark = { applied: true };
+              break;
+          }
+        }
+
+        // Upload processed image
+        // const processedUrl = await uploadToStorage(processedBuffer);
+
+        logger.info("Image processing complete", { imageId, results });
+
+        return {
+          imageId,
+          originalUrl: imageUrl,
+          processedUrl: `${imageUrl}?processed=true`,
+          operations: results,
+        };
+      },
+    });
+
+    /**
+     * Process video task - longer running
+     */
+    export const processVideo = task({
+      id: "process-video",
+      retry: {
+        maxAttempts: 3,
+      },
+      machine: {
+        preset: "large-1x", // More resources for video
+      },
+      run: async (payload: {
+        videoId: string;
+        videoUrl: string;
+        outputFormat: "mp4" | "webm" | "hls";
+        quality?: "low" | "medium" | "high" | "4k";
+        generateThumbnail?: boolean;
+      }) => {
+        const {
+          videoId,
+          videoUrl,
+          outputFormat,
+          quality = "medium",
+          generateThumbnail = true,
+        } = payload;
+
+        logger.info("Starting video processing", {
+          videoId,
+          outputFormat,
+          quality,
+        });
+
+        // Simulate video processing time
+        await new Promise((resolve) => setTimeout(resolve, 5000));
+
+        const result: Record<string, unknown> = {
+          videoId,
+          originalUrl: videoUrl,
+          processedUrl: `${videoUrl.replace(/\.[^.]+$/, `.${outputFormat}`)}`,
+          format: outputFormat,
+          quality,
+        };
+
+        if (generateThumbnail) {
+          // Generate thumbnail
+          result.thumbnailUrl = `${videoUrl.replace(/\.[^.]+$/, "_thumb.jpg")}`;
+        }
+
+        logger.info("Video processing complete", result);
+
+        return result;
+      },
+    });
+
+    /**
+     * Batch process items
+     */
+    export const batchProcess = task({
+      id: "batch-process",
+      run: async (payload: {
+        batchId: string;
+        items: { id: string; data: unknown }[];
+        processType: string;
+      }) => {
+        const { batchId, items, processType } = payload;
+
+        logger.info("Starting batch processing", {
+          batchId,
+          itemCount: items.length,
+          processType,
+        });
+
+        const results = await Promise.all(
+          items.map(async (item) => {
+            try {
+              // Process each item
+              await new Promise((resolve) => setTimeout(resolve, 100));
+              return { id: item.id, success: true };
+            } catch (error) {
+              return {
+                id: item.id,
+                success: false,
+                error: error instanceof Error ? error.message : "Unknown error",
+              };
+            }
+          })
+        );
+
+        const successful = results.filter((r) => r.success).length;
+        const failed = results.filter((r) => !r.success).length;
+
+        logger.info("Batch processing complete", {
+          batchId,
+          successful,
+          failed,
+        });
+
+        return {
+          batchId,
+          total: items.length,
+          successful,
+          failed,
+          results,
+        };
+      },
+    });
+
+  lib/trigger/tasks/scheduled.ts: |
+    import { schedules, logger } from "@trigger.dev/sdk/v3";
+
+    /**
+     * Daily cleanup task
+     * Runs every day at 2 AM UTC
+     */
+    export const dailyCleanup = schedules.task({
+      id: "daily-cleanup",
+      cron: "0 2 * * *",
+      run: async () => {
+        logger.info("Starting daily cleanup");
+
+        const stats = {
+          expiredSessions: 0,
+          oldLogs: 0,
+          orphanedFiles: 0,
+        };
+
+        // Clean expired sessions
+        try {
+          // const result = await db.session.deleteMany({
+          //   where: { expiresAt: { lt: new Date() } },
+          // });
+          // stats.expiredSessions = result.count;
+          logger.info("Cleaned expired sessions", { count: stats.expiredSessions });
+        } catch (error) {
+          logger.error("Failed to clean sessions", { error });
+        }
+
+        // Clean old logs (30 days)
+        try {
+          // const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+          // const result = await db.log.deleteMany({
+          //   where: { createdAt: { lt: thirtyDaysAgo } },
+          // });
+          // stats.oldLogs = result.count;
+          logger.info("Cleaned old logs", { count: stats.oldLogs });
+        } catch (error) {
+          logger.error("Failed to clean logs", { error });
+        }
+
+        // Clean orphaned files
+        try {
+          // stats.orphanedFiles = await cleanOrphanedFiles();
+          logger.info("Cleaned orphaned files", { count: stats.orphanedFiles });
+        } catch (error) {
+          logger.error("Failed to clean files", { error });
+        }
+
+        logger.info("Daily cleanup complete", stats);
+
+        return {
+          ...stats,
+          completedAt: new Date().toISOString(),
+        };
+      },
+    });
+
+    /**
+     * Hourly sync task
+     * Syncs data with external services
+     */
+    export const hourlySync = schedules.task({
+      id: "hourly-sync",
+      cron: "0 * * * *", // Every hour
+      run: async () => {
+        logger.info("Starting hourly sync");
+
+        const syncResults = [];
+
+        // Sync analytics
+        try {
+          // await syncAnalytics();
+          syncResults.push({ service: "analytics", success: true });
+        } catch (error) {
+          syncResults.push({
+            service: "analytics",
+            success: false,
+            error: error instanceof Error ? error.message : "Unknown",
+          });
+        }
+
+        // Sync user data
+        try {
+          // await syncUserData();
+          syncResults.push({ service: "users", success: true });
+        } catch (error) {
+          syncResults.push({
+            service: "users",
+            success: false,
+            error: error instanceof Error ? error.message : "Unknown",
+          });
+        }
+
+        logger.info("Hourly sync complete", { results: syncResults });
+
+        return { syncResults };
+      },
+    });
+
+    /**
+     * Weekly report generation
+     * Runs every Monday at 9 AM UTC
+     */
+    export const weeklyReport = schedules.task({
+      id: "weekly-report",
+      cron: "0 9 * * 1",
+      run: async () => {
+        logger.info("Generating weekly report");
+
+        // Gather stats for the past week
+        const weekAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+
+        const stats = {
+          newUsers: 0,
+          activeUsers: 0,
+          totalRevenue: 0,
+          topFeatures: [] as string[],
+        };
+
+        // Gather data
+        // stats.newUsers = await db.user.count({ where: { createdAt: { gte: weekAgo } } });
+        // stats.activeUsers = await db.session.groupBy({ ... });
+        // stats.totalRevenue = await calculateWeeklyRevenue();
+
+        // Generate report
+        const report = {
+          period: {
+            start: weekAgo.toISOString(),
+            end: new Date().toISOString(),
+          },
+          ...stats,
+          generatedAt: new Date().toISOString(),
+        };
+
+        // Send report via email
+        // await sendReportEmail(report);
+
+        logger.info("Weekly report generated and sent", report);
+
+        return report;
+      },
+    });
+
+  lib/trigger/index.ts: |
+    // Export all tasks for easy importing
+    export * from "./tasks/email";
+    export * from "./tasks/processing";
+    export * from "./tasks/scheduled";
+    export * from "./client";
+
+edge_cases:
+  - id: task-timeout
+    symptom: "Task fails with timeout error"
+    cause: "Task exceeds maximum execution time"
+    solution: |
+      1. Break long tasks into smaller subtasks
+      2. Use appropriate machine preset for heavy tasks
+      3. Configure task with proper timeout:
+
+      export const longTask = task({
+        id: "long-task",
+        machine: {
+          preset: "large-1x",
+        },
+        maxDuration: 300, // 5 minutes in seconds
+        run: async (payload) => {
+          // Long running operation
+        },
+      });
+
+  - id: dev-not-connected
+    symptom: "Tasks not running in development"
+    cause: "Trigger.dev dev server not running"
+    solution: |
+      1. Start the dev server:
+         npx trigger.dev@latest dev
+
+      2. Check terminal for connection status
+      3. Ensure TRIGGER_SECRET_KEY is set in .env
+      4. Visit http://localhost:3000/api/trigger to verify
+
+  - id: concurrency-issues
+    symptom: "Too many tasks running simultaneously"
+    cause: "No concurrency limits set"
+    solution: |
+      Set queue with concurrency limit:
+
+      export const rateLimitedTask = task({
+        id: "rate-limited-task",
+        queue: {
+          name: "limited-queue",
+          concurrencyLimit: 5, // Max 5 concurrent runs
+        },
+        run: async (payload) => {
+          // ...
+        },
+      });
+
+  - id: idempotency
+    symptom: "Task runs multiple times for same event"
+    cause: "No idempotency key provided"
+    solution: |
+      Use idempotency keys when triggering:
+
+      await task.trigger(payload, {
+        idempotencyKey: `process-${orderId}`,
+      });
+
+      // Or for batch operations
+      await tasks.batchTrigger([
+        {
+          id: "my-task",
+          payload: { orderId: "123" },
+          options: { idempotencyKey: "order-123" },
+        },
+      ]);
+
+validation:
+  manual_test:
+    - "Initialize trigger.dev: npx trigger.dev@latest init"
+    - "Start dev server: npx trigger.dev@latest dev"
+    - "Trigger a test task from your app"
+    - "Check task execution in dashboard"
+    - "Test retry behavior by throwing an error"
+    - "Verify scheduled tasks run at expected times"
