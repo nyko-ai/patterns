@@ -1,0 +1,279 @@
+id: language-switcher
+name: Language Switcher Component
+description: Language switcher components for Next.js with next-intl
+category: i18n
+tags:
+  - i18n
+  - language-switcher
+  - next-intl
+  - localization
+  - nextjs
+dependencies:
+  - next-intl: "^4.8.1"
+files:
+  - path: components/i18n/language-switcher.tsx
+    description: Dropdown language switcher
+    content: |
+      'use client';
+
+      import { useLocale } from 'next-intl';
+      import { useRouter, usePathname } from '@/i18n/routing';
+      import { locales, localeNames, localeFlags, Locale } from '@/i18n/config';
+      import { useState, useRef, useEffect } from 'react';
+
+      export function LanguageSwitcher() {
+        const locale = useLocale() as Locale;
+        const router = useRouter();
+        const pathname = usePathname();
+        const [isOpen, setIsOpen] = useState(false);
+        const dropdownRef = useRef<HTMLDivElement>(null);
+
+        useEffect(() => {
+          function handleClickOutside(event: MouseEvent) {
+            if (dropdownRef.current && !dropdownRef.current.contains(event.target as Node)) {
+              setIsOpen(false);
+            }
+          }
+
+          document.addEventListener('mousedown', handleClickOutside);
+          return () => document.removeEventListener('mousedown', handleClickOutside);
+        }, []);
+
+        const handleLocaleChange = (newLocale: Locale) => {
+          router.replace(pathname, { locale: newLocale });
+          setIsOpen(false);
+        };
+
+        return (
+          <div className="relative" ref={dropdownRef}>
+            <button
+              onClick={() => setIsOpen(!isOpen)}
+              className="flex items-center gap-2 px-3 py-2 border rounded-lg hover:bg-gray-50 transition-colors"
+              aria-label="Select language"
+              aria-expanded={isOpen}
+            >
+              <span className="text-xl">{localeFlags[locale]}</span>
+              <span className="text-sm font-medium">{localeNames[locale]}</span>
+              <svg
+                className={`w-4 h-4 transition-transform ${isOpen ? 'rotate-180' : ''}`}
+                fill="none"
+                viewBox="0 0 24 24"
+                stroke="currentColor"
+              >
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+              </svg>
+            </button>
+
+            {isOpen && (
+              <div className="absolute right-0 mt-2 w-48 bg-white border rounded-lg shadow-lg z-50">
+                <ul className="py-1">
+                  {locales.map((loc) => (
+                    <li key={loc}>
+                      <button
+                        onClick={() => handleLocaleChange(loc)}
+                        className={`w-full flex items-center gap-3 px-4 py-2 text-left hover:bg-gray-50 ${
+                          loc === locale ? 'bg-blue-50 text-blue-600' : ''
+                        }`}
+                      >
+                        <span className="text-xl">{localeFlags[loc]}</span>
+                        <span className="text-sm">{localeNames[loc]}</span>
+                        {loc === locale && (
+                          <svg className="w-4 h-4 ml-auto" fill="currentColor" viewBox="0 0 20 20">
+                            <path
+                              fillRule="evenodd"
+                              d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z"
+                              clipRule="evenodd"
+                            />
+                          </svg>
+                        )}
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+          </div>
+        );
+      }
+
+  - path: components/i18n/language-switcher-flags.tsx
+    description: Flag-based inline language switcher
+    content: |
+      'use client';
+
+      import { useLocale } from 'next-intl';
+      import { useRouter, usePathname } from '@/i18n/routing';
+      import { locales, localeFlags, localeNames, Locale } from '@/i18n/config';
+
+      interface LanguageSwitcherFlagsProps {
+        size?: 'sm' | 'md' | 'lg';
+      }
+
+      export function LanguageSwitcherFlags({ size = 'md' }: LanguageSwitcherFlagsProps) {
+        const locale = useLocale() as Locale;
+        const router = useRouter();
+        const pathname = usePathname();
+
+        const sizeClasses = {
+          sm: 'text-lg p-1',
+          md: 'text-xl p-1.5',
+          lg: 'text-2xl p-2',
+        };
+
+        const handleLocaleChange = (newLocale: Locale) => {
+          router.replace(pathname, { locale: newLocale });
+        };
+
+        return (
+          <div className="flex items-center gap-1" role="radiogroup" aria-label="Select language">
+            {locales.map((loc) => (
+              <button
+                key={loc}
+                onClick={() => handleLocaleChange(loc)}
+                className={`${sizeClasses[size]} rounded-md transition-all ${
+                  loc === locale
+                    ? 'bg-blue-100 ring-2 ring-blue-500'
+                    : 'hover:bg-gray-100 opacity-60 hover:opacity-100'
+                }`}
+                aria-label={localeNames[loc]}
+                aria-checked={loc === locale}
+                role="radio"
+              >
+                {localeFlags[loc]}
+              </button>
+            ))}
+          </div>
+        );
+      }
+
+  - path: components/i18n/language-switcher-select.tsx
+    description: Native select language switcher
+    content: |
+      'use client';
+
+      import { useLocale } from 'next-intl';
+      import { useRouter, usePathname } from '@/i18n/routing';
+      import { locales, localeNames, Locale } from '@/i18n/config';
+
+      interface LanguageSwitcherSelectProps {
+        className?: string;
+      }
+
+      export function LanguageSwitcherSelect({ className }: LanguageSwitcherSelectProps) {
+        const locale = useLocale() as Locale;
+        const router = useRouter();
+        const pathname = usePathname();
+
+        const handleChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
+          const newLocale = e.target.value as Locale;
+          router.replace(pathname, { locale: newLocale });
+        };
+
+        return (
+          <select
+            value={locale}
+            onChange={handleChange}
+            className={`px-3 py-2 border rounded-lg bg-white focus:ring-2 focus:ring-blue-500 focus:border-blue-500 ${className}`}
+            aria-label="Select language"
+          >
+            {locales.map((loc) => (
+              <option key={loc} value={loc}>
+                {localeNames[loc]}
+              </option>
+            ))}
+          </select>
+        );
+      }
+
+  - path: lib/i18n/navigation.ts
+    description: Navigation utilities with locale
+    content: |
+      import { useRouter, usePathname as useNextIntlPathname } from '@/i18n/routing';
+      import { Locale } from '@/i18n/config';
+
+      export function useLocalizedNavigation() {
+        const router = useRouter();
+        const pathname = useNextIntlPathname();
+
+        const navigateWithLocale = (path: string, locale?: Locale) => {
+          if (locale) {
+            router.push(path, { locale });
+          } else {
+            router.push(path);
+          }
+        };
+
+        const replaceWithLocale = (path: string, locale?: Locale) => {
+          if (locale) {
+            router.replace(path, { locale });
+          } else {
+            router.replace(path);
+          }
+        };
+
+        return {
+          pathname,
+          navigate: navigateWithLocale,
+          replace: replaceWithLocale,
+          back: router.back,
+          forward: router.forward,
+        };
+      }
+
+      // Get alternate URLs for SEO
+      export function getAlternateUrls(
+        pathname: string,
+        locales: readonly Locale[],
+        baseUrl: string
+      ): Record<string, string> {
+        const alternates: Record<string, string> = {};
+
+        for (const locale of locales) {
+          alternates[locale] = `${baseUrl}/${locale}${pathname}`;
+        }
+
+        return alternates;
+      }
+
+  - path: components/i18n/locale-link.tsx
+    description: Link component that preserves locale
+    content: |
+      'use client';
+
+      import { Link } from '@/i18n/routing';
+      import { ComponentProps } from 'react';
+
+      type LocaleLinkProps = ComponentProps<typeof Link>;
+
+      export function LocaleLink({ children, ...props }: LocaleLinkProps) {
+        return <Link {...props}>{children}</Link>;
+      }
+
+      // Prefetch link for better performance
+      export function LocaleLinkPrefetch({ children, ...props }: LocaleLinkProps) {
+        return (
+          <Link prefetch={true} {...props}>
+            {children}
+          </Link>
+        );
+      }
+
+external_setup:
+  - step: Setup next-intl
+    details: See next-intl-setup pattern for complete configuration
+  - step: Configure i18n/config.ts
+    details: Define locales, localeNames, and localeFlags
+  - step: Add to layout or header
+    details: Import and use LanguageSwitcher component in your app header
+
+edge_cases:
+  - case: Preserving query parameters
+    solution: The router.replace preserves search params by default
+  - case: Hash navigation
+    solution: Use window.location.hash after navigation if needed
+  - case: Server components
+    solution: Language switcher must be client component, wrap in use client
+  - case: SSG with all locales
+    solution: Use generateStaticParams to pre-render all locale variants
+  - case: Accessibility
+    solution: Include aria-labels, role attributes, and keyboard navigation

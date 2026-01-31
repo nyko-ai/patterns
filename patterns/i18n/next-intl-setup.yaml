@@ -1,0 +1,454 @@
+id: next-intl-setup
+name: next-intl App Router Setup
+description: Complete internationalization setup with next-intl for Next.js App Router
+category: i18n
+tags:
+  - next-intl
+  - i18n
+  - internationalization
+  - localization
+  - app-router
+dependencies:
+  - next-intl: "^4.8.1"
+files:
+  - path: i18n/config.ts
+    description: i18n configuration
+    content: |
+      export const locales = ['en', 'fr', 'es', 'de'] as const;
+      export const defaultLocale = 'en' as const;
+
+      export type Locale = (typeof locales)[number];
+
+      export const localeNames: Record<Locale, string> = {
+        en: 'English',
+        fr: 'Français',
+        es: 'Español',
+        de: 'Deutsch',
+      };
+
+      export const localeFlags: Record<Locale, string> = {
+        en: '🇬🇧',
+        fr: '🇫🇷',
+        es: '🇪🇸',
+        de: '🇩🇪',
+      };
+
+  - path: i18n/request.ts
+    description: Server-side i18n request configuration
+    content: |
+      import { getRequestConfig } from 'next-intl/server';
+      import { locales, defaultLocale, Locale } from './config';
+
+      export default getRequestConfig(async ({ requestLocale }) => {
+        // Get locale from request
+        let locale = await requestLocale;
+
+        // Validate and fallback
+        if (!locale || !locales.includes(locale as Locale)) {
+          locale = defaultLocale;
+        }
+
+        return {
+          locale,
+          messages: (await import(`../messages/${locale}.json`)).default,
+          timeZone: 'Europe/Paris',
+          now: new Date(),
+          formats: {
+            dateTime: {
+              short: {
+                day: 'numeric',
+                month: 'short',
+                year: 'numeric',
+              },
+              long: {
+                day: 'numeric',
+                month: 'long',
+                year: 'numeric',
+                hour: 'numeric',
+                minute: 'numeric',
+              },
+            },
+            number: {
+              currency: {
+                style: 'currency',
+                currency: 'EUR',
+              },
+              percent: {
+                style: 'percent',
+                minimumFractionDigits: 0,
+              },
+            },
+          },
+        };
+      });
+
+  - path: i18n/routing.ts
+    description: Routing configuration for next-intl
+    content: |
+      import { defineRouting } from 'next-intl/routing';
+      import { createNavigation } from 'next-intl/navigation';
+      import { locales, defaultLocale } from './config';
+
+      export const routing = defineRouting({
+        locales,
+        defaultLocale,
+        localePrefix: 'as-needed', // or 'always' | 'never'
+        pathnames: {
+          '/': '/',
+          '/about': {
+            en: '/about',
+            fr: '/a-propos',
+            es: '/acerca-de',
+            de: '/ueber-uns',
+          },
+          '/contact': {
+            en: '/contact',
+            fr: '/contact',
+            es: '/contacto',
+            de: '/kontakt',
+          },
+          '/blog': {
+            en: '/blog',
+            fr: '/blog',
+            es: '/blog',
+            de: '/blog',
+          },
+          '/blog/[slug]': {
+            en: '/blog/[slug]',
+            fr: '/blog/[slug]',
+            es: '/blog/[slug]',
+            de: '/blog/[slug]',
+          },
+        },
+      });
+
+      // Navigation utilities with locale-aware routing
+      export const { Link, redirect, usePathname, useRouter, getPathname } =
+        createNavigation(routing);
+
+  - path: middleware.ts
+    description: Middleware for locale detection and routing
+    content: |
+      import createMiddleware from 'next-intl/middleware';
+      import { routing } from './i18n/routing';
+
+      export default createMiddleware(routing);
+
+      export const config = {
+        // Match all pathnames except for
+        // - API routes
+        // - Static files
+        // - Next.js internals
+        matcher: [
+          '/((?!api|_next|_vercel|.*\\..*).*)',
+          // Enable for API routes that need i18n
+          // '/api/:path*'
+        ],
+      };
+
+  - path: app/[locale]/layout.tsx
+    description: Root layout with locale provider
+    content: |
+      import { NextIntlClientProvider } from 'next-intl';
+      import { getMessages, getTranslations } from 'next-intl/server';
+      import { notFound } from 'next/navigation';
+      import { routing } from '@/i18n/routing';
+      import { Locale } from '@/i18n/config';
+
+      interface Props {
+        children: React.ReactNode;
+        params: Promise<{ locale: string }>;
+      }
+
+      export function generateStaticParams() {
+        return routing.locales.map((locale) => ({ locale }));
+      }
+
+      export async function generateMetadata({ params }: Props) {
+        const { locale } = await params;
+        const t = await getTranslations({ locale, namespace: 'Metadata' });
+
+        return {
+          title: t('title'),
+          description: t('description'),
+        };
+      }
+
+      export default async function LocaleLayout({ children, params }: Props) {
+        const { locale } = await params;
+
+        // Validate locale
+        if (!routing.locales.includes(locale as Locale)) {
+          notFound();
+        }
+
+        // Get messages for client components
+        const messages = await getMessages();
+
+        return (
+          <html lang={locale}>
+            <body>
+              <NextIntlClientProvider messages={messages}>
+                {children}
+              </NextIntlClientProvider>
+            </body>
+          </html>
+        );
+      }
+
+  - path: app/[locale]/page.tsx
+    description: Example page with translations
+    content: |
+      import { useTranslations } from 'next-intl';
+      import { getTranslations } from 'next-intl/server';
+      import { Link } from '@/i18n/routing';
+
+      export async function generateMetadata({
+        params,
+      }: {
+        params: Promise<{ locale: string }>;
+      }) {
+        const { locale } = await params;
+        const t = await getTranslations({ locale, namespace: 'HomePage' });
+
+        return {
+          title: t('title'),
+        };
+      }
+
+      export default function HomePage() {
+        const t = useTranslations('HomePage');
+
+        return (
+          <main className="container mx-auto px-4 py-8">
+            <h1 className="text-4xl font-bold mb-4">{t('title')}</h1>
+            <p className="text-lg mb-6">{t('description')}</p>
+
+            <div className="space-y-4">
+              {/* Rich text with formatting */}
+              <p>
+                {t.rich('welcome', {
+                  name: 'User',
+                  strong: (chunks) => <strong>{chunks}</strong>,
+                })}
+              </p>
+
+              {/* Pluralization */}
+              <p>{t('items', { count: 5 })}</p>
+
+              {/* Locale-aware links */}
+              <nav className="space-x-4">
+                <Link href="/about" className="text-blue-600 hover:underline">
+                  {t('nav.about')}
+                </Link>
+                <Link href="/contact" className="text-blue-600 hover:underline">
+                  {t('nav.contact')}
+                </Link>
+              </nav>
+            </div>
+          </main>
+        );
+      }
+
+  - path: messages/en.json
+    description: English translations
+    content: |
+      {
+        "Metadata": {
+          "title": "My Application",
+          "description": "Welcome to my internationalized application"
+        },
+        "HomePage": {
+          "title": "Welcome",
+          "description": "This is an internationalized Next.js application",
+          "welcome": "Hello, <strong>{name}</strong>! Welcome to our site.",
+          "items": "{count, plural, =0 {No items} =1 {One item} other {# items}}",
+          "nav": {
+            "about": "About",
+            "contact": "Contact"
+          }
+        },
+        "Common": {
+          "loading": "Loading...",
+          "error": "An error occurred",
+          "retry": "Try again",
+          "save": "Save",
+          "cancel": "Cancel",
+          "delete": "Delete",
+          "edit": "Edit",
+          "back": "Back",
+          "next": "Next",
+          "previous": "Previous"
+        },
+        "Auth": {
+          "signIn": "Sign In",
+          "signOut": "Sign Out",
+          "signUp": "Sign Up",
+          "email": "Email",
+          "password": "Password",
+          "forgotPassword": "Forgot password?"
+        },
+        "Validation": {
+          "required": "This field is required",
+          "email": "Please enter a valid email",
+          "minLength": "Must be at least {min} characters",
+          "maxLength": "Must be at most {max} characters"
+        }
+      }
+
+  - path: messages/fr.json
+    description: French translations
+    content: |
+      {
+        "Metadata": {
+          "title": "Mon Application",
+          "description": "Bienvenue sur mon application internationalisée"
+        },
+        "HomePage": {
+          "title": "Bienvenue",
+          "description": "Ceci est une application Next.js internationalisée",
+          "welcome": "Bonjour, <strong>{name}</strong> ! Bienvenue sur notre site.",
+          "items": "{count, plural, =0 {Aucun élément} =1 {Un élément} other {# éléments}}",
+          "nav": {
+            "about": "À propos",
+            "contact": "Contact"
+          }
+        },
+        "Common": {
+          "loading": "Chargement...",
+          "error": "Une erreur est survenue",
+          "retry": "Réessayer",
+          "save": "Enregistrer",
+          "cancel": "Annuler",
+          "delete": "Supprimer",
+          "edit": "Modifier",
+          "back": "Retour",
+          "next": "Suivant",
+          "previous": "Précédent"
+        },
+        "Auth": {
+          "signIn": "Connexion",
+          "signOut": "Déconnexion",
+          "signUp": "Inscription",
+          "email": "E-mail",
+          "password": "Mot de passe",
+          "forgotPassword": "Mot de passe oublié ?"
+        },
+        "Validation": {
+          "required": "Ce champ est requis",
+          "email": "Veuillez entrer un e-mail valide",
+          "minLength": "Doit contenir au moins {min} caractères",
+          "maxLength": "Doit contenir au maximum {max} caractères"
+        }
+      }
+
+  - path: hooks/use-formatted-date.ts
+    description: Hook for formatted dates
+    content: |
+      'use client';
+
+      import { useFormatter, useNow, useTimeZone } from 'next-intl';
+
+      export function useFormattedDate() {
+        const format = useFormatter();
+        const now = useNow();
+        const timeZone = useTimeZone();
+
+        const formatDate = (date: Date | string | number, style?: 'short' | 'long') => {
+          const d = new Date(date);
+          return format.dateTime(d, style || 'short');
+        };
+
+        const formatRelative = (date: Date | string | number) => {
+          const d = new Date(date);
+          return format.relativeTime(d, now);
+        };
+
+        const formatNumber = (
+          value: number,
+          style?: 'currency' | 'percent' | 'decimal'
+        ) => {
+          if (style === 'currency') {
+            return format.number(value, { style: 'currency', currency: 'EUR' });
+          }
+          if (style === 'percent') {
+            return format.number(value, { style: 'percent' });
+          }
+          return format.number(value);
+        };
+
+        return {
+          formatDate,
+          formatRelative,
+          formatNumber,
+          now,
+          timeZone,
+        };
+      }
+
+  - path: components/locale-provider.tsx
+    description: Client-side locale provider wrapper
+    content: |
+      'use client';
+
+      import { AbstractIntlMessages, NextIntlClientProvider } from 'next-intl';
+
+      interface LocaleProviderProps {
+        children: React.ReactNode;
+        locale: string;
+        messages: AbstractIntlMessages;
+        timeZone?: string;
+        now?: Date;
+      }
+
+      export function LocaleProvider({
+        children,
+        locale,
+        messages,
+        timeZone = 'Europe/Paris',
+        now,
+      }: LocaleProviderProps) {
+        return (
+          <NextIntlClientProvider
+            locale={locale}
+            messages={messages}
+            timeZone={timeZone}
+            now={now}
+          >
+            {children}
+          </NextIntlClientProvider>
+        );
+      }
+
+external_setup:
+  - step: Install next-intl
+    details: npm install next-intl
+  - step: Create messages directory
+    details: mkdir -p messages && touch messages/{en,fr,es,de}.json
+  - step: Configure next.config.js
+    details: |
+      // next.config.js
+      import createNextIntlPlugin from 'next-intl/plugin';
+
+      const withNextIntl = createNextIntlPlugin('./i18n/request.ts');
+
+      /** @type {import('next').NextConfig} */
+      const nextConfig = {};
+
+      export default withNextIntl(nextConfig);
+  - step: Move pages to [locale] directory
+    details: All pages should be under app/[locale]/ to support locale routing
+  - step: Update all internal links
+    details: Use Link from @/i18n/routing instead of next/link
+
+edge_cases:
+  - case: Missing translation key
+    solution: next-intl shows key path in development, configure fallback behavior in request.ts
+  - case: Dynamic content translation
+    solution: Use t.rich() for interpolated values with markup
+  - case: Server/Client mismatch
+    solution: Ensure messages are passed to NextIntlClientProvider in layout
+  - case: Static generation with i18n
+    solution: Use generateStaticParams() to generate all locale variants
+  - case: API routes with translations
+    solution: Use getTranslations() in API routes for server-side translations
