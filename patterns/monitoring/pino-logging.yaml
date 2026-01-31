@@ -1,0 +1,275 @@
+id: pino-logging
+version: "1.0.0"
+updated_at: "2026-01-31"
+author: "nyko-team"
+status: beta
+
+name: "Structured Logging with Pino"
+description: "High-performance structured logging with Pino for Node.js"
+
+category: monitoring
+tags:
+  - pino
+  - logging
+  - structured
+  - nodejs
+  - observability
+
+difficulty: beginner
+time_estimate: "15-20 min"
+
+stack:
+  required:
+    - name: "pino"
+      version: "^10.3.0"
+      reason: "Fast JSON logger"
+    - name: "pino-pretty"
+      version: "^13.1.3"
+      reason: "Pretty print for development"
+    - name: "next"
+      version: "^15.1.0"
+      reason: "Next.js App Router"
+
+requires: []
+
+enables:
+  - betterstack-uptime
+
+env_vars:
+  optional:
+    - key: LOG_LEVEL
+      description: "Minimum log level"
+      default: "info"
+    - key: NODE_ENV
+      description: "Environment for log formatting"
+      default: "development"
+
+external_setup: []
+
+files:
+  - path: "lib/logger.ts"
+    action: create
+    description: "Pino logger configuration"
+    priority: 1
+
+  - path: "lib/middleware/request-logger.ts"
+    action: create
+    description: "Request logging middleware"
+    priority: 2
+
+  - path: "lib/logger-context.ts"
+    action: create
+    description: "Logger context utilities"
+    priority: 3
+
+code:
+  lib/logger.ts: |
+    import pino from "pino";
+
+    const LOG_LEVEL = process.env.LOG_LEVEL || "info";
+    const IS_PRODUCTION = process.env.NODE_ENV === "production";
+
+    function createLogger() {
+      if (IS_PRODUCTION) {
+        return pino({
+          level: LOG_LEVEL,
+          formatters: {
+            level: (label) => ({ level: label }),
+            bindings: () => ({}),
+          },
+          timestamp: () => `,"timestamp":"${new Date().toISOString()}"`,
+          base: {
+            env: process.env.NODE_ENV,
+            service: process.env.SERVICE_NAME || "app",
+          },
+        });
+      }
+
+      return pino({
+        level: LOG_LEVEL,
+        transport: {
+          target: "pino-pretty",
+          options: {
+            colorize: true,
+            translateTime: "SYS:standard",
+            ignore: "pid,hostname",
+          },
+        },
+      });
+    }
+
+    export const logger = createLogger();
+
+    export function createChildLogger(bindings: Record<string, unknown>) {
+      return logger.child(bindings);
+    }
+
+    export const log = {
+      debug: (message: string, data?: Record<string, unknown>) => {
+        logger.debug(data || {}, message);
+      },
+      info: (message: string, data?: Record<string, unknown>) => {
+        logger.info(data || {}, message);
+      },
+      warn: (message: string, data?: Record<string, unknown>) => {
+        logger.warn(data || {}, message);
+      },
+      error: (message: string, error?: Error | unknown, data?: Record<string, unknown>) => {
+        if (error instanceof Error) {
+          logger.error({ err: error, ...data }, message);
+        } else {
+          logger.error({ ...data, error }, message);
+        }
+      },
+      fatal: (message: string, error?: Error | unknown, data?: Record<string, unknown>) => {
+        if (error instanceof Error) {
+          logger.fatal({ err: error, ...data }, message);
+        } else {
+          logger.fatal({ ...data, error }, message);
+        }
+      },
+    };
+
+    export default logger;
+
+  lib/middleware/request-logger.ts: |
+    import { NextRequest, NextResponse } from "next/server";
+    import { createChildLogger } from "@/lib/logger";
+
+    function generateRequestId(): string {
+      return `req_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 9)}`;
+    }
+
+    export function withRequestLogging(
+      handler: (req: NextRequest) => Promise<NextResponse>
+    ) {
+      return async (req: NextRequest): Promise<NextResponse> => {
+        const requestId = req.headers.get("x-request-id") || generateRequestId();
+        const startTime = Date.now();
+
+        const requestLogger = createChildLogger({
+          requestId,
+          method: req.method,
+          path: req.nextUrl.pathname,
+          userAgent: req.headers.get("user-agent")?.slice(0, 100),
+        });
+
+        requestLogger.info("Request started");
+
+        try {
+          const response = await handler(req);
+          const duration = Date.now() - startTime;
+
+          requestLogger.info({
+            statusCode: response.status,
+            duration,
+          }, "Request completed");
+
+          response.headers.set("x-request-id", requestId);
+          return response;
+        } catch (error) {
+          const duration = Date.now() - startTime;
+
+          requestLogger.error({
+            err: error instanceof Error ? error : new Error(String(error)),
+            duration,
+          }, "Request failed");
+
+          throw error;
+        }
+      };
+    }
+
+    export function logApiRoute(routeName: string) {
+      return function <T extends (...args: any[]) => Promise<NextResponse>>(
+        handler: T
+      ): T {
+        return (async (...args: Parameters<T>) => {
+          const req = args[0] as NextRequest;
+          const wrappedHandler = withRequestLogging(async () => handler(...args));
+          return wrappedHandler(req);
+        }) as T;
+      };
+    }
+
+  lib/logger-context.ts: |
+    import { AsyncLocalStorage } from "async_hooks";
+    import { createChildLogger, logger } from "@/lib/logger";
+    import type { Logger } from "pino";
+
+    interface LogContext {
+      requestId?: string;
+      userId?: string;
+      traceId?: string;
+      [key: string]: unknown;
+    }
+
+    const asyncLocalStorage = new AsyncLocalStorage<LogContext>();
+
+    export function runWithContext<T>(context: LogContext, fn: () => T): T {
+      return asyncLocalStorage.run(context, fn);
+    }
+
+    export function getContext(): LogContext | undefined {
+      return asyncLocalStorage.getStore();
+    }
+
+    export function setContextValue(key: string, value: unknown): void {
+      const store = asyncLocalStorage.getStore();
+      if (store) {
+        store[key] = value;
+      }
+    }
+
+    export function getContextLogger(): Logger {
+      const context = getContext();
+      if (context) {
+        return createChildLogger(context);
+      }
+      return logger;
+    }
+
+    export const contextLog = {
+      debug: (message: string, data?: Record<string, unknown>) => {
+        getContextLogger().debug(data || {}, message);
+      },
+      info: (message: string, data?: Record<string, unknown>) => {
+        getContextLogger().info(data || {}, message);
+      },
+      warn: (message: string, data?: Record<string, unknown>) => {
+        getContextLogger().warn(data || {}, message);
+      },
+      error: (message: string, error?: Error | unknown, data?: Record<string, unknown>) => {
+        const logData = error instanceof Error ? { err: error, ...data } : { ...data, error };
+        getContextLogger().error(logData, message);
+      },
+    };
+
+edge_cases:
+  - id: circular-reference
+    symptom: "Logger throws on objects with circular references"
+    cause: "JSON.stringify fails on circular objects"
+    solution: "Pino handles this by default, but sanitize deeply nested objects"
+
+  - id: sensitive-data
+    symptom: "Passwords or tokens in logs"
+    cause: "Logging full request/response objects"
+    solution: "Use redact option in pino config: redact: ['password', 'token', 'authorization']"
+
+  - id: log-volume
+    symptom: "Too many logs in production"
+    cause: "Debug level enabled in production"
+    solution: "Set LOG_LEVEL=info or LOG_LEVEL=warn in production"
+
+  - id: pino-pretty-production
+    symptom: "Performance degradation in production"
+    cause: "Using pino-pretty transport in production"
+    solution: "Only use pino-pretty in development, use JSON output in production"
+
+validation:
+  manual_test:
+    - "Check logs appear in console"
+    - "Verify JSON format in production mode"
+    - "Check pretty format in development"
+    - "Verify request ID propagation"
+    - "Test error logging with stack traces"

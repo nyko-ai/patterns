@@ -1,0 +1,178 @@
+id: vercel-analytics
+version: "1.0.0"
+updated_at: "2026-01-31"
+author: "nyko-team"
+status: beta
+
+name: "Vercel Analytics & Speed Insights"
+description: "Vercel Analytics and Speed Insights for Next.js performance monitoring"
+
+category: monitoring
+tags:
+  - vercel
+  - analytics
+  - performance
+  - speed-insights
+  - nextjs
+
+difficulty: beginner
+time_estimate: "10-15 min"
+
+stack:
+  required:
+    - name: "@vercel/analytics"
+      version: "^1.6.1"
+      reason: "Vercel Web Analytics"
+    - name: "@vercel/speed-insights"
+      version: "^1.3.1"
+      reason: "Vercel Speed Insights"
+    - name: "next"
+      version: "^15.1.0"
+      reason: "Next.js App Router"
+
+requires: []
+
+enables: []
+
+env_vars:
+  optional:
+    - key: VERCEL_ANALYTICS_ID
+      description: "Analytics ID (auto-set on Vercel)"
+      format: "Auto-configured on Vercel"
+      where_to_find: "Automatically set when deployed to Vercel"
+
+external_setup:
+  - service: "Vercel"
+    url: "https://vercel.com"
+    steps:
+      - "Deploy your Next.js app to Vercel"
+      - "Go to Project Settings > Analytics"
+      - "Enable Web Analytics"
+      - "Enable Speed Insights"
+      - "View data in Analytics tab"
+
+files:
+  - path: "app/layout.tsx"
+    action: modify
+    description: "Add Vercel Analytics components"
+    priority: 1
+
+  - path: "lib/analytics/vercel.ts"
+    action: create
+    description: "Vercel analytics utilities"
+    priority: 2
+
+code:
+  app/layout.tsx: |
+    import { Analytics } from "@vercel/analytics/react";
+    import { SpeedInsights } from "@vercel/speed-insights/next";
+
+    export default function RootLayout({
+      children,
+    }: {
+      children: React.ReactNode;
+    }) {
+      return (
+        <html lang="en">
+          <body>
+            {children}
+            <Analytics />
+            <SpeedInsights />
+          </body>
+        </html>
+      );
+    }
+
+  lib/analytics/vercel.ts: |
+    import { track } from "@vercel/analytics";
+
+    export function trackEvent(
+      name: string,
+      properties?: Record<string, string | number | boolean>
+    ) {
+      track(name, properties);
+    }
+
+    export const Events = {
+      SIGNUP: "signup",
+      LOGIN: "login",
+      PURCHASE: "purchase",
+      FEATURE_USED: "feature_used",
+      ERROR: "error",
+      SEARCH: "search",
+      CLICK: "click",
+    } as const;
+
+    export function trackSignup(method: string) {
+      trackEvent(Events.SIGNUP, { method });
+    }
+
+    export function trackLogin(method: string) {
+      trackEvent(Events.LOGIN, { method });
+    }
+
+    export function trackPurchase(params: {
+      value: number;
+      currency: string;
+      productId: string;
+    }) {
+      trackEvent(Events.PURCHASE, {
+        value: params.value,
+        currency: params.currency,
+        product_id: params.productId,
+      });
+    }
+
+    export function trackFeatureUsed(feature: string) {
+      trackEvent(Events.FEATURE_USED, { feature });
+    }
+
+    export function trackError(error: string, context?: string) {
+      trackEvent(Events.ERROR, {
+        error,
+        context: context || "unknown",
+      });
+    }
+
+    export function trackSearch(query: string, resultsCount: number) {
+      trackEvent(Events.SEARCH, {
+        query: query.slice(0, 100),
+        results_count: resultsCount,
+      });
+    }
+
+    export function trackClick(element: string, page?: string) {
+      trackEvent(Events.CLICK, {
+        element,
+        page: page || window.location.pathname,
+      });
+    }
+
+edge_cases:
+  - id: not-on-vercel
+    symptom: "Analytics not working outside Vercel"
+    cause: "Vercel Analytics requires Vercel deployment"
+    solution: "Use alternative analytics (PostHog, Plausible) for non-Vercel deployments"
+
+  - id: adblocker-blocking
+    symptom: "Some users not tracked"
+    cause: "Ad blockers blocking Vercel Analytics"
+    solution: "Accept some data loss or use server-side tracking"
+
+  - id: development-data
+    symptom: "Development traffic in analytics"
+    cause: "Analytics running in dev mode"
+    solution: "Analytics auto-disabled in development, verify NODE_ENV"
+
+  - id: custom-events-limit
+    symptom: "Custom events not appearing"
+    cause: "Free tier has event limits"
+    solution: "Upgrade Vercel plan or reduce event volume"
+
+validation:
+  manual_test:
+    - "Deploy to Vercel"
+    - "Visit deployed site"
+    - "Check Analytics tab in Vercel dashboard"
+    - "Verify pageviews appear"
+    - "Send custom event and verify in dashboard"

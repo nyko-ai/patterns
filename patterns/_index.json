@@ -1,5 +1,5 @@
 {
-  "version": "1.2.0",
+  "version": "1.3.0",
   "updated_at": "2026-01-31",
   "patterns": [
     {
@@ -287,6 +287,60 @@
       "name": "Image Optimization with Sharp",
       "description": "Server-side image processing and optimization using Sharp",
       "tags": ["sharp", "image", "optimization", "processing"],
+      "difficulty": "intermediate",
+      "status": "beta"
+    },
+    {
+      "id": "sentry-setup",
+      "category": "monitoring",
+      "name": "Sentry Error Tracking",
+      "description": "Sentry error tracking and performance monitoring for Next.js",
+      "tags": ["sentry", "error-tracking", "monitoring", "performance"],
+      "difficulty": "beginner",
+      "status": "beta"
+    },
+    {
+      "id": "posthog-analytics",
+      "category": "monitoring",
+      "name": "PostHog Analytics",
+      "description": "Product analytics and feature flags with PostHog",
+      "tags": ["posthog", "analytics", "feature-flags", "tracking"],
+      "difficulty": "beginner",
+      "status": "beta"
+    },
+    {
+      "id": "pino-logging",
+      "category": "monitoring",
+      "name": "Structured Logging with Pino",
+      "description": "High-performance structured logging with Pino for Node.js",
+      "tags": ["pino", "logging", "structured", "observability"],
+      "difficulty": "beginner",
+      "status": "beta"
+    },
+    {
+      "id": "betterstack-uptime",
+      "category": "monitoring",
+      "name": "Better Stack Uptime Monitoring",
+      "description": "Uptime monitoring and status pages with Better Stack",
+      "tags": ["betterstack", "uptime", "monitoring", "alerts"],
+      "difficulty": "beginner",
+      "status": "beta"
+    },
+    {
+      "id": "vercel-analytics",
+      "category": "monitoring",
+      "name": "Vercel Analytics & Speed Insights",
+      "description": "Vercel Analytics and Speed Insights for Next.js performance monitoring",
+      "tags": ["vercel", "analytics", "performance", "speed-insights"],
+      "difficulty": "beginner",
+      "status": "beta"
+    },
+    {
+      "id": "custom-event-tracking",
+      "category": "monitoring",
+      "name": "Custom Event Tracking",
+      "description": "Flexible event tracking pattern for multiple analytics providers",
+      "tags": ["analytics", "events", "tracking", "abstraction"],
       "difficulty": "intermediate",
       "status": "beta"
     }

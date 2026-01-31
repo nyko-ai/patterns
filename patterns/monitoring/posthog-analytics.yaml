@@ -1,0 +1,254 @@
+id: posthog-analytics
+version: "1.0.0"
+updated_at: "2026-01-31"
+author: "nyko-team"
+status: beta
+
+name: "PostHog Analytics"
+description: "Product analytics and feature flags with PostHog"
+
+category: monitoring
+tags:
+  - posthog
+  - analytics
+  - feature-flags
+  - tracking
+  - product
+
+difficulty: beginner
+time_estimate: "15-20 min"
+
+stack:
+  required:
+    - name: "posthog-js"
+      version: "^1.336.4"
+      reason: "PostHog JavaScript SDK"
+    - name: "next"
+      version: "^15.1.0"
+      reason: "Next.js App Router"
+
+requires: []
+
+enables: []
+
+env_vars:
+  required:
+    - key: NEXT_PUBLIC_POSTHOG_KEY
+      description: "PostHog project API key"
+      format: "phc_xxx"
+      where_to_find: "PostHog Dashboard > Project Settings > Project API Key"
+    - key: NEXT_PUBLIC_POSTHOG_HOST
+      description: "PostHog host URL"
+      format: "https://app.posthog.com or https://eu.posthog.com"
+      where_to_find: "PostHog Dashboard > Project Settings"
+
+external_setup:
+  - service: "PostHog"
+    url: "https://posthog.com"
+    steps:
+      - "Create account at posthog.com"
+      - "Create new project"
+      - "Copy Project API Key from Project Settings"
+      - "Note your host (US: app.posthog.com, EU: eu.posthog.com)"
+      - "Optional: Set up feature flags"
+
+files:
+  - path: "lib/posthog.ts"
+    action: create
+    description: "PostHog client configuration"
+    priority: 1
+
+  - path: "components/providers/posthog-provider.tsx"
+    action: create
+    description: "PostHog React provider"
+    priority: 2
+
+  - path: "app/layout.tsx"
+    action: modify
+    description: "Add PostHog provider to layout"
+    priority: 3
+
+  - path: "lib/analytics.ts"
+    action: create
+    description: "Analytics utility functions"
+    priority: 4
+
+code:
+  lib/posthog.ts: |
+    import posthog from "posthog-js";
+
+    export const POSTHOG_KEY = process.env.NEXT_PUBLIC_POSTHOG_KEY!;
+    export const POSTHOG_HOST = process.env.NEXT_PUBLIC_POSTHOG_HOST || "https://app.posthog.com";
+
+    export function initPostHog() {
+      if (typeof window === "undefined") return;
+      if (!POSTHOG_KEY) return;
+
+      posthog.init(POSTHOG_KEY, {
+        api_host: POSTHOG_HOST,
+        person_profiles: "identified_only",
+        capture_pageview: false,
+        capture_pageleave: true,
+        autocapture: {
+          dom_event_allowlist: ["click", "submit"],
+          element_allowlist: ["button", "a", "input", "form"],
+        },
+        session_recording: {
+          maskAllInputs: true,
+          maskTextSelector: "[data-mask]",
+        },
+        loaded: (posthog) => {
+          if (process.env.NODE_ENV === "development") {
+            posthog.debug();
+          }
+        },
+      });
+    }
+
+    export { posthog };
+
+  components/providers/posthog-provider.tsx: |
+    "use client";
+
+    import { usePathname, useSearchParams } from "next/navigation";
+    import { useEffect, Suspense } from "react";
+    import { initPostHog, posthog } from "@/lib/posthog";
+
+    function PostHogPageView() {
+      const pathname = usePathname();
+      const searchParams = useSearchParams();
+
+      useEffect(() => {
+        if (pathname && posthog) {
+          let url = window.origin + pathname;
+          if (searchParams.toString()) {
+            url = url + "?" + searchParams.toString();
+          }
+          posthog.capture("$pageview", { $current_url: url });
+        }
+      }, [pathname, searchParams]);
+
+      return null;
+    }
+
+    export function PostHogProvider({ children }: { children: React.ReactNode }) {
+      useEffect(() => {
+        initPostHog();
+      }, []);
+
+      return (
+        <>
+          <Suspense fallback={null}>
+            <PostHogPageView />
+          </Suspense>
+          {children}
+        </>
+      );
+    }
+
+  app/layout.tsx: |
+    // Add to existing layout.tsx
+    import { PostHogProvider } from "@/components/providers/posthog-provider";
+
+    export default function RootLayout({
+      children,
+    }: {
+      children: React.ReactNode;
+    }) {
+      return (
+        <html lang="en">
+          <body>
+            <PostHogProvider>
+              {children}
+            </PostHogProvider>
+          </body>
+        </html>
+      );
+    }
+
+  lib/analytics.ts: |
+    import { posthog } from "@/lib/posthog";
+
+    export function identify(userId: string, properties?: Record<string, unknown>) {
+      posthog.identify(userId, properties);
+    }
+
+    export function reset() {
+      posthog.reset();
+    }
+
+    export function track(event: string, properties?: Record<string, unknown>) {
+      posthog.capture(event, properties);
+    }
+
+    export function setPersonProperties(properties: Record<string, unknown>) {
+      posthog.setPersonProperties(properties);
+    }
+
+    export function isFeatureEnabled(flag: string): boolean {
+      return posthog.isFeatureEnabled(flag) ?? false;
+    }
+
+    export function getFeatureFlag(flag: string): string | boolean | undefined {
+      return posthog.getFeatureFlag(flag);
+    }
+
+    export function onFeatureFlags(callback: () => void) {
+      posthog.onFeatureFlags(callback);
+    }
+
+    export const AnalyticsEvents = {
+      SIGNUP_STARTED: "signup_started",
+      SIGNUP_COMPLETED: "signup_completed",
+      LOGIN: "login",
+      LOGOUT: "logout",
+      SUBSCRIPTION_STARTED: "subscription_started",
+      SUBSCRIPTION_CANCELLED: "subscription_cancelled",
+      FEATURE_USED: "feature_used",
+      ERROR_OCCURRED: "error_occurred",
+    } as const;
+
+    export function trackSignup(method: string) {
+      track(AnalyticsEvents.SIGNUP_COMPLETED, { method });
+    }
+
+    export function trackLogin(method: string) {
+      track(AnalyticsEvents.LOGIN, { method });
+    }
+
+    export function trackFeatureUsed(feature: string, metadata?: Record<string, unknown>) {
+      track(AnalyticsEvents.FEATURE_USED, { feature, ...metadata });
+    }
+
+    export function trackError(error: string, context?: Record<string, unknown>) {
+      track(AnalyticsEvents.ERROR_OCCURRED, { error, ...context });
+    }
+
+edge_cases:
+  - id: pageview-double-tracking
+    symptom: "Pageviews counted twice"
+    cause: "Auto pageview + manual tracking"
+    solution: "Set capture_pageview: false in init, use PostHogPageView component"
+
+  - id: feature-flags-not-loading
+    symptom: "Feature flags always return false"
+    cause: "Flags not loaded before check"
+    solution: "Use onFeatureFlags callback or wait for posthog.isFeatureEnabled to be ready"
+
+  - id: gdpr-consent
+    symptom: "Need user consent before tracking"
+    cause: "GDPR/privacy requirements"
+    solution: "Use posthog.opt_out_capturing() until consent, then posthog.opt_in_capturing()"
+
+  - id: adblocker-blocking
+    symptom: "Analytics not working for some users"
+    cause: "Ad blockers blocking PostHog"
+    solution: "Use reverse proxy to /ingest endpoint, configure in next.config.js rewrites"
+
+validation:
+  manual_test:
+    - "Navigate between pages"
+    - "Check PostHog dashboard for pageviews"
+    - "Trigger custom event"
+    - "Verify event appears in dashboard"
+    - "Test feature flag functionality"

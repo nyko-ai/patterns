@@ -1,0 +1,253 @@
+id: betterstack-uptime
+version: "1.0.0"
+updated_at: "2026-01-31"
+author: "nyko-team"
+status: beta
+
+name: "Better Stack Uptime Monitoring"
+description: "Uptime monitoring and status pages with Better Stack"
+
+category: monitoring
+tags:
+  - betterstack
+  - uptime
+  - monitoring
+  - status-page
+  - alerts
+
+difficulty: beginner
+time_estimate: "15-20 min"
+
+stack:
+  required:
+    - name: "next"
+      version: "^15.1.0"
+      reason: "Next.js App Router"
+
+requires: []
+
+enables: []
+
+env_vars:
+  required:
+    - key: BETTERSTACK_API_TOKEN
+      description: "Better Stack API token"
+      format: "xxx"
+      where_to_find: "Better Stack Dashboard > Integrations > API Tokens"
+  optional:
+    - key: BETTERSTACK_HEARTBEAT_URL
+      description: "Heartbeat endpoint URL"
+      format: "https://uptime.betterstack.com/api/v1/heartbeat/xxx"
+      where_to_find: "Better Stack > Heartbeats > Your heartbeat"
+
+external_setup:
+  - service: "Better Stack"
+    url: "https://betterstack.com"
+    steps:
+      - "Create account at betterstack.com"
+      - "Go to Uptime > Monitors"
+      - "Add monitor for your application URL"
+      - "Configure alert channels (email, Slack, etc.)"
+      - "Optional: Create heartbeat for cron jobs"
+      - "Optional: Set up status page"
+
+files:
+  - path: "app/api/health/route.ts"
+    action: create
+    description: "Health check endpoint"
+    priority: 1
+
+  - path: "lib/heartbeat.ts"
+    action: create
+    description: "Heartbeat utilities"
+    priority: 2
+
+  - path: "app/api/cron/heartbeat/route.ts"
+    action: create
+    description: "Cron heartbeat endpoint"
+    priority: 3
+
+code:
+  app/api/health/route.ts: |
+    import { NextResponse } from "next/server";
+    import { prisma } from "@/lib/prisma";
+
+    interface HealthCheck {
+      name: string;
+      status: "healthy" | "unhealthy";
+      latency?: number;
+      error?: string;
+    }
+
+    async function checkDatabase(): Promise<HealthCheck> {
+      const start = Date.now();
+      try {
+        await prisma.$queryRaw`SELECT 1`;
+        return {
+          name: "database",
+          status: "healthy",
+          latency: Date.now() - start,
+        };
+      } catch (error) {
+        return {
+          name: "database",
+          status: "unhealthy",
+          error: error instanceof Error ? error.message : "Unknown error",
+        };
+      }
+    }
+
+    async function checkRedis(): Promise<HealthCheck> {
+      // Add Redis check if using Redis
+      return { name: "redis", status: "healthy" };
+    }
+
+    async function checkExternalServices(): Promise<HealthCheck[]> {
+      // Add checks for external APIs
+      return [];
+    }
+
+    export async function GET() {
+      const checks: HealthCheck[] = [];
+
+      try {
+        const [dbCheck, redisCheck, externalChecks] = await Promise.all([
+          checkDatabase(),
+          checkRedis(),
+          checkExternalServices(),
+        ]);
+
+        checks.push(dbCheck, redisCheck, ...externalChecks);
+      } catch {
+        checks.push({ name: "system", status: "unhealthy", error: "Check failed" });
+      }
+
+      const allHealthy = checks.every((c) => c.status === "healthy");
+      const status = allHealthy ? 200 : 503;
+
+      return NextResponse.json(
+        {
+          status: allHealthy ? "healthy" : "unhealthy",
+          timestamp: new Date().toISOString(),
+          version: process.env.npm_package_version || "unknown",
+          checks,
+        },
+        { status }
+      );
+    }
+
+  lib/heartbeat.ts: |
+    const HEARTBEAT_URL = process.env.BETTERSTACK_HEARTBEAT_URL;
+
+    export async function sendHeartbeat(name?: string): Promise<boolean> {
+      const url = name
+        ? process.env[`BETTERSTACK_HEARTBEAT_${name.toUpperCase()}`]
+        : HEARTBEAT_URL;
+
+      if (!url) {
+        console.warn("Heartbeat URL not configured");
+        return false;
+      }
+
+      try {
+        const response = await fetch(url, {
+          method: "GET",
+          headers: { "User-Agent": "Heartbeat/1.0" },
+        });
+
+        return response.ok;
+      } catch (error) {
+        console.error("Heartbeat failed:", error);
+        return false;
+      }
+    }
+
+    export function createHeartbeatMiddleware(name?: string) {
+      return async function heartbeatMiddleware<T>(
+        job: () => Promise<T>
+      ): Promise<T> {
+        try {
+          const result = await job();
+          await sendHeartbeat(name);
+          return result;
+        } catch (error) {
+          // Don't send heartbeat on failure
+          throw error;
+        }
+      };
+    }
+
+    export async function reportIncident(params: {
+      title: string;
+      description: string;
+      statusPageId?: string;
+    }): Promise<void> {
+      const apiToken = process.env.BETTERSTACK_API_TOKEN;
+      if (!apiToken) return;
+
+      try {
+        await fetch("https://uptime.betterstack.com/api/v2/incidents", {
+          method: "POST",
+          headers: {
+            "Authorization": `Bearer ${apiToken}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            title: params.title,
+            description: params.description,
+            status_page_id: params.statusPageId,
+          }),
+        });
+      } catch (error) {
+        console.error("Failed to report incident:", error);
+      }
+    }
+
+  app/api/cron/heartbeat/route.ts: |
+    import { NextRequest, NextResponse } from "next/server";
+    import { sendHeartbeat } from "@/lib/heartbeat";
+
+    export async function GET(request: NextRequest) {
+      const authHeader = request.headers.get("authorization");
+      const cronSecret = process.env.CRON_SECRET;
+
+      if (cronSecret && authHeader !== `Bearer ${cronSecret}`) {
+        return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+      }
+
+      const success = await sendHeartbeat();
+
+      return NextResponse.json({
+        success,
+        timestamp: new Date().toISOString(),
+      });
+    }
+
+edge_cases:
+  - id: health-check-timeout
+    symptom: "Health check times out"
+    cause: "Database or external service slow"
+    solution: "Add timeout to health checks, return partial results"
+
+  - id: false-positive-alerts
+    symptom: "Alerts triggered but app is working"
+    cause: "Network issues between Better Stack and your server"
+    solution: "Increase check interval, add retry logic in Better Stack"
+
+  - id: heartbeat-not-received
+    symptom: "Heartbeat alerts triggered"
+    cause: "Cron job failed or heartbeat URL wrong"
+    solution: "Check cron job logs, verify heartbeat URL, check network egress"
+
+  - id: status-page-stale
+    symptom: "Status page shows outdated information"
+    cause: "Manual incidents not resolved"
+    solution: "Set up auto-resolve or incident automation"
+
+validation:
+  manual_test:
+    - "Access /api/health endpoint"
+    - "Verify all checks pass"
+    - "Simulate database failure"
+    - "Check Better Stack receives unhealthy status"
+    - "Test heartbeat endpoint"

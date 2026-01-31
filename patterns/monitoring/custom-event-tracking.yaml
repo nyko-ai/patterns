@@ -1,0 +1,395 @@
+id: custom-event-tracking
+version: "1.0.0"
+updated_at: "2026-01-31"
+author: "nyko-team"
+status: beta
+
+name: "Custom Event Tracking"
+description: "Flexible event tracking pattern for multiple analytics providers"
+
+category: monitoring
+tags:
+  - analytics
+  - events
+  - tracking
+  - custom
+  - abstraction
+
+difficulty: intermediate
+time_estimate: "20-25 min"
+
+stack:
+  required:
+    - name: "next"
+      version: "^15.1.0"
+      reason: "Next.js App Router"
+
+requires: []
+
+enables: []
+
+env_vars:
+  optional:
+    - key: ANALYTICS_DEBUG
+      description: "Enable analytics debug mode"
+      default: "false"
+
+external_setup: []
+
+files:
+  - path: "lib/analytics/types.ts"
+    action: create
+    description: "Analytics type definitions"
+    priority: 1
+
+  - path: "lib/analytics/providers.ts"
+    action: create
+    description: "Analytics provider implementations"
+    priority: 2
+
+  - path: "lib/analytics/index.ts"
+    action: create
+    description: "Main analytics module"
+    priority: 3
+
+  - path: "hooks/use-analytics.ts"
+    action: create
+    description: "React hook for analytics"
+    priority: 4
+
+code:
+  lib/analytics/types.ts: |
+    export interface AnalyticsProvider {
+      name: string;
+      initialize(): void;
+      identify(userId: string, traits?: UserTraits): void;
+      track(event: string, properties?: EventProperties): void;
+      page(name?: string, properties?: PageProperties): void;
+      reset(): void;
+    }
+
+    export interface UserTraits {
+      email?: string;
+      name?: string;
+      plan?: string;
+      createdAt?: string | Date;
+      [key: string]: unknown;
+    }
+
+    export interface EventProperties {
+      [key: string]: string | number | boolean | null | undefined;
+    }
+
+    export interface PageProperties {
+      path?: string;
+      referrer?: string;
+      title?: string;
+      url?: string;
+      [key: string]: unknown;
+    }
+
+    export interface AnalyticsConfig {
+      debug?: boolean;
+      providers: AnalyticsProvider[];
+    }
+
+    export const StandardEvents = {
+      // User lifecycle
+      USER_SIGNED_UP: "user_signed_up",
+      USER_LOGGED_IN: "user_logged_in",
+      USER_LOGGED_OUT: "user_logged_out",
+      USER_UPDATED_PROFILE: "user_updated_profile",
+
+      // Subscription
+      SUBSCRIPTION_STARTED: "subscription_started",
+      SUBSCRIPTION_CANCELLED: "subscription_cancelled",
+      SUBSCRIPTION_RENEWED: "subscription_renewed",
+      TRIAL_STARTED: "trial_started",
+      TRIAL_ENDED: "trial_ended",
+
+      // Feature usage
+      FEATURE_USED: "feature_used",
+      FEATURE_LIMIT_REACHED: "feature_limit_reached",
+
+      // Errors
+      ERROR_OCCURRED: "error_occurred",
+
+      // Engagement
+      BUTTON_CLICKED: "button_clicked",
+      FORM_SUBMITTED: "form_submitted",
+      SEARCH_PERFORMED: "search_performed",
+      FILE_UPLOADED: "file_uploaded",
+      FILE_DOWNLOADED: "file_downloaded",
+    } as const;
+
+  lib/analytics/providers.ts: |
+    import type { AnalyticsProvider, UserTraits, EventProperties, PageProperties } from "./types";
+
+    export class ConsoleProvider implements AnalyticsProvider {
+      name = "console";
+
+      initialize() {
+        console.log("[Analytics] Console provider initialized");
+      }
+
+      identify(userId: string, traits?: UserTraits) {
+        console.log("[Analytics] Identify:", { userId, traits });
+      }
+
+      track(event: string, properties?: EventProperties) {
+        console.log("[Analytics] Track:", { event, properties });
+      }
+
+      page(name?: string, properties?: PageProperties) {
+        console.log("[Analytics] Page:", { name, properties });
+      }
+
+      reset() {
+        console.log("[Analytics] Reset");
+      }
+    }
+
+    export class PostHogProvider implements AnalyticsProvider {
+      name = "posthog";
+      private posthog: typeof import("posthog-js").default | null = null;
+
+      initialize() {
+        if (typeof window === "undefined") return;
+        import("posthog-js").then((module) => {
+          this.posthog = module.default;
+        });
+      }
+
+      identify(userId: string, traits?: UserTraits) {
+        this.posthog?.identify(userId, traits);
+      }
+
+      track(event: string, properties?: EventProperties) {
+        this.posthog?.capture(event, properties);
+      }
+
+      page(name?: string, properties?: PageProperties) {
+        this.posthog?.capture("$pageview", { page: name, ...properties });
+      }
+
+      reset() {
+        this.posthog?.reset();
+      }
+    }
+
+    export class VercelProvider implements AnalyticsProvider {
+      name = "vercel";
+      private trackFn: typeof import("@vercel/analytics").track | null = null;
+
+      initialize() {
+        if (typeof window === "undefined") return;
+        import("@vercel/analytics").then((module) => {
+          this.trackFn = module.track;
+        });
+      }
+
+      identify() {
+        // Vercel Analytics doesn't support identify
+      }
+
+      track(event: string, properties?: EventProperties) {
+        this.trackFn?.(event, properties as Record<string, string | number | boolean>);
+      }
+
+      page() {
+        // Handled automatically by @vercel/analytics
+      }
+
+      reset() {
+        // Not supported
+      }
+    }
+
+    export class CustomAPIProvider implements AnalyticsProvider {
+      name = "custom-api";
+      private endpoint: string;
+
+      constructor(endpoint: string) {
+        this.endpoint = endpoint;
+      }
+
+      initialize() {}
+
+      private async send(type: string, data: unknown) {
+        try {
+          await fetch(this.endpoint, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ type, data, timestamp: new Date().toISOString() }),
+          });
+        } catch (error) {
+          console.error("[Analytics] Failed to send event:", error);
+        }
+      }
+
+      identify(userId: string, traits?: UserTraits) {
+        this.send("identify", { userId, traits });
+      }
+
+      track(event: string, properties?: EventProperties) {
+        this.send("track", { event, properties });
+      }
+
+      page(name?: string, properties?: PageProperties) {
+        this.send("page", { name, properties });
+      }
+
+      reset() {
+        this.send("reset", {});
+      }
+    }
+
+  lib/analytics/index.ts: |
+    import type { AnalyticsConfig, AnalyticsProvider, UserTraits, EventProperties, PageProperties } from "./types";
+    export { StandardEvents } from "./types";
+    export * from "./providers";
+
+    class Analytics {
+      private providers: AnalyticsProvider[] = [];
+      private debug: boolean = false;
+      private initialized: boolean = false;
+
+      configure(config: AnalyticsConfig) {
+        this.providers = config.providers;
+        this.debug = config.debug || process.env.ANALYTICS_DEBUG === "true";
+        this.initialized = true;
+
+        this.providers.forEach((provider) => {
+          try {
+            provider.initialize();
+            if (this.debug) {
+              console.log(`[Analytics] Initialized provider: ${provider.name}`);
+            }
+          } catch (error) {
+            console.error(`[Analytics] Failed to initialize ${provider.name}:`, error);
+          }
+        });
+      }
+
+      private dispatch<T extends keyof AnalyticsProvider>(
+        method: T,
+        ...args: Parameters<AnalyticsProvider[T]>
+      ) {
+        if (!this.initialized) {
+          if (this.debug) {
+            console.warn("[Analytics] Not initialized, call configure() first");
+          }
+          return;
+        }
+
+        this.providers.forEach((provider) => {
+          try {
+            (provider[method] as Function).apply(provider, args);
+          } catch (error) {
+            console.error(`[Analytics] Error in ${provider.name}.${method}:`, error);
+          }
+        });
+      }
+
+      identify(userId: string, traits?: UserTraits) {
+        this.dispatch("identify", userId, traits);
+      }
+
+      track(event: string, properties?: EventProperties) {
+        this.dispatch("track", event, properties);
+      }
+
+      page(name?: string, properties?: PageProperties) {
+        this.dispatch("page", name, properties);
+      }
+
+      reset() {
+        this.dispatch("reset");
+      }
+    }
+
+    export const analytics = new Analytics();
+    export default analytics;
+
+  hooks/use-analytics.ts: |
+    "use client";
+
+    import { useCallback, useEffect } from "react";
+    import { usePathname, useSearchParams } from "next/navigation";
+    import { analytics, StandardEvents } from "@/lib/analytics";
+    import type { EventProperties } from "@/lib/analytics/types";
+
+    export function useAnalytics() {
+      const pathname = usePathname();
+      const searchParams = useSearchParams();
+
+      useEffect(() => {
+        const url = pathname + (searchParams?.toString() ? `?${searchParams}` : "");
+        analytics.page(pathname, {
+          path: pathname,
+          url,
+          referrer: document.referrer,
+        });
+      }, [pathname, searchParams]);
+
+      const track = useCallback((event: string, properties?: EventProperties) => {
+        analytics.track(event, properties);
+      }, []);
+
+      const identify = useCallback((userId: string, traits?: Record<string, unknown>) => {
+        analytics.identify(userId, traits);
+      }, []);
+
+      const trackClick = useCallback((element: string, properties?: EventProperties) => {
+        analytics.track(StandardEvents.BUTTON_CLICKED, {
+          element,
+          page: pathname,
+          ...properties,
+        });
+      }, [pathname]);
+
+      const trackFeature = useCallback((feature: string, properties?: EventProperties) => {
+        analytics.track(StandardEvents.FEATURE_USED, {
+          feature,
+          ...properties,
+        });
+      }, []);
+
+      return {
+        track,
+        identify,
+        trackClick,
+        trackFeature,
+        reset: analytics.reset.bind(analytics),
+      };
+    }
+
+edge_cases:
+  - id: provider-initialization-order
+    symptom: "Events lost during page load"
+    cause: "Analytics not initialized before events fired"
+    solution: "Initialize analytics in app layout, queue events until ready"
+
+  - id: ssr-window-undefined
+    symptom: "Window is undefined error"
+    cause: "Client-only code running on server"
+    solution: "Check typeof window before accessing browser APIs"
+
+  - id: event-naming-inconsistency
+    symptom: "Events hard to analyze"
+    cause: "Inconsistent naming across codebase"
+    solution: "Use StandardEvents constants, enforce naming convention"
+
+  - id: provider-failure
+    symptom: "One provider fails, others not affected"
+    cause: "Error in single provider"
+    solution: "Try-catch in dispatch isolates provider failures"
+
+validation:
+  manual_test:
+    - "Configure analytics with ConsoleProvider"
+    - "Navigate between pages"
+    - "Verify page events logged"
+    - "Track custom event"
+    - "Verify event logged"
+    - "Test with multiple providers"
