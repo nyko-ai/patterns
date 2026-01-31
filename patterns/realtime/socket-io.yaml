@@ -1,0 +1,886 @@
+id: socket-io
+version: "1.0.0"
+updated_at: "2026-01-31"
+author: "nyko-team"
+status: beta
+
+name: "Socket.IO Setup for Next.js"
+description: "Real-time bidirectional communication with Socket.IO including rooms, namespaces, and custom events"
+
+category: realtime
+tags:
+  - socket.io
+  - websocket
+  - realtime
+  - bidirectional
+  - next.js
+
+difficulty: intermediate
+time_estimate: "30-35 min"
+
+stack:
+  required:
+    - name: "next"
+      version: "^15.1.0"
+      reason: "App Router"
+    - name: "socket.io"
+      version: "^4.8.3"
+      reason: "Socket.IO server"
+    - name: "socket.io-client"
+      version: "^4.8.3"
+      reason: "Socket.IO client"
+
+requires: []
+
+enables: []
+
+env_vars:
+  required: []
+  optional:
+    - key: NEXT_PUBLIC_SOCKET_URL
+      description: "Socket.IO server URL (for production)"
+      format: "https://your-socket-server.com"
+      where_to_find: "Your deployed socket server URL"
+
+external_setup:
+  - service: "Custom Server (Development)"
+    url: ""
+    steps:
+      - "Socket.IO requires a custom server in Next.js"
+      - "Create server.ts for development"
+      - "For production, consider separate Socket.IO server"
+      - "Or use serverless adapters (Vercel doesn't support WebSockets)"
+
+files:
+  - path: "server.ts"
+    action: create
+    description: "Custom server with Socket.IO"
+    priority: 1
+
+  - path: "lib/socket/server.ts"
+    action: create
+    description: "Socket.IO server utilities"
+    priority: 2
+
+  - path: "lib/socket/client.ts"
+    action: create
+    description: "Socket.IO client utilities"
+    priority: 3
+
+  - path: "lib/socket/events.ts"
+    action: create
+    description: "Type-safe event definitions"
+    priority: 4
+
+  - path: "hooks/use-socket.ts"
+    action: create
+    description: "React hooks for Socket.IO"
+    priority: 5
+
+  - path: "components/realtime/chat-room.tsx"
+    action: create
+    description: "Example chat room component"
+    priority: 6
+
+code:
+  server.ts: |
+    import { createServer } from "http";
+    import { parse } from "url";
+    import next from "next";
+    import { Server as SocketIOServer } from "socket.io";
+    import { initializeSocketHandlers } from "./lib/socket/server";
+
+    const dev = process.env.NODE_ENV !== "production";
+    const hostname = "localhost";
+    const port = parseInt(process.env.PORT || "3000", 10);
+
+    const app = next({ dev, hostname, port });
+    const handle = app.getRequestHandler();
+
+    app.prepare().then(() => {
+      const httpServer = createServer((req, res) => {
+        const parsedUrl = parse(req.url!, true);
+        handle(req, res, parsedUrl);
+      });
+
+      // Initialize Socket.IO
+      const io = new SocketIOServer(httpServer, {
+        cors: {
+          origin: dev ? "http://localhost:3000" : process.env.NEXT_PUBLIC_APP_URL,
+          methods: ["GET", "POST"],
+          credentials: true,
+        },
+        // Connection settings
+        pingTimeout: 60000,
+        pingInterval: 25000,
+        transports: ["websocket", "polling"],
+      });
+
+      // Initialize socket handlers
+      initializeSocketHandlers(io);
+
+      // Make io globally available for API routes
+      (global as Record<string, unknown>).io = io;
+
+      httpServer.listen(port, () => {
+        console.log(`> Ready on http://${hostname}:${port}`);
+        console.log("> Socket.IO server running");
+      });
+    });
+
+  lib/socket/server.ts: |
+    import type { Server, Socket } from "socket.io";
+    import type {
+      ClientToServerEvents,
+      ServerToClientEvents,
+      InterServerEvents,
+      SocketData,
+    } from "./events";
+
+    type TypedIO = Server<
+      ClientToServerEvents,
+      ServerToClientEvents,
+      InterServerEvents,
+      SocketData
+    >;
+
+    type TypedSocket = Socket<
+      ClientToServerEvents,
+      ServerToClientEvents,
+      InterServerEvents,
+      SocketData
+    >;
+
+    /**
+     * Get Socket.IO server instance
+     */
+    export function getIO(): TypedIO | null {
+      return (global as Record<string, unknown>).io as TypedIO | null;
+    }
+
+    /**
+     * Initialize socket event handlers
+     */
+    export function initializeSocketHandlers(io: TypedIO): void {
+      // Authentication middleware
+      io.use(async (socket, next) => {
+        const token = socket.handshake.auth.token;
+
+        // Verify token - replace with your auth logic
+        try {
+          // const user = await verifyToken(token);
+          const user = { id: "user_123", name: "User" }; // Mock
+
+          socket.data.userId = user.id;
+          socket.data.userName = user.name;
+          next();
+        } catch (error) {
+          next(new Error("Authentication failed"));
+        }
+      });
+
+      io.on("connection", (socket: TypedSocket) => {
+        console.log(`User connected: ${socket.data.userId}`);
+
+        // Join user's personal room
+        socket.join(`user:${socket.data.userId}`);
+
+        // Handle joining rooms
+        socket.on("joinRoom", async (roomId) => {
+          // Verify access - replace with your logic
+          // const hasAccess = await verifyRoomAccess(socket.data.userId, roomId);
+
+          socket.join(`room:${roomId}`);
+          socket.to(`room:${roomId}`).emit("userJoined", {
+            roomId,
+            userId: socket.data.userId!,
+            userName: socket.data.userName!,
+          });
+
+          // Send room members
+          const sockets = await io.in(`room:${roomId}`).fetchSockets();
+          const members = sockets.map((s) => ({
+            id: s.data.userId!,
+            name: s.data.userName!,
+          }));
+
+          socket.emit("roomMembers", { roomId, members });
+        });
+
+        // Handle leaving rooms
+        socket.on("leaveRoom", (roomId) => {
+          socket.leave(`room:${roomId}`);
+          socket.to(`room:${roomId}`).emit("userLeft", {
+            roomId,
+            userId: socket.data.userId!,
+          });
+        });
+
+        // Handle messages
+        socket.on("sendMessage", async ({ roomId, content }) => {
+          const message = {
+            id: crypto.randomUUID(),
+            roomId,
+            userId: socket.data.userId!,
+            userName: socket.data.userName!,
+            content,
+            timestamp: new Date().toISOString(),
+          };
+
+          // Save to database
+          // await db.message.create({ data: message });
+
+          // Broadcast to room
+          io.to(`room:${roomId}`).emit("newMessage", message);
+        });
+
+        // Handle typing indicators
+        socket.on("typing", ({ roomId, isTyping }) => {
+          socket.to(`room:${roomId}`).emit("userTyping", {
+            roomId,
+            userId: socket.data.userId!,
+            userName: socket.data.userName!,
+            isTyping,
+          });
+        });
+
+        // Handle disconnection
+        socket.on("disconnect", (reason) => {
+          console.log(`User disconnected: ${socket.data.userId} - ${reason}`);
+
+          // Notify rooms about user leaving
+          socket.rooms.forEach((room) => {
+            if (room.startsWith("room:")) {
+              const roomId = room.replace("room:", "");
+              socket.to(room).emit("userLeft", {
+                roomId,
+                userId: socket.data.userId!,
+              });
+            }
+          });
+        });
+      });
+    }
+
+    /**
+     * Emit event to specific user
+     */
+    export function emitToUser<E extends keyof ServerToClientEvents>(
+      userId: string,
+      event: E,
+      ...args: Parameters<ServerToClientEvents[E]>
+    ): void {
+      const io = getIO();
+      if (io) {
+        io.to(`user:${userId}`).emit(event, ...args);
+      }
+    }
+
+    /**
+     * Emit event to room
+     */
+    export function emitToRoom<E extends keyof ServerToClientEvents>(
+      roomId: string,
+      event: E,
+      ...args: Parameters<ServerToClientEvents[E]>
+    ): void {
+      const io = getIO();
+      if (io) {
+        io.to(`room:${roomId}`).emit(event, ...args);
+      }
+    }
+
+    /**
+     * Broadcast to all connected clients
+     */
+    export function broadcast<E extends keyof ServerToClientEvents>(
+      event: E,
+      ...args: Parameters<ServerToClientEvents[E]>
+    ): void {
+      const io = getIO();
+      if (io) {
+        io.emit(event, ...args);
+      }
+    }
+
+    /**
+     * Get online users in a room
+     */
+    export async function getRoomMembers(
+      roomId: string
+    ): Promise<{ id: string; name: string }[]> {
+      const io = getIO();
+      if (!io) return [];
+
+      const sockets = await io.in(`room:${roomId}`).fetchSockets();
+      return sockets.map((s) => ({
+        id: s.data.userId!,
+        name: s.data.userName!,
+      }));
+    }
+
+  lib/socket/client.ts: |
+    import { io, Socket } from "socket.io-client";
+    import type {
+      ClientToServerEvents,
+      ServerToClientEvents,
+    } from "./events";
+
+    type TypedSocket = Socket<ServerToClientEvents, ClientToServerEvents>;
+
+    let socketInstance: TypedSocket | null = null;
+
+    /**
+     * Get or create socket connection
+     */
+    export function getSocket(token?: string): TypedSocket {
+      if (!socketInstance) {
+        const url =
+          process.env.NEXT_PUBLIC_SOCKET_URL ||
+          (typeof window !== "undefined" ? window.location.origin : "");
+
+        socketInstance = io(url, {
+          autoConnect: false,
+          transports: ["websocket", "polling"],
+          auth: {
+            token: token || "",
+          },
+          reconnection: true,
+          reconnectionAttempts: 5,
+          reconnectionDelay: 1000,
+          reconnectionDelayMax: 5000,
+        }) as TypedSocket;
+
+        // Debug logging in development
+        if (process.env.NODE_ENV === "development") {
+          socketInstance.onAny((event, ...args) => {
+            console.log(`[Socket] ${event}`, args);
+          });
+        }
+      }
+
+      return socketInstance;
+    }
+
+    /**
+     * Connect to socket server
+     */
+    export function connect(token?: string): TypedSocket {
+      const socket = getSocket(token);
+
+      if (token) {
+        socket.auth = { token };
+      }
+
+      if (!socket.connected) {
+        socket.connect();
+      }
+
+      return socket;
+    }
+
+    /**
+     * Disconnect from socket server
+     */
+    export function disconnect(): void {
+      if (socketInstance) {
+        socketInstance.disconnect();
+        socketInstance = null;
+      }
+    }
+
+    /**
+     * Check if connected
+     */
+    export function isConnected(): boolean {
+      return socketInstance?.connected || false;
+    }
+
+    /**
+     * Join a room
+     */
+    export function joinRoom(roomId: string): void {
+      const socket = getSocket();
+      socket.emit("joinRoom", roomId);
+    }
+
+    /**
+     * Leave a room
+     */
+    export function leaveRoom(roomId: string): void {
+      const socket = getSocket();
+      socket.emit("leaveRoom", roomId);
+    }
+
+    /**
+     * Send a message
+     */
+    export function sendMessage(roomId: string, content: string): void {
+      const socket = getSocket();
+      socket.emit("sendMessage", { roomId, content });
+    }
+
+    /**
+     * Send typing indicator
+     */
+    export function sendTyping(roomId: string, isTyping: boolean): void {
+      const socket = getSocket();
+      socket.emit("typing", { roomId, isTyping });
+    }
+
+  lib/socket/events.ts: |
+    /**
+     * Events sent from client to server
+     */
+    export interface ClientToServerEvents {
+      joinRoom: (roomId: string) => void;
+      leaveRoom: (roomId: string) => void;
+      sendMessage: (data: { roomId: string; content: string }) => void;
+      typing: (data: { roomId: string; isTyping: boolean }) => void;
+    }
+
+    /**
+     * Events sent from server to client
+     */
+    export interface ServerToClientEvents {
+      userJoined: (data: { roomId: string; userId: string; userName: string }) => void;
+      userLeft: (data: { roomId: string; userId: string }) => void;
+      roomMembers: (data: {
+        roomId: string;
+        members: { id: string; name: string }[];
+      }) => void;
+      newMessage: (data: {
+        id: string;
+        roomId: string;
+        userId: string;
+        userName: string;
+        content: string;
+        timestamp: string;
+      }) => void;
+      userTyping: (data: {
+        roomId: string;
+        userId: string;
+        userName: string;
+        isTyping: boolean;
+      }) => void;
+      notification: (data: { type: string; message: string }) => void;
+    }
+
+    /**
+     * Inter-server events (for scaling with multiple servers)
+     */
+    export interface InterServerEvents {
+      ping: () => void;
+    }
+
+    /**
+     * Socket data attached to each connection
+     */
+    export interface SocketData {
+      userId: string;
+      userName: string;
+    }
+
+    /**
+     * Message type for convenience
+     */
+    export interface Message {
+      id: string;
+      roomId: string;
+      userId: string;
+      userName: string;
+      content: string;
+      timestamp: string;
+    }
+
+    /**
+     * Room member type
+     */
+    export interface RoomMember {
+      id: string;
+      name: string;
+    }
+
+  hooks/use-socket.ts: |
+    "use client";
+
+    import { useEffect, useState, useCallback, useRef } from "react";
+    import {
+      getSocket,
+      connect,
+      disconnect,
+      joinRoom as joinRoomFn,
+      leaveRoom as leaveRoomFn,
+      sendMessage as sendMessageFn,
+      sendTyping as sendTypingFn,
+    } from "@/lib/socket/client";
+    import type { Message, RoomMember, ServerToClientEvents } from "@/lib/socket/events";
+
+    /**
+     * Hook for socket connection management
+     */
+    export function useSocket(token?: string) {
+      const [isConnected, setIsConnected] = useState(false);
+      const [error, setError] = useState<string | null>(null);
+
+      useEffect(() => {
+        const socket = connect(token);
+
+        const onConnect = () => {
+          setIsConnected(true);
+          setError(null);
+        };
+
+        const onDisconnect = () => {
+          setIsConnected(false);
+        };
+
+        const onError = (err: Error) => {
+          setError(err.message);
+        };
+
+        socket.on("connect", onConnect);
+        socket.on("disconnect", onDisconnect);
+        socket.on("connect_error", onError);
+
+        // Set initial state
+        setIsConnected(socket.connected);
+
+        return () => {
+          socket.off("connect", onConnect);
+          socket.off("disconnect", onDisconnect);
+          socket.off("connect_error", onError);
+        };
+      }, [token]);
+
+      return { isConnected, error, disconnect };
+    }
+
+    /**
+     * Hook for room functionality
+     */
+    export function useRoom(roomId: string) {
+      const [messages, setMessages] = useState<Message[]>([]);
+      const [members, setMembers] = useState<RoomMember[]>([]);
+      const [typingUsers, setTypingUsers] = useState<Map<string, string>>(new Map());
+      const typingTimeouts = useRef<Map<string, NodeJS.Timeout>>(new Map());
+
+      useEffect(() => {
+        const socket = getSocket();
+
+        // Join room
+        joinRoomFn(roomId);
+
+        // Event handlers
+        const onNewMessage: ServerToClientEvents["newMessage"] = (message) => {
+          if (message.roomId === roomId) {
+            setMessages((prev) => [...prev, message]);
+          }
+        };
+
+        const onRoomMembers: ServerToClientEvents["roomMembers"] = (data) => {
+          if (data.roomId === roomId) {
+            setMembers(data.members);
+          }
+        };
+
+        const onUserJoined: ServerToClientEvents["userJoined"] = (data) => {
+          if (data.roomId === roomId) {
+            setMembers((prev) => [
+              ...prev.filter((m) => m.id !== data.userId),
+              { id: data.userId, name: data.userName },
+            ]);
+          }
+        };
+
+        const onUserLeft: ServerToClientEvents["userLeft"] = (data) => {
+          if (data.roomId === roomId) {
+            setMembers((prev) => prev.filter((m) => m.id !== data.userId));
+          }
+        };
+
+        const onUserTyping: ServerToClientEvents["userTyping"] = (data) => {
+          if (data.roomId === roomId) {
+            setTypingUsers((prev) => {
+              const next = new Map(prev);
+
+              // Clear existing timeout
+              const existingTimeout = typingTimeouts.current.get(data.userId);
+              if (existingTimeout) clearTimeout(existingTimeout);
+
+              if (data.isTyping) {
+                next.set(data.userId, data.userName);
+                // Auto-clear after 3 seconds
+                const timeout = setTimeout(() => {
+                  setTypingUsers((p) => {
+                    const n = new Map(p);
+                    n.delete(data.userId);
+                    return n;
+                  });
+                }, 3000);
+                typingTimeouts.current.set(data.userId, timeout);
+              } else {
+                next.delete(data.userId);
+              }
+
+              return next;
+            });
+          }
+        };
+
+        socket.on("newMessage", onNewMessage);
+        socket.on("roomMembers", onRoomMembers);
+        socket.on("userJoined", onUserJoined);
+        socket.on("userLeft", onUserLeft);
+        socket.on("userTyping", onUserTyping);
+
+        return () => {
+          leaveRoomFn(roomId);
+          socket.off("newMessage", onNewMessage);
+          socket.off("roomMembers", onRoomMembers);
+          socket.off("userJoined", onUserJoined);
+          socket.off("userLeft", onUserLeft);
+          socket.off("userTyping", onUserTyping);
+
+          // Clear timeouts
+          typingTimeouts.current.forEach((timeout) => clearTimeout(timeout));
+        };
+      }, [roomId]);
+
+      const sendMessage = useCallback(
+        (content: string) => {
+          sendMessageFn(roomId, content);
+        },
+        [roomId]
+      );
+
+      const sendTyping = useCallback(
+        (isTyping: boolean) => {
+          sendTypingFn(roomId, isTyping);
+        },
+        [roomId]
+      );
+
+      return {
+        messages,
+        members,
+        typingUsers: Array.from(typingUsers.values()),
+        sendMessage,
+        sendTyping,
+      };
+    }
+
+  components/realtime/chat-room.tsx: |
+    "use client";
+
+    import { useState, useRef, useEffect, useCallback } from "react";
+    import { useSocket, useRoom } from "@/hooks/use-socket";
+    import { debounce } from "lodash";
+
+    interface ChatRoomProps {
+      roomId: string;
+      token?: string;
+    }
+
+    export function ChatRoom({ roomId, token }: ChatRoomProps) {
+      const { isConnected, error } = useSocket(token);
+      const { messages, members, typingUsers, sendMessage, sendTyping } =
+        useRoom(roomId);
+      const [input, setInput] = useState("");
+      const messagesEndRef = useRef<HTMLDivElement>(null);
+
+      // Auto-scroll to bottom
+      useEffect(() => {
+        messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+      }, [messages]);
+
+      // Debounced typing indicator
+      const debouncedStopTyping = useCallback(
+        debounce(() => sendTyping(false), 1000),
+        [sendTyping]
+      );
+
+      const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+        setInput(e.target.value);
+        sendTyping(true);
+        debouncedStopTyping();
+      };
+
+      const handleSubmit = (e: React.FormEvent) => {
+        e.preventDefault();
+        if (!input.trim()) return;
+
+        sendMessage(input.trim());
+        setInput("");
+        sendTyping(false);
+      };
+
+      if (error) {
+        return (
+          <div className="p-4 bg-red-50 text-red-700 rounded-lg">
+            Connection error: {error}
+          </div>
+        );
+      }
+
+      return (
+        <div className="flex flex-col h-[600px] border rounded-lg overflow-hidden">
+          {/* Header */}
+          <div className="p-4 bg-gray-100 dark:bg-gray-800 flex justify-between items-center">
+            <div>
+              <h2 className="font-semibold">Room: {roomId}</h2>
+              <p className="text-sm text-gray-500">
+                {members.length} member{members.length !== 1 ? "s" : ""} online
+              </p>
+            </div>
+            <span
+              className={`w-3 h-3 rounded-full ${
+                isConnected ? "bg-green-500" : "bg-red-500"
+              }`}
+            />
+          </div>
+
+          {/* Members sidebar */}
+          <div className="flex flex-1 overflow-hidden">
+            {/* Messages */}
+            <div className="flex-1 flex flex-col">
+              <div className="flex-1 overflow-y-auto p-4 space-y-3">
+                {messages.map((msg) => (
+                  <div key={msg.id} className="flex gap-2">
+                    <div className="w-8 h-8 bg-gray-200 rounded-full flex items-center justify-center text-sm">
+                      {msg.userName.charAt(0)}
+                    </div>
+                    <div>
+                      <div className="flex items-baseline gap-2">
+                        <span className="font-medium text-sm">{msg.userName}</span>
+                        <span className="text-xs text-gray-400">
+                          {new Date(msg.timestamp).toLocaleTimeString()}
+                        </span>
+                      </div>
+                      <p className="text-gray-700 dark:text-gray-300">
+                        {msg.content}
+                      </p>
+                    </div>
+                  </div>
+                ))}
+                <div ref={messagesEndRef} />
+              </div>
+
+              {/* Typing indicator */}
+              {typingUsers.length > 0 && (
+                <div className="px-4 py-1 text-sm text-gray-500 italic">
+                  {typingUsers.join(", ")} {typingUsers.length === 1 ? "is" : "are"}{" "}
+                  typing...
+                </div>
+              )}
+
+              {/* Input */}
+              <form onSubmit={handleSubmit} className="p-4 border-t">
+                <div className="flex gap-2">
+                  <input
+                    type="text"
+                    value={input}
+                    onChange={handleInputChange}
+                    placeholder="Type a message..."
+                    className="flex-1 px-4 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    disabled={!isConnected}
+                  />
+                  <button
+                    type="submit"
+                    disabled={!isConnected || !input.trim()}
+                    className="px-4 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600 disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    Send
+                  </button>
+                </div>
+              </form>
+            </div>
+
+            {/* Members list */}
+            <div className="w-48 border-l bg-gray-50 dark:bg-gray-800 p-4">
+              <h3 className="font-medium text-sm mb-2">Online</h3>
+              <ul className="space-y-1">
+                {members.map((member) => (
+                  <li
+                    key={member.id}
+                    className="text-sm flex items-center gap-2"
+                  >
+                    <span className="w-2 h-2 bg-green-500 rounded-full" />
+                    {member.name}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+edge_cases:
+  - id: vercel-deployment
+    symptom: "Socket.IO not working on Vercel"
+    cause: "Vercel serverless doesn't support WebSockets"
+    solution: |
+      Options for production:
+      1. Use a separate Socket.IO server (Railway, Render, etc.)
+      2. Use Pusher or Ably for serverless WebSockets
+      3. Use Socket.IO with Redis adapter for scaling
+
+      // Configure client for external server
+      const socket = io("https://your-socket-server.com", {
+        transports: ["websocket"],
+      });
+
+  - id: connection-memory-leak
+    symptom: "Memory increases over time, connections not cleaned up"
+    cause: "Socket listeners not removed on component unmount"
+    solution: |
+      Always clean up in useEffect:
+
+      useEffect(() => {
+        const socket = getSocket();
+        socket.on("event", handler);
+
+        return () => {
+          socket.off("event", handler);
+          // Don't disconnect if other components use the socket
+        };
+      }, []);
+
+  - id: scaling-multiple-servers
+    symptom: "Messages not reaching all clients"
+    cause: "Multiple server instances without shared state"
+    solution: |
+      Use Redis adapter for scaling:
+
+      import { createAdapter } from "@socket.io/redis-adapter";
+      import { createClient } from "redis";
+
+      const pubClient = createClient({ url: process.env.REDIS_URL });
+      const subClient = pubClient.duplicate();
+
+      await Promise.all([pubClient.connect(), subClient.connect()]);
+      io.adapter(createAdapter(pubClient, subClient));
+
+  - id: auth-token-expired
+    symptom: "Connection fails after token expires"
+    cause: "Socket auth token expired during connection"
+    solution: |
+      Refresh token before reconnecting:
+
+      socket.on("connect_error", async (err) => {
+        if (err.message === "Authentication failed") {
+          const newToken = await refreshToken();
+          socket.auth = { token: newToken };
+          socket.connect();
+        }
+      });
+
+validation:
+  manual_test:
+    - "Start development server with: npx ts-node server.ts"
+    - "Open multiple browser tabs"
+    - "Join the same room from different tabs"
+    - "Send messages and verify all tabs receive them"
+    - "Test typing indicators"
+    - "Disconnect one tab and verify others are notified"

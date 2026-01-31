@@ -1,0 +1,704 @@
+id: pusher-setup
+version: "1.0.0"
+updated_at: "2026-01-31"
+author: "nyko-team"
+status: beta
+
+name: "Pusher Realtime Events"
+description: "Realtime event broadcasting with Pusher Channels including presence channels and private channels"
+
+category: realtime
+tags:
+  - pusher
+  - websocket
+  - realtime
+  - events
+  - presence
+
+difficulty: intermediate
+time_estimate: "25-30 min"
+
+stack:
+  required:
+    - name: "next"
+      version: "^15.1.0"
+      reason: "App Router"
+    - name: "pusher"
+      version: "^5.3.2"
+      reason: "Server-side Pusher client"
+    - name: "pusher-js"
+      version: "^8.4.0"
+      reason: "Client-side Pusher library"
+
+requires: []
+
+enables: []
+
+env_vars:
+  required:
+    - key: PUSHER_APP_ID
+      description: "Pusher application ID"
+      format: "123456"
+      where_to_find: "Pusher Dashboard > App Keys"
+    - key: NEXT_PUBLIC_PUSHER_KEY
+      description: "Pusher app key (public)"
+      format: "xxxxxxxxxxxxxxx"
+      where_to_find: "Pusher Dashboard > App Keys"
+    - key: PUSHER_SECRET
+      description: "Pusher secret key"
+      format: "xxxxxxxxxxxxxxx"
+      where_to_find: "Pusher Dashboard > App Keys"
+    - key: NEXT_PUBLIC_PUSHER_CLUSTER
+      description: "Pusher cluster region"
+      format: "us2"
+      where_to_find: "Pusher Dashboard > App Keys"
+
+external_setup:
+  - service: "Pusher"
+    url: "https://dashboard.pusher.com"
+    steps:
+      - "Create account at pusher.com"
+      - "Create a new Channels app"
+      - "Select the closest cluster to your users"
+      - "Copy App ID, Key, Secret, and Cluster"
+      - "Enable client events if needed"
+
+files:
+  - path: "lib/pusher/server.ts"
+    action: create
+    description: "Server-side Pusher client"
+    priority: 1
+
+  - path: "lib/pusher/client.ts"
+    action: create
+    description: "Client-side Pusher configuration"
+    priority: 2
+
+  - path: "app/api/pusher/auth/route.ts"
+    action: create
+    description: "Private/presence channel authentication"
+    priority: 3
+
+  - path: "hooks/use-pusher.ts"
+    action: create
+    description: "React hooks for Pusher channels"
+    priority: 4
+
+  - path: "components/realtime/presence-list.tsx"
+    action: create
+    description: "Online users presence component"
+    priority: 5
+
+code:
+  lib/pusher/server.ts: |
+    import Pusher from "pusher";
+
+    let pusherInstance: Pusher | null = null;
+
+    /**
+     * Get Pusher server instance (lazy initialization)
+     */
+    export function getPusher(): Pusher {
+      if (!pusherInstance) {
+        pusherInstance = new Pusher({
+          appId: process.env.PUSHER_APP_ID!,
+          key: process.env.NEXT_PUBLIC_PUSHER_KEY!,
+          secret: process.env.PUSHER_SECRET!,
+          cluster: process.env.NEXT_PUBLIC_PUSHER_CLUSTER!,
+          useTLS: true,
+        });
+      }
+      return pusherInstance;
+    }
+
+    /**
+     * Trigger event on a public channel
+     */
+    export async function triggerEvent<T>(
+      channel: string,
+      event: string,
+      data: T
+    ): Promise<void> {
+      const pusher = getPusher();
+      await pusher.trigger(channel, event, data);
+    }
+
+    /**
+     * Trigger event on multiple channels
+     */
+    export async function triggerMultiple<T>(
+      channels: string[],
+      event: string,
+      data: T
+    ): Promise<void> {
+      const pusher = getPusher();
+      // Pusher allows max 10 channels at once
+      const chunks = chunkArray(channels, 10);
+      await Promise.all(
+        chunks.map((chunk) => pusher.trigger(chunk, event, data))
+      );
+    }
+
+    /**
+     * Trigger event on a private channel
+     */
+    export async function triggerPrivate<T>(
+      userId: string,
+      event: string,
+      data: T
+    ): Promise<void> {
+      await triggerEvent(`private-user-${userId}`, event, data);
+    }
+
+    /**
+     * Trigger event on a presence channel
+     */
+    export async function triggerPresence<T>(
+      channelName: string,
+      event: string,
+      data: T
+    ): Promise<void> {
+      await triggerEvent(`presence-${channelName}`, event, data);
+    }
+
+    /**
+     * Batch trigger events (useful for high-frequency updates)
+     */
+    export async function triggerBatch(
+      events: { channel: string; name: string; data: unknown }[]
+    ): Promise<void> {
+      const pusher = getPusher();
+      // Pusher allows max 10 events per batch
+      const chunks = chunkArray(events, 10);
+      await Promise.all(chunks.map((chunk) => pusher.triggerBatch(chunk)));
+    }
+
+    /**
+     * Authenticate user for private channel
+     */
+    export function authorizePrivateChannel(
+      socketId: string,
+      channelName: string
+    ): Pusher.ChannelAuthResponse {
+      const pusher = getPusher();
+      return pusher.authorizeChannel(socketId, channelName);
+    }
+
+    /**
+     * Authenticate user for presence channel
+     */
+    export function authorizePresenceChannel(
+      socketId: string,
+      channelName: string,
+      presenceData: { user_id: string; user_info: Record<string, unknown> }
+    ): Pusher.ChannelAuthResponse {
+      const pusher = getPusher();
+      return pusher.authorizeChannel(socketId, channelName, presenceData);
+    }
+
+    /**
+     * Get channel info (presence channels only)
+     */
+    export async function getChannelInfo(
+      channelName: string
+    ): Promise<{ occupied: boolean; subscription_count?: number }> {
+      const pusher = getPusher();
+      const response = await pusher.get({
+        path: `/channels/${channelName}`,
+        params: { info: "subscription_count" },
+      });
+
+      if (response.status !== 200) {
+        throw new Error(`Failed to get channel info: ${response.status}`);
+      }
+
+      return response.body as { occupied: boolean; subscription_count?: number };
+    }
+
+    /**
+     * Get users in presence channel
+     */
+    export async function getPresenceUsers(
+      channelName: string
+    ): Promise<{ users: { id: string }[] }> {
+      const pusher = getPusher();
+      const response = await pusher.get({
+        path: `/channels/presence-${channelName}/users`,
+      });
+
+      if (response.status !== 200) {
+        throw new Error(`Failed to get users: ${response.status}`);
+      }
+
+      return response.body as { users: { id: string }[] };
+    }
+
+    function chunkArray<T>(array: T[], size: number): T[][] {
+      const chunks: T[][] = [];
+      for (let i = 0; i < array.length; i += size) {
+        chunks.push(array.slice(i, i + size));
+      }
+      return chunks;
+    }
+
+  lib/pusher/client.ts: |
+    import PusherClient from "pusher-js";
+
+    let pusherClientInstance: PusherClient | null = null;
+
+    /**
+     * Get Pusher client instance (singleton)
+     */
+    export function getPusherClient(): PusherClient {
+      if (!pusherClientInstance) {
+        pusherClientInstance = new PusherClient(
+          process.env.NEXT_PUBLIC_PUSHER_KEY!,
+          {
+            cluster: process.env.NEXT_PUBLIC_PUSHER_CLUSTER!,
+            authEndpoint: "/api/pusher/auth",
+            authTransport: "ajax",
+            auth: {
+              headers: {
+                // Add any custom headers for auth
+              },
+            },
+          }
+        );
+
+        // Enable logging in development
+        if (process.env.NODE_ENV === "development") {
+          PusherClient.logToConsole = true;
+        }
+      }
+      return pusherClientInstance;
+    }
+
+    /**
+     * Subscribe to a public channel
+     */
+    export function subscribeToChannel(channelName: string) {
+      const pusher = getPusherClient();
+      return pusher.subscribe(channelName);
+    }
+
+    /**
+     * Subscribe to a private channel
+     */
+    export function subscribeToPrivateChannel(channelName: string) {
+      const pusher = getPusherClient();
+      return pusher.subscribe(`private-${channelName}`);
+    }
+
+    /**
+     * Subscribe to a presence channel
+     */
+    export function subscribeToPresenceChannel(channelName: string) {
+      const pusher = getPusherClient();
+      return pusher.subscribe(`presence-${channelName}`);
+    }
+
+    /**
+     * Unsubscribe from a channel
+     */
+    export function unsubscribeFromChannel(channelName: string) {
+      const pusher = getPusherClient();
+      pusher.unsubscribe(channelName);
+    }
+
+    /**
+     * Disconnect from Pusher
+     */
+    export function disconnect() {
+      if (pusherClientInstance) {
+        pusherClientInstance.disconnect();
+        pusherClientInstance = null;
+      }
+    }
+
+    /**
+     * Get connection state
+     */
+    export function getConnectionState(): string {
+      return pusherClientInstance?.connection.state || "disconnected";
+    }
+
+  app/api/pusher/auth/route.ts: |
+    import { NextRequest, NextResponse } from "next/server";
+    import {
+      authorizePrivateChannel,
+      authorizePresenceChannel,
+    } from "@/lib/pusher/server";
+
+    export async function POST(request: NextRequest) {
+      try {
+        // Get user from session - replace with your auth logic
+        const userId = "user_123"; // await getSessionUser(request);
+        if (!userId) {
+          return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+        }
+
+        const formData = await request.formData();
+        const socketId = formData.get("socket_id") as string;
+        const channelName = formData.get("channel_name") as string;
+
+        if (!socketId || !channelName) {
+          return NextResponse.json(
+            { error: "Missing socket_id or channel_name" },
+            { status: 400 }
+          );
+        }
+
+        // Handle presence channels
+        if (channelName.startsWith("presence-")) {
+          // Verify user has access to this presence channel
+          // Example: const hasAccess = await verifyPresenceAccess(userId, channelName);
+
+          const presenceData = {
+            user_id: userId,
+            user_info: {
+              name: "User Name", // Get from database
+              avatar: "/avatar.png", // Get from database
+              status: "online",
+            },
+          };
+
+          const auth = authorizePresenceChannel(socketId, channelName, presenceData);
+          return NextResponse.json(auth);
+        }
+
+        // Handle private channels
+        if (channelName.startsWith("private-")) {
+          // Verify user has access to this private channel
+          // Example: Extract userId from channel name and verify
+          const channelUserId = channelName.replace("private-user-", "");
+
+          if (channelUserId !== userId) {
+            return NextResponse.json(
+              { error: "Access denied to this channel" },
+              { status: 403 }
+            );
+          }
+
+          const auth = authorizePrivateChannel(socketId, channelName);
+          return NextResponse.json(auth);
+        }
+
+        // Public channels don't need authorization
+        return NextResponse.json(
+          { error: "Invalid channel type" },
+          { status: 400 }
+        );
+      } catch (error) {
+        console.error("Pusher auth error:", error);
+        return NextResponse.json(
+          { error: "Authentication failed" },
+          { status: 500 }
+        );
+      }
+    }
+
+  hooks/use-pusher.ts: |
+    "use client";
+
+    import { useEffect, useCallback, useState, useRef } from "react";
+    import {
+      getPusherClient,
+      subscribeToChannel,
+      subscribeToPrivateChannel,
+      subscribeToPresenceChannel,
+      unsubscribeFromChannel,
+    } from "@/lib/pusher/client";
+    import type { Channel, PresenceChannel } from "pusher-js";
+
+    /**
+     * Hook for subscribing to a public channel
+     */
+    export function useChannel<T = unknown>(
+      channelName: string,
+      eventName: string,
+      callback: (data: T) => void
+    ) {
+      const channelRef = useRef<Channel | null>(null);
+      const callbackRef = useRef(callback);
+
+      // Keep callback ref updated
+      useEffect(() => {
+        callbackRef.current = callback;
+      }, [callback]);
+
+      useEffect(() => {
+        const channel = subscribeToChannel(channelName);
+        channelRef.current = channel;
+
+        const handler = (data: T) => {
+          callbackRef.current(data);
+        };
+
+        channel.bind(eventName, handler);
+
+        return () => {
+          channel.unbind(eventName, handler);
+          unsubscribeFromChannel(channelName);
+        };
+      }, [channelName, eventName]);
+
+      return channelRef.current;
+    }
+
+    /**
+     * Hook for subscribing to a private channel
+     */
+    export function usePrivateChannel<T = unknown>(
+      channelName: string,
+      eventName: string,
+      callback: (data: T) => void
+    ) {
+      const channelRef = useRef<Channel | null>(null);
+      const callbackRef = useRef(callback);
+
+      useEffect(() => {
+        callbackRef.current = callback;
+      }, [callback]);
+
+      useEffect(() => {
+        const channel = subscribeToPrivateChannel(channelName);
+        channelRef.current = channel;
+
+        const handler = (data: T) => {
+          callbackRef.current(data);
+        };
+
+        channel.bind(eventName, handler);
+
+        return () => {
+          channel.unbind(eventName, handler);
+          unsubscribeFromChannel(`private-${channelName}`);
+        };
+      }, [channelName, eventName]);
+
+      return channelRef.current;
+    }
+
+    interface PresenceMember {
+      id: string;
+      info: Record<string, unknown>;
+    }
+
+    interface UsePresenceReturn {
+      members: PresenceMember[];
+      me: PresenceMember | null;
+      count: number;
+    }
+
+    /**
+     * Hook for subscribing to a presence channel
+     */
+    export function usePresenceChannel(channelName: string): UsePresenceReturn {
+      const [members, setMembers] = useState<PresenceMember[]>([]);
+      const [me, setMe] = useState<PresenceMember | null>(null);
+      const channelRef = useRef<PresenceChannel | null>(null);
+
+      useEffect(() => {
+        const channel = subscribeToPresenceChannel(channelName) as PresenceChannel;
+        channelRef.current = channel;
+
+        // Initial members when subscription succeeds
+        channel.bind("pusher:subscription_succeeded", (data: { members: Record<string, unknown>; me: { id: string; info: Record<string, unknown> } }) => {
+          const memberList: PresenceMember[] = [];
+          Object.entries(data.members).forEach(([id, info]) => {
+            memberList.push({ id, info: info as Record<string, unknown> });
+          });
+          setMembers(memberList);
+          setMe({ id: data.me.id, info: data.me.info });
+        });
+
+        // Member added
+        channel.bind("pusher:member_added", (member: { id: string; info: Record<string, unknown> }) => {
+          setMembers((prev) => [...prev, { id: member.id, info: member.info }]);
+        });
+
+        // Member removed
+        channel.bind("pusher:member_removed", (member: { id: string }) => {
+          setMembers((prev) => prev.filter((m) => m.id !== member.id));
+        });
+
+        return () => {
+          unsubscribeFromChannel(`presence-${channelName}`);
+        };
+      }, [channelName]);
+
+      return {
+        members,
+        me,
+        count: members.length,
+      };
+    }
+
+    /**
+     * Hook for connection state
+     */
+    export function useConnectionState() {
+      const [state, setState] = useState<string>("disconnected");
+
+      useEffect(() => {
+        const pusher = getPusherClient();
+
+        const handleStateChange = ({ current }: { current: string }) => {
+          setState(current);
+        };
+
+        pusher.connection.bind("state_change", handleStateChange);
+        setState(pusher.connection.state);
+
+        return () => {
+          pusher.connection.unbind("state_change", handleStateChange);
+        };
+      }, []);
+
+      return state;
+    }
+
+  components/realtime/presence-list.tsx: |
+    "use client";
+
+    import { usePresenceChannel, useConnectionState } from "@/hooks/use-pusher";
+
+    interface PresenceListProps {
+      channelName: string;
+      className?: string;
+    }
+
+    export function PresenceList({ channelName, className = "" }: PresenceListProps) {
+      const { members, me, count } = usePresenceChannel(channelName);
+      const connectionState = useConnectionState();
+
+      return (
+        <div className={`p-4 bg-gray-50 dark:bg-gray-800 rounded-lg ${className}`}>
+          <div className="flex items-center justify-between mb-4">
+            <h3 className="font-semibold">Online Users ({count})</h3>
+            <span
+              className={`text-xs px-2 py-1 rounded-full ${
+                connectionState === "connected"
+                  ? "bg-green-100 text-green-800"
+                  : "bg-yellow-100 text-yellow-800"
+              }`}
+            >
+              {connectionState}
+            </span>
+          </div>
+
+          <ul className="space-y-2">
+            {members.map((member) => (
+              <li
+                key={member.id}
+                className={`flex items-center gap-3 p-2 rounded ${
+                  member.id === me?.id
+                    ? "bg-blue-50 dark:bg-blue-900/20"
+                    : "bg-white dark:bg-gray-700"
+                }`}
+              >
+                {/* Avatar */}
+                <div className="relative">
+                  <div className="w-8 h-8 bg-gray-200 rounded-full flex items-center justify-center">
+                    {(member.info.name as string)?.charAt(0) || "?"}
+                  </div>
+                  <span className="absolute -bottom-0.5 -right-0.5 w-3 h-3 bg-green-500 border-2 border-white rounded-full" />
+                </div>
+
+                {/* Name */}
+                <div className="flex-1 min-w-0">
+                  <p className="text-sm font-medium truncate">
+                    {(member.info.name as string) || "Anonymous"}
+                    {member.id === me?.id && (
+                      <span className="text-xs text-gray-500 ml-1">(you)</span>
+                    )}
+                  </p>
+                  <p className="text-xs text-gray-500">
+                    {(member.info.status as string) || "online"}
+                  </p>
+                </div>
+              </li>
+            ))}
+
+            {members.length === 0 && (
+              <li className="text-sm text-gray-500 text-center py-4">
+                No users online
+              </li>
+            )}
+          </ul>
+        </div>
+      );
+    }
+
+edge_cases:
+  - id: connection-lost
+    symptom: "Events not received after network interruption"
+    cause: "WebSocket connection dropped"
+    solution: |
+      Pusher handles reconnection automatically, but you can add handlers:
+
+      const pusher = getPusherClient();
+
+      pusher.connection.bind("error", (error) => {
+        console.error("Pusher error:", error);
+      });
+
+      pusher.connection.bind("state_change", ({ current, previous }) => {
+        if (current === "disconnected") {
+          // Show offline indicator
+        } else if (current === "connected" && previous === "disconnected") {
+          // Reconnected - fetch missed data
+        }
+      });
+
+  - id: auth-failure
+    symptom: "Unable to subscribe to private/presence channel"
+    cause: "Authentication endpoint returns error"
+    solution: |
+      1. Check that /api/pusher/auth is accessible
+      2. Verify user session is valid
+      3. Check Pusher credentials match
+
+      // Debug auth issues
+      const pusher = new PusherClient(key, {
+        cluster,
+        authEndpoint: "/api/pusher/auth",
+        auth: {
+          headers: {
+            Authorization: `Bearer ${token}`, // If using JWT
+          },
+        },
+      });
+
+  - id: rate-limiting
+    symptom: "429 Too Many Requests error"
+    cause: "Exceeded Pusher's message rate limits"
+    solution: |
+      1. Batch multiple events together
+      2. Debounce frequent updates
+      3. Use client events for peer-to-peer communication
+      4. Upgrade Pusher plan if needed
+
+      // Batch events
+      await triggerBatch([
+        { channel: "room-1", name: "update", data: { ... } },
+        { channel: "room-2", name: "update", data: { ... } },
+      ]);
+
+  - id: presence-limit
+    symptom: "Presence channel shows max 100 members"
+    cause: "Pusher's presence channel member limit"
+    solution: |
+      For channels with >100 users:
+      1. Use private channels instead of presence
+      2. Implement custom presence tracking with database
+      3. Paginate users list
+
+validation:
+  manual_test:
+    - "Configure Pusher credentials"
+    - "Subscribe to a public channel"
+    - "Test private channel authentication"
+    - "Join presence channel and see online users"
+    - "Trigger event from server and verify client receives it"
+    - "Test reconnection after network interruption"

@@ -1,0 +1,884 @@
+id: sse-streaming
+version: "1.0.0"
+updated_at: "2026-01-31"
+author: "nyko-team"
+status: beta
+
+name: "Server-Sent Events Streaming"
+description: "Real-time server-to-client streaming with SSE for notifications, live updates, and progress tracking"
+
+category: realtime
+tags:
+  - sse
+  - server-sent-events
+  - streaming
+  - realtime
+  - notifications
+
+difficulty: intermediate
+time_estimate: "20-25 min"
+
+stack:
+  required:
+    - name: "next"
+      version: "^15.1.0"
+      reason: "App Router with streaming support"
+
+requires: []
+
+enables: []
+
+env_vars:
+  required: []
+
+external_setup: []
+
+files:
+  - path: "lib/sse/stream.ts"
+    action: create
+    description: "SSE stream utilities"
+    priority: 1
+
+  - path: "lib/sse/event-emitter.ts"
+    action: create
+    description: "Server-side event emitter"
+    priority: 2
+
+  - path: "app/api/sse/notifications/route.ts"
+    action: create
+    description: "Notifications SSE endpoint"
+    priority: 3
+
+  - path: "app/api/sse/progress/route.ts"
+    action: create
+    description: "Progress tracking SSE endpoint"
+    priority: 4
+
+  - path: "hooks/use-sse.ts"
+    action: create
+    description: "React hooks for SSE"
+    priority: 5
+
+  - path: "components/realtime/notification-stream.tsx"
+    action: create
+    description: "Live notifications component"
+    priority: 6
+
+code:
+  lib/sse/stream.ts: |
+    /**
+     * Create SSE response with proper headers
+     */
+    export function createSSEResponse(
+      stream: ReadableStream,
+      options: { headers?: Record<string, string> } = {}
+    ): Response {
+      return new Response(stream, {
+        headers: {
+          "Content-Type": "text/event-stream",
+          "Cache-Control": "no-cache, no-transform",
+          Connection: "keep-alive",
+          "X-Accel-Buffering": "no", // Disable nginx buffering
+          ...options.headers,
+        },
+      });
+    }
+
+    /**
+     * Create a text encoder for SSE
+     */
+    export function createSSEEncoder() {
+      const encoder = new TextEncoder();
+
+      return {
+        /**
+         * Encode SSE message
+         */
+        encode(data: {
+          event?: string;
+          data: unknown;
+          id?: string;
+          retry?: number;
+        }): Uint8Array {
+          let message = "";
+
+          if (data.id) {
+            message += `id: ${data.id}\n`;
+          }
+
+          if (data.event) {
+            message += `event: ${data.event}\n`;
+          }
+
+          if (data.retry) {
+            message += `retry: ${data.retry}\n`;
+          }
+
+          const jsonData =
+            typeof data.data === "string"
+              ? data.data
+              : JSON.stringify(data.data);
+
+          // Handle multi-line data
+          jsonData.split("\n").forEach((line) => {
+            message += `data: ${line}\n`;
+          });
+
+          message += "\n";
+
+          return encoder.encode(message);
+        },
+
+        /**
+         * Encode comment (for keep-alive)
+         */
+        comment(text: string): Uint8Array {
+          return encoder.encode(`: ${text}\n\n`);
+        },
+      };
+    }
+
+    /**
+     * Create SSE stream with controller
+     */
+    export function createSSEStream(): {
+      stream: ReadableStream;
+      controller: SSEController;
+    } {
+      let streamController: ReadableStreamDefaultController<Uint8Array>;
+      const encoder = createSSEEncoder();
+
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          streamController = controller;
+        },
+        cancel() {
+          // Stream cancelled by client
+        },
+      });
+
+      const controller: SSEController = {
+        send(event: string, data: unknown, id?: string) {
+          try {
+            streamController.enqueue(
+              encoder.encode({ event, data, id })
+            );
+          } catch {
+            // Stream closed
+          }
+        },
+
+        sendData(data: unknown) {
+          try {
+            streamController.enqueue(encoder.encode({ data }));
+          } catch {
+            // Stream closed
+          }
+        },
+
+        keepAlive() {
+          try {
+            streamController.enqueue(encoder.comment("keep-alive"));
+          } catch {
+            // Stream closed
+          }
+        },
+
+        close() {
+          try {
+            streamController.close();
+          } catch {
+            // Already closed
+          }
+        },
+      };
+
+      return { stream, controller };
+    }
+
+    export interface SSEController {
+      send(event: string, data: unknown, id?: string): void;
+      sendData(data: unknown): void;
+      keepAlive(): void;
+      close(): void;
+    }
+
+    /**
+     * Create async generator based SSE stream
+     */
+    export async function* createSSEGenerator<T>(
+      source: AsyncIterable<T>,
+      options: {
+        eventName?: string;
+        transform?: (item: T) => unknown;
+      } = {}
+    ): AsyncGenerator<Uint8Array> {
+      const encoder = createSSEEncoder();
+      const { eventName = "message", transform = (x) => x } = options;
+
+      for await (const item of source) {
+        yield encoder.encode({
+          event: eventName,
+          data: transform(item),
+        });
+      }
+    }
+
+  lib/sse/event-emitter.ts: |
+    type Listener<T> = (data: T) => void;
+
+    interface Subscription {
+      unsubscribe: () => void;
+    }
+
+    /**
+     * Simple typed event emitter for SSE
+     */
+    export class SSEEventEmitter<Events extends Record<string, unknown>> {
+      private listeners = new Map<keyof Events, Set<Listener<unknown>>>();
+
+      /**
+       * Subscribe to an event
+       */
+      on<K extends keyof Events>(
+        event: K,
+        listener: Listener<Events[K]>
+      ): Subscription {
+        if (!this.listeners.has(event)) {
+          this.listeners.set(event, new Set());
+        }
+
+        this.listeners.get(event)!.add(listener as Listener<unknown>);
+
+        return {
+          unsubscribe: () => {
+            this.listeners.get(event)?.delete(listener as Listener<unknown>);
+          },
+        };
+      }
+
+      /**
+       * Emit an event
+       */
+      emit<K extends keyof Events>(event: K, data: Events[K]): void {
+        this.listeners.get(event)?.forEach((listener) => {
+          try {
+            listener(data);
+          } catch (error) {
+            console.error(`Error in SSE listener for ${String(event)}:`, error);
+          }
+        });
+      }
+
+      /**
+       * Remove all listeners for an event
+       */
+      off<K extends keyof Events>(event: K): void {
+        this.listeners.delete(event);
+      }
+
+      /**
+       * Clear all listeners
+       */
+      clear(): void {
+        this.listeners.clear();
+      }
+    }
+
+    // Global notification emitter
+    export interface NotificationEvents {
+      notification: {
+        id: string;
+        type: "info" | "success" | "warning" | "error";
+        title: string;
+        message: string;
+        timestamp: string;
+      };
+      "user-update": {
+        userId: string;
+        action: string;
+        data: unknown;
+      };
+    }
+
+    export const notificationEmitter = new SSEEventEmitter<NotificationEvents>();
+
+    // Per-user connection tracking
+    const userConnections = new Map<string, Set<(data: unknown) => void>>();
+
+    /**
+     * Add user connection
+     */
+    export function addUserConnection(
+      userId: string,
+      handler: (data: unknown) => void
+    ): () => void {
+      if (!userConnections.has(userId)) {
+        userConnections.set(userId, new Set());
+      }
+      userConnections.get(userId)!.add(handler);
+
+      return () => {
+        userConnections.get(userId)?.delete(handler);
+        if (userConnections.get(userId)?.size === 0) {
+          userConnections.delete(userId);
+        }
+      };
+    }
+
+    /**
+     * Send event to specific user
+     */
+    export function sendToUser(userId: string, data: unknown): void {
+      userConnections.get(userId)?.forEach((handler) => {
+        try {
+          handler(data);
+        } catch (error) {
+          console.error(`Error sending to user ${userId}:`, error);
+        }
+      });
+    }
+
+    /**
+     * Broadcast to all connected users
+     */
+    export function broadcast(data: unknown): void {
+      userConnections.forEach((handlers) => {
+        handlers.forEach((handler) => {
+          try {
+            handler(data);
+          } catch (error) {
+            console.error("Error broadcasting:", error);
+          }
+        });
+      });
+    }
+
+    /**
+     * Get connected user count
+     */
+    export function getConnectedUserCount(): number {
+      return userConnections.size;
+    }
+
+  app/api/sse/notifications/route.ts: |
+    import { NextRequest } from "next/server";
+    import { createSSEResponse, createSSEStream } from "@/lib/sse/stream";
+    import { addUserConnection, notificationEmitter } from "@/lib/sse/event-emitter";
+
+    export const dynamic = "force-dynamic";
+    export const runtime = "nodejs"; // SSE requires Node.js runtime
+
+    export async function GET(request: NextRequest) {
+      // Get user from session - replace with your auth logic
+      const userId = request.nextUrl.searchParams.get("userId") || "user_123";
+
+      const { stream, controller } = createSSEStream();
+
+      // Send initial connection message
+      controller.send("connected", { userId, timestamp: new Date().toISOString() });
+
+      // Set up keep-alive interval
+      const keepAliveInterval = setInterval(() => {
+        controller.keepAlive();
+      }, 30000); // Every 30 seconds
+
+      // Handle user-specific events
+      const userHandler = (data: unknown) => {
+        controller.send("notification", data);
+      };
+
+      const removeConnection = addUserConnection(userId, userHandler);
+
+      // Handle global notifications
+      const subscription = notificationEmitter.on("notification", (data) => {
+        controller.send("notification", data);
+      });
+
+      // Handle client disconnect
+      request.signal.addEventListener("abort", () => {
+        clearInterval(keepAliveInterval);
+        removeConnection();
+        subscription.unsubscribe();
+        controller.close();
+      });
+
+      return createSSEResponse(stream);
+    }
+
+  app/api/sse/progress/route.ts: |
+    import { NextRequest } from "next/server";
+    import { createSSEResponse, createSSEStream } from "@/lib/sse/stream";
+
+    export const dynamic = "force-dynamic";
+    export const runtime = "nodejs";
+
+    export async function GET(request: NextRequest) {
+      const taskId = request.nextUrl.searchParams.get("taskId");
+
+      if (!taskId) {
+        return new Response("Missing taskId", { status: 400 });
+      }
+
+      const { stream, controller } = createSSEStream();
+
+      // Simulate progress updates (replace with actual task tracking)
+      const simulateProgress = async () => {
+        controller.send("start", {
+          taskId,
+          message: "Task started",
+          timestamp: new Date().toISOString(),
+        });
+
+        for (let progress = 0; progress <= 100; progress += 10) {
+          // Check if client disconnected
+          if (request.signal.aborted) {
+            return;
+          }
+
+          await new Promise((resolve) => setTimeout(resolve, 500));
+
+          controller.send("progress", {
+            taskId,
+            progress,
+            message: `Processing... ${progress}%`,
+          });
+        }
+
+        controller.send("complete", {
+          taskId,
+          message: "Task completed successfully",
+          result: { success: true },
+        });
+
+        controller.close();
+      };
+
+      // Start progress simulation
+      simulateProgress().catch((error) => {
+        controller.send("error", {
+          taskId,
+          message: error.message,
+        });
+        controller.close();
+      });
+
+      // Handle client disconnect
+      request.signal.addEventListener("abort", () => {
+        controller.close();
+      });
+
+      return createSSEResponse(stream);
+    }
+
+  hooks/use-sse.ts: |
+    "use client";
+
+    import { useEffect, useState, useCallback, useRef } from "react";
+
+    interface SSEOptions {
+      onOpen?: () => void;
+      onError?: (error: Event) => void;
+      onMessage?: (data: unknown) => void;
+      reconnect?: boolean;
+      reconnectInterval?: number;
+      maxReconnectAttempts?: number;
+    }
+
+    interface SSEState {
+      isConnected: boolean;
+      error: string | null;
+      reconnectAttempts: number;
+    }
+
+    /**
+     * Hook for SSE connections
+     */
+    export function useSSE<T = unknown>(
+      url: string,
+      eventHandlers: Record<string, (data: T) => void>,
+      options: SSEOptions = {}
+    ) {
+      const {
+        onOpen,
+        onError,
+        onMessage,
+        reconnect = true,
+        reconnectInterval = 3000,
+        maxReconnectAttempts = 5,
+      } = options;
+
+      const [state, setState] = useState<SSEState>({
+        isConnected: false,
+        error: null,
+        reconnectAttempts: 0,
+      });
+
+      const eventSourceRef = useRef<EventSource | null>(null);
+      const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+
+      const connect = useCallback(() => {
+        // Clean up existing connection
+        if (eventSourceRef.current) {
+          eventSourceRef.current.close();
+        }
+
+        const eventSource = new EventSource(url);
+        eventSourceRef.current = eventSource;
+
+        eventSource.onopen = () => {
+          setState({
+            isConnected: true,
+            error: null,
+            reconnectAttempts: 0,
+          });
+          onOpen?.();
+        };
+
+        eventSource.onerror = (event) => {
+          const isConnecting = eventSource.readyState === EventSource.CONNECTING;
+
+          if (!isConnecting) {
+            setState((prev) => ({
+              ...prev,
+              isConnected: false,
+              error: "Connection error",
+            }));
+          }
+
+          onError?.(event);
+
+          // Attempt reconnection
+          if (reconnect && !isConnecting) {
+            setState((prev) => {
+              if (prev.reconnectAttempts >= maxReconnectAttempts) {
+                return { ...prev, error: "Max reconnection attempts reached" };
+              }
+
+              reconnectTimeoutRef.current = setTimeout(() => {
+                connect();
+              }, reconnectInterval);
+
+              return { ...prev, reconnectAttempts: prev.reconnectAttempts + 1 };
+            });
+          }
+        };
+
+        // Default message handler
+        eventSource.onmessage = (event) => {
+          try {
+            const data = JSON.parse(event.data);
+            onMessage?.(data);
+          } catch {
+            onMessage?.(event.data);
+          }
+        };
+
+        // Named event handlers
+        Object.entries(eventHandlers).forEach(([eventName, handler]) => {
+          eventSource.addEventListener(eventName, (event: MessageEvent) => {
+            try {
+              const data = JSON.parse(event.data);
+              handler(data);
+            } catch {
+              handler(event.data as T);
+            }
+          });
+        });
+      }, [
+        url,
+        eventHandlers,
+        onOpen,
+        onError,
+        onMessage,
+        reconnect,
+        reconnectInterval,
+        maxReconnectAttempts,
+      ]);
+
+      const disconnect = useCallback(() => {
+        if (reconnectTimeoutRef.current) {
+          clearTimeout(reconnectTimeoutRef.current);
+        }
+        if (eventSourceRef.current) {
+          eventSourceRef.current.close();
+          eventSourceRef.current = null;
+        }
+        setState({
+          isConnected: false,
+          error: null,
+          reconnectAttempts: 0,
+        });
+      }, []);
+
+      useEffect(() => {
+        connect();
+
+        return () => {
+          disconnect();
+        };
+      }, [url]); // Only reconnect when URL changes
+
+      return {
+        ...state,
+        connect,
+        disconnect,
+      };
+    }
+
+    /**
+     * Hook for progress tracking via SSE
+     */
+    export function useSSEProgress(taskId: string | null) {
+      const [progress, setProgress] = useState(0);
+      const [status, setStatus] = useState<"idle" | "running" | "complete" | "error">(
+        "idle"
+      );
+      const [message, setMessage] = useState<string | null>(null);
+      const [result, setResult] = useState<unknown>(null);
+
+      const url = taskId ? `/api/sse/progress?taskId=${taskId}` : null;
+
+      useEffect(() => {
+        if (!url) return;
+
+        const eventSource = new EventSource(url);
+
+        eventSource.addEventListener("start", (event) => {
+          const data = JSON.parse(event.data);
+          setStatus("running");
+          setMessage(data.message);
+          setProgress(0);
+        });
+
+        eventSource.addEventListener("progress", (event) => {
+          const data = JSON.parse(event.data);
+          setProgress(data.progress);
+          setMessage(data.message);
+        });
+
+        eventSource.addEventListener("complete", (event) => {
+          const data = JSON.parse(event.data);
+          setStatus("complete");
+          setProgress(100);
+          setMessage(data.message);
+          setResult(data.result);
+          eventSource.close();
+        });
+
+        eventSource.addEventListener("error", (event) => {
+          try {
+            const data = JSON.parse((event as MessageEvent).data);
+            setStatus("error");
+            setMessage(data.message);
+          } catch {
+            setStatus("error");
+            setMessage("An error occurred");
+          }
+          eventSource.close();
+        });
+
+        eventSource.onerror = () => {
+          if (status !== "complete" && status !== "error") {
+            setStatus("error");
+            setMessage("Connection lost");
+          }
+        };
+
+        return () => {
+          eventSource.close();
+        };
+      }, [url]);
+
+      const reset = useCallback(() => {
+        setProgress(0);
+        setStatus("idle");
+        setMessage(null);
+        setResult(null);
+      }, []);
+
+      return { progress, status, message, result, reset };
+    }
+
+  components/realtime/notification-stream.tsx: |
+    "use client";
+
+    import { useState, useCallback } from "react";
+    import { useSSE } from "@/hooks/use-sse";
+
+    interface Notification {
+      id: string;
+      type: "info" | "success" | "warning" | "error";
+      title: string;
+      message: string;
+      timestamp: string;
+    }
+
+    interface NotificationStreamProps {
+      userId: string;
+      maxNotifications?: number;
+    }
+
+    export function NotificationStream({
+      userId,
+      maxNotifications = 10,
+    }: NotificationStreamProps) {
+      const [notifications, setNotifications] = useState<Notification[]>([]);
+
+      const handleNotification = useCallback(
+        (data: Notification) => {
+          setNotifications((prev) => {
+            const next = [data, ...prev];
+            return next.slice(0, maxNotifications);
+          });
+        },
+        [maxNotifications]
+      );
+
+      const { isConnected, error, reconnectAttempts } = useSSE<Notification>(
+        `/api/sse/notifications?userId=${userId}`,
+        {
+          notification: handleNotification,
+          connected: () => console.log("SSE connected"),
+        }
+      );
+
+      const dismissNotification = (id: string) => {
+        setNotifications((prev) => prev.filter((n) => n.id !== id));
+      };
+
+      const getTypeStyles = (type: Notification["type"]) => {
+        switch (type) {
+          case "success":
+            return "bg-green-50 border-green-200 text-green-800";
+          case "warning":
+            return "bg-yellow-50 border-yellow-200 text-yellow-800";
+          case "error":
+            return "bg-red-50 border-red-200 text-red-800";
+          default:
+            return "bg-blue-50 border-blue-200 text-blue-800";
+        }
+      };
+
+      return (
+        <div className="space-y-4">
+          {/* Connection status */}
+          <div className="flex items-center gap-2 text-sm">
+            <span
+              className={`w-2 h-2 rounded-full ${
+                isConnected ? "bg-green-500" : "bg-red-500"
+              }`}
+            />
+            <span>
+              {isConnected
+                ? "Connected"
+                : error || `Reconnecting... (${reconnectAttempts})`}
+            </span>
+          </div>
+
+          {/* Notifications list */}
+          <div className="space-y-2">
+            {notifications.map((notification) => (
+              <div
+                key={notification.id}
+                className={`p-4 border rounded-lg ${getTypeStyles(
+                  notification.type
+                )}`}
+              >
+                <div className="flex justify-between items-start">
+                  <div>
+                    <h4 className="font-medium">{notification.title}</h4>
+                    <p className="text-sm mt-1">{notification.message}</p>
+                    <p className="text-xs mt-2 opacity-60">
+                      {new Date(notification.timestamp).toLocaleTimeString()}
+                    </p>
+                  </div>
+                  <button
+                    onClick={() => dismissNotification(notification.id)}
+                    className="text-gray-400 hover:text-gray-600"
+                  >
+                    ×
+                  </button>
+                </div>
+              </div>
+            ))}
+
+            {notifications.length === 0 && (
+              <p className="text-gray-500 text-center py-8">
+                No notifications yet
+              </p>
+            )}
+          </div>
+        </div>
+      );
+    }
+
+edge_cases:
+  - id: connection-timeout
+    symptom: "SSE connection drops after 30-60 seconds"
+    cause: "Proxy or load balancer timeout"
+    solution: |
+      Send keep-alive comments regularly:
+
+      const keepAliveInterval = setInterval(() => {
+        controller.keepAlive(); // Sends ": keep-alive\n\n"
+      }, 15000); // Every 15 seconds
+
+      Also configure your proxy:
+      - Nginx: proxy_read_timeout 3600;
+      - Cloudflare: Long timeouts on Pro plan
+
+  - id: vercel-timeout
+    symptom: "SSE disconnects after ~30 seconds on Vercel"
+    cause: "Vercel serverless function timeout"
+    solution: |
+      Options:
+      1. Use Vercel's Edge Runtime (limited to 30s anyway)
+      2. Use a separate server for SSE (Railway, Render)
+      3. Use polling with short intervals as fallback
+
+      // Fallback to polling
+      if (!isSSESupported) {
+        setInterval(async () => {
+          const data = await fetch("/api/notifications").then(r => r.json());
+          handleNotification(data);
+        }, 5000);
+      }
+
+  - id: browser-limit
+    symptom: "Can't open more than 6 SSE connections"
+    cause: "Browser connection limit per domain"
+    solution: |
+      1. Use a single SSE connection for all events
+      2. Multiplex different event types on one stream
+      3. Use HTTP/2 which doesn't have this limit
+
+      // Single connection with multiple event types
+      eventSource.addEventListener("notification", handleNotification);
+      eventSource.addEventListener("chat", handleChat);
+      eventSource.addEventListener("status", handleStatus);
+
+  - id: missed-events
+    symptom: "Events missed when reconnecting"
+    cause: "No event ID tracking for resume"
+    solution: |
+      Use event IDs and Last-Event-ID header:
+
+      // Server: Send with ID
+      controller.send("notification", data, `event-${Date.now()}`);
+
+      // Client: EventSource automatically sends Last-Event-ID
+      // Server: Check for it
+      const lastEventId = request.headers.get("Last-Event-ID");
+      if (lastEventId) {
+        // Send missed events since lastEventId
+      }
+
+validation:
+  manual_test:
+    - "Open notification stream in browser"
+    - "Trigger notification from another endpoint"
+    - "Verify notification appears in real-time"
+    - "Test reconnection after network interruption"
+    - "Monitor progress updates for long task"
+    - "Check connection stays alive with keep-alive"
