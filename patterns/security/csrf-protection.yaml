@@ -1,0 +1,491 @@
+id: csrf-protection
+version: "1.0.0"
+updated_at: "2026-01-31"
+author: "nyko-team"
+status: beta
+
+name: "CSRF Protection for Next.js"
+description: "Cross-Site Request Forgery protection using double-submit cookie pattern"
+
+category: security
+tags:
+  - csrf
+  - security
+  - nextjs
+  - protection
+  - cookies
+
+difficulty: intermediate
+time_estimate: "20-25 min"
+
+stack:
+  required:
+    - name: "next"
+      version: "^15.1.0"
+      reason: "App Router with middleware"
+    - name: "csrf-csrf"
+      version: "^4.0.0"
+      reason: "CSRF protection library"
+
+requires: []
+
+enables: []
+
+env_vars:
+  required:
+    - key: CSRF_SECRET
+      description: "Secret key for CSRF token signing (32+ chars)"
+      format: "your-32-character-secret-key-here"
+      where_to_find: "Generate with: openssl rand -base64 32"
+  optional:
+    - key: NODE_ENV
+      description: "Environment (production for secure cookies)"
+      default: "development"
+
+external_setup:
+  - service: "Generate CSRF Secret"
+    url: ""
+    steps:
+      - "Run: openssl rand -base64 32"
+      - "Add result to .env.local as CSRF_SECRET"
+
+files:
+  - path: "lib/csrf.ts"
+    action: create
+    description: "CSRF token utilities"
+    priority: 1
+
+  - path: "middleware.ts"
+    action: create
+    description: "CSRF middleware for API routes"
+    priority: 2
+
+  - path: "hooks/use-csrf.ts"
+    action: create
+    description: "React hook for CSRF tokens"
+    priority: 3
+
+  - path: "components/csrf-form.tsx"
+    action: create
+    description: "Form component with CSRF protection"
+    priority: 4
+
+  - path: "app/api/csrf/route.ts"
+    action: create
+    description: "CSRF token endpoint"
+    priority: 5
+
+code:
+  lib/csrf.ts: |
+    import { doubleCsrf } from "csrf-csrf";
+    import type { NextRequest } from "next/server";
+
+    const CSRF_SECRET = process.env.CSRF_SECRET;
+
+    if (!CSRF_SECRET || CSRF_SECRET.length < 32) {
+      if (process.env.NODE_ENV === "production") {
+        throw new Error("CSRF_SECRET must be at least 32 characters in production");
+      }
+      console.warn("Warning: Using weak CSRF secret in development");
+    }
+
+    const {
+      generateToken,
+      validateRequest,
+      doubleCsrfProtection,
+    } = doubleCsrf({
+      getSecret: () => CSRF_SECRET || "development-secret-not-for-production",
+      cookieName: "__Host-csrf",
+      cookieOptions: {
+        httpOnly: true,
+        sameSite: "strict",
+        path: "/",
+        secure: process.env.NODE_ENV === "production",
+      },
+      size: 64,
+      ignoredMethods: ["GET", "HEAD", "OPTIONS"],
+      getTokenFromRequest: (req) => {
+        // Check header first, then body
+        const headerToken = req.headers.get("x-csrf-token");
+        if (headerToken) return headerToken;
+
+        // For form submissions, token might be in body
+        // This is handled by the middleware
+        return null;
+      },
+    });
+
+    export { generateToken, validateRequest, doubleCsrfProtection };
+
+    /**
+     * Generate CSRF token for response
+     */
+    export function generateCsrfToken(request: NextRequest): {
+      token: string;
+      cookie: string;
+    } {
+      const secret = CSRF_SECRET || "development-secret-not-for-production";
+      const token = crypto.randomUUID() + "-" + Date.now();
+
+      // Create signed token
+      const encoder = new TextEncoder();
+      const data = encoder.encode(token + secret);
+
+      // Simple hash for token signing (use crypto.subtle in production)
+      let hash = 0;
+      for (let i = 0; i < data.length; i++) {
+        hash = ((hash << 5) - hash + data[i]) | 0;
+      }
+
+      const signedToken = `${token}.${hash.toString(16)}`;
+
+      const cookieValue = signedToken;
+      const cookieOptions = [
+        `__Host-csrf=${cookieValue}`,
+        "HttpOnly",
+        "SameSite=Strict",
+        "Path=/",
+        process.env.NODE_ENV === "production" ? "Secure" : "",
+      ]
+        .filter(Boolean)
+        .join("; ");
+
+      return {
+        token: signedToken,
+        cookie: cookieOptions,
+      };
+    }
+
+    /**
+     * Validate CSRF token from request
+     */
+    export function validateCsrfToken(request: NextRequest): boolean {
+      const headerToken = request.headers.get("x-csrf-token");
+      const cookieToken = request.cookies.get("__Host-csrf")?.value;
+
+      if (!headerToken || !cookieToken) {
+        return false;
+      }
+
+      // Tokens must match
+      return headerToken === cookieToken;
+    }
+
+    /**
+     * List of paths that require CSRF protection
+     */
+    export const CSRF_PROTECTED_PATHS = [
+      "/api/",
+    ];
+
+    /**
+     * List of paths to exclude from CSRF protection
+     */
+    export const CSRF_EXCLUDED_PATHS = [
+      "/api/webhooks/",
+      "/api/csrf",
+      "/api/auth/",
+    ];
+
+  middleware.ts: |
+    import { NextResponse, type NextRequest } from "next/server";
+    import {
+      validateCsrfToken,
+      CSRF_PROTECTED_PATHS,
+      CSRF_EXCLUDED_PATHS,
+    } from "@/lib/csrf";
+
+    const UNSAFE_METHODS = ["POST", "PUT", "PATCH", "DELETE"];
+
+    export async function middleware(request: NextRequest) {
+      const { pathname } = request.nextUrl;
+      const method = request.method;
+
+      // Only check CSRF for unsafe methods
+      if (!UNSAFE_METHODS.includes(method)) {
+        return NextResponse.next();
+      }
+
+      // Check if path requires CSRF protection
+      const requiresCsrf = CSRF_PROTECTED_PATHS.some((path) =>
+        pathname.startsWith(path)
+      );
+      const isExcluded = CSRF_EXCLUDED_PATHS.some((path) =>
+        pathname.startsWith(path)
+      );
+
+      if (requiresCsrf && !isExcluded) {
+        const isValid = validateCsrfToken(request);
+
+        if (!isValid) {
+          return NextResponse.json(
+            {
+              error: "CSRF validation failed",
+              message: "Invalid or missing CSRF token",
+            },
+            { status: 403 }
+          );
+        }
+      }
+
+      return NextResponse.next();
+    }
+
+    export const config = {
+      matcher: ["/api/:path*"],
+    };
+
+  app/api/csrf/route.ts: |
+    import { NextRequest, NextResponse } from "next/server";
+    import { generateCsrfToken } from "@/lib/csrf";
+
+    /**
+     * Get a new CSRF token
+     * Call this on page load or before making protected requests
+     */
+    export async function GET(request: NextRequest) {
+      const { token, cookie } = generateCsrfToken(request);
+
+      const response = NextResponse.json({ csrfToken: token });
+      response.headers.set("Set-Cookie", cookie);
+
+      return response;
+    }
+
+  hooks/use-csrf.ts: |
+    "use client";
+
+    import { useState, useEffect, useCallback } from "react";
+
+    interface UseCsrfResult {
+      csrfToken: string | null;
+      isLoading: boolean;
+      error: Error | null;
+      refresh: () => Promise<void>;
+    }
+
+    /**
+     * Hook to get and manage CSRF token
+     */
+    export function useCsrf(): UseCsrfResult {
+      const [csrfToken, setCsrfToken] = useState<string | null>(null);
+      const [isLoading, setIsLoading] = useState(true);
+      const [error, setError] = useState<Error | null>(null);
+
+      const fetchToken = useCallback(async () => {
+        try {
+          setIsLoading(true);
+          setError(null);
+
+          const response = await fetch("/api/csrf", {
+            credentials: "include",
+          });
+
+          if (!response.ok) {
+            throw new Error("Failed to fetch CSRF token");
+          }
+
+          const data = await response.json();
+          setCsrfToken(data.csrfToken);
+        } catch (err) {
+          setError(err instanceof Error ? err : new Error("Unknown error"));
+        } finally {
+          setIsLoading(false);
+        }
+      }, []);
+
+      useEffect(() => {
+        fetchToken();
+      }, [fetchToken]);
+
+      return {
+        csrfToken,
+        isLoading,
+        error,
+        refresh: fetchToken,
+      };
+    }
+
+    /**
+     * Wrapper for fetch that automatically includes CSRF token
+     */
+    export function useCsrfFetch() {
+      const { csrfToken, refresh } = useCsrf();
+
+      const csrfFetch = useCallback(
+        async (url: string, options: RequestInit = {}) => {
+          if (!csrfToken) {
+            await refresh();
+          }
+
+          const headers = new Headers(options.headers);
+          if (csrfToken) {
+            headers.set("X-CSRF-Token", csrfToken);
+          }
+
+          const response = await fetch(url, {
+            ...options,
+            headers,
+            credentials: "include",
+          });
+
+          // If CSRF fails, refresh token and retry once
+          if (response.status === 403) {
+            const data = await response.json();
+            if (data.error === "CSRF validation failed") {
+              await refresh();
+              headers.set("X-CSRF-Token", csrfToken || "");
+              return fetch(url, { ...options, headers, credentials: "include" });
+            }
+          }
+
+          return response;
+        },
+        [csrfToken, refresh]
+      );
+
+      return csrfFetch;
+    }
+
+  components/csrf-form.tsx: |
+    "use client";
+
+    import { FormEvent, ReactNode } from "react";
+    import { useCsrf } from "@/hooks/use-csrf";
+
+    interface CsrfFormProps {
+      action: string;
+      method?: "POST" | "PUT" | "PATCH" | "DELETE";
+      onSubmit?: (data: FormData) => Promise<void>;
+      children: ReactNode;
+      className?: string;
+    }
+
+    /**
+     * Form component with automatic CSRF protection
+     */
+    export function CsrfForm({
+      action,
+      method = "POST",
+      onSubmit,
+      children,
+      className,
+    }: CsrfFormProps) {
+      const { csrfToken, isLoading } = useCsrf();
+
+      const handleSubmit = async (e: FormEvent<HTMLFormElement>) => {
+        e.preventDefault();
+
+        const formData = new FormData(e.currentTarget);
+
+        if (onSubmit) {
+          await onSubmit(formData);
+          return;
+        }
+
+        // Default form submission with CSRF
+        const response = await fetch(action, {
+          method,
+          headers: {
+            "X-CSRF-Token": csrfToken || "",
+          },
+          body: formData,
+          credentials: "include",
+        });
+
+        if (!response.ok) {
+          console.error("Form submission failed:", await response.text());
+        }
+      };
+
+      return (
+        <form onSubmit={handleSubmit} className={className}>
+          <input type="hidden" name="_csrf" value={csrfToken || ""} />
+          {children}
+          {isLoading && (
+            <p className="text-sm text-gray-500">Loading security token...</p>
+          )}
+        </form>
+      );
+    }
+
+    /**
+     * Example usage
+     */
+    export function ExampleForm() {
+      return (
+        <CsrfForm action="/api/submit" method="POST">
+          <div className="space-y-4">
+            <div>
+              <label htmlFor="email" className="block text-sm font-medium">
+                Email
+              </label>
+              <input
+                type="email"
+                id="email"
+                name="email"
+                required
+                className="mt-1 block w-full rounded-md border px-3 py-2"
+              />
+            </div>
+            <button
+              type="submit"
+              className="bg-blue-600 text-white px-4 py-2 rounded hover:bg-blue-700"
+            >
+              Submit
+            </button>
+          </div>
+        </CsrfForm>
+      );
+    }
+
+edge_cases:
+  - id: token-mismatch
+    symptom: "403 CSRF validation failed on valid requests"
+    cause: "Cookie and header token don't match"
+    solution: |
+      1. Ensure useCsrf hook is called before form submission
+      2. Check that credentials: 'include' is set on fetch
+      3. Verify cookie is being set (check DevTools > Application > Cookies)
+      4. Clear cookies and refresh the page
+
+  - id: cross-origin-blocked
+    symptom: "CSRF token not sent on cross-origin requests"
+    cause: "SameSite=Strict blocks cookie on cross-origin"
+    solution: |
+      For legitimate cross-origin requests:
+      1. Use SameSite=Lax instead of Strict
+      2. Add CORS headers for trusted origins
+      3. Consider using a different auth method for cross-origin APIs
+
+  - id: token-expired
+    symptom: "CSRF fails after long idle time"
+    cause: "Token expired or session ended"
+    solution: |
+      Implement token refresh:
+      const { csrfToken, refresh } = useCsrf();
+
+      // Before important actions
+      await refresh();
+      await submitForm();
+
+  - id: ssr-mismatch
+    symptom: "Hydration error with CSRF token"
+    cause: "Server and client token mismatch"
+    solution: |
+      Don't render CSRF token during SSR:
+      const [mounted, setMounted] = useState(false);
+      useEffect(() => setMounted(true), []);
+
+      {mounted && <input type="hidden" name="_csrf" value={token} />}
+
+validation:
+  manual_test:
+    - "Generate CSRF_SECRET: openssl rand -base64 32"
+    - "Add to .env.local"
+    - "Start dev server"
+    - "GET /api/csrf - should receive token and cookie"
+    - "POST /api/test without token - should get 403"
+    - "POST /api/test with X-CSRF-Token header - should succeed"
+    - "Use CsrfForm component - should work automatically"
+    - "Try to submit form from different origin - should fail"

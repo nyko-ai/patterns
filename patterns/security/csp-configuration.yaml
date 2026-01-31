@@ -1,0 +1,609 @@
+id: csp-configuration
+version: "1.0.0"
+updated_at: "2026-01-31"
+author: "nyko-team"
+status: beta
+
+name: "Content Security Policy Configuration"
+description: "Comprehensive CSP setup for Next.js with reporting and nonce support"
+
+category: security
+tags:
+  - csp
+  - security
+  - xss
+  - nextjs
+  - headers
+
+difficulty: advanced
+time_estimate: "30-40 min"
+
+stack:
+  required:
+    - name: "next"
+      version: "^15.1.0"
+      reason: "App Router with middleware support"
+
+requires:
+  - secure-headers
+
+enables: []
+
+env_vars:
+  required: []
+  optional:
+    - key: CSP_REPORT_URI
+      description: "URI for CSP violation reports"
+      default: "/api/csp-report"
+    - key: CSP_REPORT_ONLY
+      description: "Use report-only mode (for testing)"
+      default: "false"
+
+external_setup:
+  - service: "CSP Report Collection (Optional)"
+    url: "https://report-uri.com"
+    steps:
+      - "Create an account at report-uri.com or similar"
+      - "Get your unique report URI"
+      - "Add CSP_REPORT_URI to .env"
+
+files:
+  - path: "lib/csp/index.ts"
+    action: create
+    description: "CSP configuration and builder"
+    priority: 1
+
+  - path: "lib/csp/directives.ts"
+    action: create
+    description: "CSP directive definitions"
+    priority: 2
+
+  - path: "lib/csp/nonce.ts"
+    action: create
+    description: "Nonce generation and context"
+    priority: 3
+
+  - path: "app/api/csp-report/route.ts"
+    action: create
+    description: "CSP violation report endpoint"
+    priority: 4
+
+  - path: "middleware.ts"
+    action: create
+    description: "CSP middleware with nonce"
+    priority: 5
+
+  - path: "components/script-with-nonce.tsx"
+    action: create
+    description: "Script component with automatic nonce"
+    priority: 6
+
+code:
+  lib/csp/directives.ts: |
+    /**
+     * CSP Directive Types
+     */
+    export type CspDirective =
+      | "default-src"
+      | "script-src"
+      | "script-src-elem"
+      | "script-src-attr"
+      | "style-src"
+      | "style-src-elem"
+      | "style-src-attr"
+      | "img-src"
+      | "font-src"
+      | "connect-src"
+      | "media-src"
+      | "object-src"
+      | "frame-src"
+      | "child-src"
+      | "worker-src"
+      | "frame-ancestors"
+      | "form-action"
+      | "base-uri"
+      | "manifest-src"
+      | "upgrade-insecure-requests"
+      | "block-all-mixed-content"
+      | "report-uri"
+      | "report-to";
+
+    export type CspValue =
+      | "'self'"
+      | "'unsafe-inline'"
+      | "'unsafe-eval'"
+      | "'strict-dynamic'"
+      | "'unsafe-hashes'"
+      | "'none'"
+      | "data:"
+      | "blob:"
+      | "https:"
+      | "http:"
+      | "ws:"
+      | "wss:"
+      | string; // For nonces, hashes, and URLs
+
+    /**
+     * Preset configurations for common services
+     */
+    export const CSP_PRESETS = {
+      // Google services
+      google: {
+        "script-src": [
+          "https://www.googletagmanager.com",
+          "https://www.google-analytics.com",
+          "https://ssl.google-analytics.com",
+        ],
+        "img-src": [
+          "https://www.google-analytics.com",
+          "https://www.googletagmanager.com",
+        ],
+        "connect-src": [
+          "https://www.google-analytics.com",
+          "https://analytics.google.com",
+        ],
+      },
+
+      // Stripe
+      stripe: {
+        "script-src": ["https://js.stripe.com"],
+        "frame-src": ["https://js.stripe.com", "https://hooks.stripe.com"],
+        "connect-src": ["https://api.stripe.com"],
+      },
+
+      // Vercel Analytics
+      vercel: {
+        "script-src": ["https://va.vercel-scripts.com"],
+        "connect-src": ["https://vitals.vercel-insights.com"],
+      },
+
+      // YouTube embeds
+      youtube: {
+        "frame-src": ["https://www.youtube.com", "https://www.youtube-nocookie.com"],
+      },
+
+      // Vimeo embeds
+      vimeo: {
+        "frame-src": ["https://player.vimeo.com"],
+      },
+
+      // Cloudinary
+      cloudinary: {
+        "img-src": ["https://res.cloudinary.com"],
+        "media-src": ["https://res.cloudinary.com"],
+      },
+
+      // Supabase
+      supabase: {
+        "connect-src": [
+          "https://*.supabase.co",
+          "wss://*.supabase.co",
+        ],
+      },
+
+      // Sentry
+      sentry: {
+        "script-src": ["https://browser.sentry-cdn.com"],
+        "connect-src": ["https://*.sentry.io", "https://*.ingest.sentry.io"],
+      },
+    } as const;
+
+    export type CspPreset = keyof typeof CSP_PRESETS;
+
+  lib/csp/index.ts: |
+    import { CSP_PRESETS, type CspDirective, type CspValue, type CspPreset } from "./directives";
+
+    export interface CspConfig {
+      /** Base directives */
+      directives: Partial<Record<CspDirective, CspValue[]>>;
+      /** Presets to include */
+      presets?: CspPreset[];
+      /** Whether to use report-only mode */
+      reportOnly?: boolean;
+      /** Report URI for violations */
+      reportUri?: string;
+      /** Development mode (more permissive) */
+      development?: boolean;
+    }
+
+    /**
+     * Default CSP configuration
+     */
+    export const DEFAULT_CSP_DIRECTIVES: Partial<Record<CspDirective, CspValue[]>> = {
+      "default-src": ["'self'"],
+      "script-src": ["'self'", "'strict-dynamic'"],
+      "style-src": ["'self'", "'unsafe-inline'"], // Many CSS-in-JS need this
+      "img-src": ["'self'", "data:", "blob:", "https:"],
+      "font-src": ["'self'", "data:"],
+      "connect-src": ["'self'"],
+      "media-src": ["'self'"],
+      "object-src": ["'none'"],
+      "frame-src": ["'self'"],
+      "frame-ancestors": ["'none'"],
+      "base-uri": ["'self'"],
+      "form-action": ["'self'"],
+      "worker-src": ["'self'", "blob:"],
+      "manifest-src": ["'self'"],
+    };
+
+    /**
+     * Merge CSP directives
+     */
+    function mergeDirectives(
+      base: Partial<Record<CspDirective, CspValue[]>>,
+      additions: Partial<Record<CspDirective, CspValue[]>>
+    ): Partial<Record<CspDirective, CspValue[]>> {
+      const result = { ...base };
+
+      for (const [directive, values] of Object.entries(additions)) {
+        const key = directive as CspDirective;
+        if (result[key]) {
+          // Merge unique values
+          result[key] = [...new Set([...result[key]!, ...values])];
+        } else {
+          result[key] = [...values];
+        }
+      }
+
+      return result;
+    }
+
+    /**
+     * Build CSP configuration
+     */
+    export function buildCsp(config: CspConfig): Partial<Record<CspDirective, CspValue[]>> {
+      let directives = { ...DEFAULT_CSP_DIRECTIVES };
+
+      // Merge custom directives
+      directives = mergeDirectives(directives, config.directives);
+
+      // Apply presets
+      if (config.presets) {
+        for (const preset of config.presets) {
+          const presetConfig = CSP_PRESETS[preset];
+          directives = mergeDirectives(
+            directives,
+            presetConfig as Partial<Record<CspDirective, CspValue[]>>
+          );
+        }
+      }
+
+      // Development mode adjustments
+      if (config.development) {
+        // Allow eval for hot reload
+        if (directives["script-src"]) {
+          directives["script-src"].push("'unsafe-eval'");
+        }
+        // Allow webpack dev server
+        directives["connect-src"]?.push("ws://localhost:*", "http://localhost:*");
+      }
+
+      // Add report URI
+      if (config.reportUri) {
+        directives["report-uri"] = [config.reportUri];
+      }
+
+      return directives;
+    }
+
+    /**
+     * Convert directives to CSP header string
+     */
+    export function directivesToString(
+      directives: Partial<Record<CspDirective, CspValue[]>>,
+      nonce?: string
+    ): string {
+      const parts: string[] = [];
+
+      for (const [directive, values] of Object.entries(directives)) {
+        if (!values || values.length === 0) {
+          // Directives without values (like upgrade-insecure-requests)
+          parts.push(directive);
+          continue;
+        }
+
+        let directiveValues = [...values];
+
+        // Add nonce to script-src and style-src if provided
+        if (nonce && (directive === "script-src" || directive === "script-src-elem")) {
+          directiveValues = directiveValues.filter((v) => v !== "'unsafe-inline'");
+          directiveValues.push(`'nonce-${nonce}'`);
+        }
+
+        parts.push(`${directive} ${directiveValues.join(" ")}`);
+      }
+
+      return parts.join("; ");
+    }
+
+    /**
+     * Get CSP header name based on mode
+     */
+    export function getCspHeaderName(reportOnly: boolean): string {
+      return reportOnly
+        ? "Content-Security-Policy-Report-Only"
+        : "Content-Security-Policy";
+    }
+
+    export { CSP_PRESETS, type CspDirective, type CspValue, type CspPreset };
+
+  lib/csp/nonce.ts: |
+    import { headers } from "next/headers";
+
+    /**
+     * Generate a cryptographically secure nonce
+     */
+    export function generateNonce(): string {
+      const array = new Uint8Array(16);
+      crypto.getRandomValues(array);
+      return Buffer.from(array).toString("base64");
+    }
+
+    /**
+     * Get nonce from request headers (set by middleware)
+     * Use in Server Components
+     */
+    export async function getNonce(): Promise<string | undefined> {
+      const headersList = await headers();
+      return headersList.get("x-nonce") || undefined;
+    }
+
+    /**
+     * Create nonce context for client components
+     */
+    export function createNonceContext(nonce: string) {
+      return {
+        nonce,
+        scriptProps: { nonce },
+        styleProps: { nonce },
+      };
+    }
+
+  app/api/csp-report/route.ts: |
+    import { NextRequest, NextResponse } from "next/server";
+
+    interface CspViolationReport {
+      "csp-report": {
+        "document-uri": string;
+        referrer: string;
+        "violated-directive": string;
+        "effective-directive": string;
+        "original-policy": string;
+        disposition: "enforce" | "report";
+        "blocked-uri": string;
+        "status-code": number;
+        "script-sample"?: string;
+        "source-file"?: string;
+        "line-number"?: number;
+        "column-number"?: number;
+      };
+    }
+
+    /**
+     * CSP Violation Report Handler
+     * Receives reports when CSP is violated
+     */
+    export async function POST(request: NextRequest) {
+      try {
+        const report: CspViolationReport = await request.json();
+        const violation = report["csp-report"];
+
+        // Log the violation
+        console.warn("CSP Violation:", {
+          documentUri: violation["document-uri"],
+          violatedDirective: violation["violated-directive"],
+          blockedUri: violation["blocked-uri"],
+          sourceFile: violation["source-file"],
+          lineNumber: violation["line-number"],
+          disposition: violation.disposition,
+        });
+
+        // In production, you might want to:
+        // 1. Send to logging service (e.g., Sentry, LogRocket)
+        // 2. Store in database for analysis
+        // 3. Send alert for critical violations
+
+        // Example: Filter out known false positives
+        const ignoredPatterns = [
+          "chrome-extension://",
+          "moz-extension://",
+          "safari-extension://",
+          "about:",
+        ];
+
+        const isIgnored = ignoredPatterns.some(
+          (pattern) =>
+            violation["blocked-uri"]?.startsWith(pattern) ||
+            violation["source-file"]?.startsWith(pattern)
+        );
+
+        if (!isIgnored) {
+          // Process real violations
+          // await logToService(violation);
+        }
+
+        return NextResponse.json({ received: true });
+      } catch (error) {
+        console.error("Failed to process CSP report:", error);
+        return NextResponse.json(
+          { error: "Failed to process report" },
+          { status: 400 }
+        );
+      }
+    }
+
+  middleware.ts: |
+    import { NextResponse, type NextRequest } from "next/server";
+    import {
+      buildCsp,
+      directivesToString,
+      getCspHeaderName,
+    } from "@/lib/csp";
+    import { generateNonce } from "@/lib/csp/nonce";
+
+    export function middleware(request: NextRequest) {
+      const response = NextResponse.next();
+      const nonce = generateNonce();
+
+      // Build CSP
+      const isProduction = process.env.NODE_ENV === "production";
+      const reportOnly = process.env.CSP_REPORT_ONLY === "true";
+
+      const cspConfig = buildCsp({
+        directives: {
+          // Add your custom directives here
+        },
+        presets: ["vercel", "stripe"], // Add presets as needed
+        development: !isProduction,
+        reportUri: process.env.CSP_REPORT_URI || "/api/csp-report",
+      });
+
+      const cspString = directivesToString(cspConfig, nonce);
+      const headerName = getCspHeaderName(reportOnly);
+
+      response.headers.set(headerName, cspString);
+
+      // Pass nonce to pages via header
+      response.headers.set("x-nonce", nonce);
+
+      return response;
+    }
+
+    export const config = {
+      matcher: [
+        "/((?!_next/static|_next/image|favicon.ico|.*\\.(?:svg|png|jpg|jpeg|gif|webp|ico)$).*)",
+      ],
+    };
+
+  components/script-with-nonce.tsx: |
+    import Script, { ScriptProps } from "next/script";
+    import { getNonce } from "@/lib/csp/nonce";
+
+    interface ScriptWithNonceProps extends Omit<ScriptProps, "nonce"> {
+      children?: React.ReactNode;
+    }
+
+    /**
+     * Script component that automatically includes CSP nonce
+     * Use this instead of next/script for inline scripts
+     */
+    export async function ScriptWithNonce({
+      children,
+      ...props
+    }: ScriptWithNonceProps) {
+      const nonce = await getNonce();
+
+      return (
+        <Script {...props} nonce={nonce}>
+          {children}
+        </Script>
+      );
+    }
+
+    /**
+     * Client component for inline scripts with nonce
+     */
+    export function InlineScript({
+      children,
+      nonce,
+      id,
+    }: {
+      children: string;
+      nonce: string;
+      id?: string;
+    }) {
+      return (
+        <script
+          id={id}
+          nonce={nonce}
+          dangerouslySetInnerHTML={{ __html: children }}
+        />
+      );
+    }
+
+    /**
+     * Usage in layout.tsx:
+     *
+     * import { getNonce } from "@/lib/csp/nonce";
+     * import { InlineScript } from "@/components/script-with-nonce";
+     *
+     * export default async function RootLayout({ children }) {
+     *   const nonce = await getNonce();
+     *
+     *   return (
+     *     <html>
+     *       <head>
+     *         <InlineScript nonce={nonce} id="theme-script">
+     *           {`
+     *             const theme = localStorage.getItem('theme') || 'light';
+     *             document.documentElement.classList.add(theme);
+     *           `}
+     *         </InlineScript>
+     *       </head>
+     *       <body>{children}</body>
+     *     </html>
+     *   );
+     * }
+     */
+
+edge_cases:
+  - id: csp-too-strict
+    symptom: "Legitimate resources blocked by CSP"
+    cause: "Missing source in directive"
+    solution: |
+      1. Check browser console for CSP violations
+      2. Use report-only mode first: CSP_REPORT_ONLY=true
+      3. Add missing sources to appropriate directive
+      4. Use presets for common services
+
+      // In middleware.ts
+      presets: ["stripe", "google", "vercel"],
+
+  - id: nonce-not-matching
+    symptom: "Scripts blocked despite nonce"
+    cause: "Nonce mismatch between header and script"
+    solution: |
+      1. Ensure nonce is passed from middleware to page
+      2. Use getNonce() to retrieve the nonce
+      3. Use ScriptWithNonce component
+
+      // In Server Component
+      const nonce = await getNonce();
+      <Script nonce={nonce}>...</Script>
+
+  - id: report-flooding
+    symptom: "Thousands of CSP reports"
+    cause: "Browser extensions triggering violations"
+    solution: |
+      Filter known extension patterns:
+      const ignoredPatterns = [
+        "chrome-extension://",
+        "moz-extension://",
+        "safari-extension://",
+      ];
+
+      Rate limit reports:
+      - Use sample-rate in Report-To header
+      - Deduplicate on server side
+
+  - id: css-in-js-blocked
+    symptom: "Styles not applying"
+    cause: "unsafe-inline removed from style-src"
+    solution: |
+      Most CSS-in-JS libraries require 'unsafe-inline' for style-src.
+      If you need strict CSP for styles, use:
+      1. CSS Modules (no inline styles)
+      2. Libraries that support nonce (styled-components with babel plugin)
+      3. Extract critical CSS at build time
+
+validation:
+  manual_test:
+    - "Start dev server with CSP_REPORT_ONLY=true"
+    - "Navigate through your app"
+    - "Check console for CSP violations"
+    - "Check /api/csp-report logs for reports"
+    - "Fix any violations by adding sources"
+    - "Remove report-only mode and test again"
+    - "Test with browser extensions disabled"
+    - "Verify inline scripts work with nonce"
+    - "Use https://csp-evaluator.withgoogle.com to validate"

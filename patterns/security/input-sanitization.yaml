@@ -1,0 +1,699 @@
+id: input-sanitization
+version: "1.0.0"
+updated_at: "2026-01-31"
+author: "nyko-team"
+status: beta
+
+name: "Input Sanitization with DOMPurify"
+description: "Client and server-side input sanitization to prevent XSS attacks"
+
+category: security
+tags:
+  - xss
+  - sanitization
+  - dompurify
+  - security
+  - validation
+
+difficulty: intermediate
+time_estimate: "20-25 min"
+
+stack:
+  required:
+    - name: "next"
+      version: "^15.1.0"
+      reason: "App Router with server components"
+    - name: "isomorphic-dompurify"
+      version: "^2.35.0"
+      reason: "DOMPurify that works on both client and server"
+
+requires: []
+
+enables: []
+
+env_vars:
+  required: []
+
+external_setup: []
+
+files:
+  - path: "lib/sanitize.ts"
+    action: create
+    description: "Sanitization utilities"
+    priority: 1
+
+  - path: "lib/validators.ts"
+    action: create
+    description: "Input validation utilities"
+    priority: 2
+
+  - path: "hooks/use-sanitized-input.ts"
+    action: create
+    description: "React hook for sanitized inputs"
+    priority: 3
+
+  - path: "components/safe-html.tsx"
+    action: create
+    description: "Component for rendering sanitized HTML"
+    priority: 4
+
+  - path: "app/api/submit/route.ts"
+    action: create
+    description: "API route with server-side sanitization"
+    priority: 5
+
+code:
+  lib/sanitize.ts: |
+    import DOMPurify from "isomorphic-dompurify";
+
+    /**
+     * Sanitization presets for different use cases
+     */
+    export const SANITIZE_PRESETS = {
+      // Allow basic formatting only
+      basic: {
+        ALLOWED_TAGS: ["b", "i", "em", "strong", "u", "br"],
+        ALLOWED_ATTR: [],
+      },
+
+      // Allow common formatting and links
+      standard: {
+        ALLOWED_TAGS: [
+          "b", "i", "em", "strong", "u", "br", "p",
+          "a", "ul", "ol", "li", "blockquote", "code", "pre",
+        ],
+        ALLOWED_ATTR: ["href", "target", "rel"],
+        ADD_ATTR: ["target", "rel"],
+        FORCE_BODY: true,
+      },
+
+      // Rich content with images
+      rich: {
+        ALLOWED_TAGS: [
+          "b", "i", "em", "strong", "u", "br", "p", "span",
+          "a", "ul", "ol", "li", "blockquote", "code", "pre",
+          "h1", "h2", "h3", "h4", "h5", "h6",
+          "img", "figure", "figcaption",
+          "table", "thead", "tbody", "tr", "th", "td",
+        ],
+        ALLOWED_ATTR: [
+          "href", "target", "rel", "src", "alt", "title",
+          "class", "id", "width", "height",
+        ],
+        ADD_ATTR: ["target", "rel"],
+      },
+
+      // Strip all HTML
+      text: {
+        ALLOWED_TAGS: [],
+        ALLOWED_ATTR: [],
+      },
+
+      // For user-generated content with strict sanitization
+      userContent: {
+        ALLOWED_TAGS: ["b", "i", "em", "strong", "br", "p", "a"],
+        ALLOWED_ATTR: ["href"],
+        FORBID_ATTR: ["style", "onerror", "onclick"],
+        ALLOW_DATA_ATTR: false,
+        ADD_TAGS: [],
+        ADD_ATTR: ["target"],
+        WHOLE_DOCUMENT: false,
+        RETURN_DOM: false,
+        RETURN_DOM_FRAGMENT: false,
+      },
+    } as const;
+
+    type SanitizePreset = keyof typeof SANITIZE_PRESETS;
+
+    /**
+     * Sanitize HTML content
+     */
+    export function sanitizeHtml(
+      dirty: string,
+      preset: SanitizePreset = "standard"
+    ): string {
+      const config = SANITIZE_PRESETS[preset];
+
+      // Add security hooks
+      DOMPurify.addHook("afterSanitizeAttributes", (node) => {
+        // Force all links to open in new tab with noopener
+        if (node.tagName === "A") {
+          node.setAttribute("target", "_blank");
+          node.setAttribute("rel", "noopener noreferrer");
+        }
+
+        // Remove javascript: URLs
+        if (node.hasAttribute("href")) {
+          const href = node.getAttribute("href") || "";
+          if (href.toLowerCase().startsWith("javascript:")) {
+            node.removeAttribute("href");
+          }
+        }
+
+        // Validate image sources
+        if (node.tagName === "IMG") {
+          const src = node.getAttribute("src") || "";
+          if (!isValidImageUrl(src)) {
+            node.removeAttribute("src");
+            node.setAttribute("alt", "[Invalid image]");
+          }
+        }
+      });
+
+      const clean = DOMPurify.sanitize(dirty, config);
+
+      // Remove hooks to prevent memory leaks
+      DOMPurify.removeHook("afterSanitizeAttributes");
+
+      return clean;
+    }
+
+    /**
+     * Strip all HTML and return plain text
+     */
+    export function stripHtml(dirty: string): string {
+      return DOMPurify.sanitize(dirty, { ALLOWED_TAGS: [] });
+    }
+
+    /**
+     * Escape HTML entities (for displaying code)
+     */
+    export function escapeHtml(str: string): string {
+      const htmlEntities: Record<string, string> = {
+        "&": "&amp;",
+        "<": "&lt;",
+        ">": "&gt;",
+        '"': "&quot;",
+        "'": "&#39;",
+        "/": "&#x2F;",
+        "`": "&#x60;",
+        "=": "&#x3D;",
+      };
+
+      return str.replace(/[&<>"'`=/]/g, (char) => htmlEntities[char]);
+    }
+
+    /**
+     * Sanitize for database storage
+     */
+    export function sanitizeForStorage(input: string): string {
+      // Remove null bytes
+      let clean = input.replace(/\0/g, "");
+
+      // Normalize unicode
+      clean = clean.normalize("NFC");
+
+      // Strip HTML
+      clean = stripHtml(clean);
+
+      // Trim whitespace
+      clean = clean.trim();
+
+      return clean;
+    }
+
+    /**
+     * Validate image URL
+     */
+    function isValidImageUrl(url: string): boolean {
+      try {
+        const parsed = new URL(url);
+        // Only allow http, https, or data URIs for images
+        if (!["http:", "https:", "data:"].includes(parsed.protocol)) {
+          return false;
+        }
+        // Block data URIs that aren't images
+        if (parsed.protocol === "data:") {
+          return url.startsWith("data:image/");
+        }
+        return true;
+      } catch {
+        // Relative URLs are allowed
+        return !url.toLowerCase().startsWith("javascript:");
+      }
+    }
+
+    /**
+     * Sanitize filename
+     */
+    export function sanitizeFilename(filename: string): string {
+      // Remove path separators
+      let clean = filename.replace(/[/\\]/g, "");
+
+      // Remove special characters
+      clean = clean.replace(/[<>:"|?*\x00-\x1f]/g, "");
+
+      // Remove leading dots (hidden files)
+      clean = clean.replace(/^\.+/, "");
+
+      // Limit length
+      if (clean.length > 255) {
+        const ext = clean.split(".").pop() || "";
+        const name = clean.slice(0, 255 - ext.length - 1);
+        clean = `${name}.${ext}`;
+      }
+
+      return clean || "unnamed";
+    }
+
+  lib/validators.ts: |
+    import { z } from "zod";
+    import { sanitizeForStorage, stripHtml } from "./sanitize";
+
+    /**
+     * Custom Zod transformers with sanitization
+     */
+    export const sanitizedString = () =>
+      z.string().transform((val) => sanitizeForStorage(val));
+
+    export const sanitizedEmail = () =>
+      z
+        .string()
+        .email()
+        .transform((val) => val.toLowerCase().trim());
+
+    export const sanitizedUrl = () =>
+      z
+        .string()
+        .url()
+        .transform((val) => {
+          const url = new URL(val);
+          // Only allow http/https
+          if (!["http:", "https:"].includes(url.protocol)) {
+            throw new Error("Invalid URL protocol");
+          }
+          return url.toString();
+        });
+
+    /**
+     * Common input schemas with sanitization
+     */
+    export const userInputSchema = z.object({
+      name: z
+        .string()
+        .min(1)
+        .max(100)
+        .transform((val) => stripHtml(val).trim()),
+      email: sanitizedEmail(),
+      bio: z
+        .string()
+        .max(500)
+        .optional()
+        .transform((val) => (val ? sanitizeForStorage(val) : undefined)),
+      website: sanitizedUrl().optional(),
+    });
+
+    export const commentSchema = z.object({
+      content: z
+        .string()
+        .min(1)
+        .max(5000)
+        .transform((val) => sanitizeForStorage(val)),
+      parentId: z.string().uuid().optional(),
+    });
+
+    export const postSchema = z.object({
+      title: z
+        .string()
+        .min(1)
+        .max(200)
+        .transform((val) => stripHtml(val).trim()),
+      content: z
+        .string()
+        .min(1)
+        .max(50000)
+        .transform((val) => sanitizeForStorage(val)),
+      slug: z
+        .string()
+        .regex(/^[a-z0-9-]+$/, "Slug must be lowercase alphanumeric with dashes")
+        .min(1)
+        .max(100),
+    });
+
+    /**
+     * Validate and sanitize input
+     */
+    export function validateInput<T>(
+      schema: z.ZodSchema<T>,
+      input: unknown
+    ): { success: true; data: T } | { success: false; errors: string[] } {
+      const result = schema.safeParse(input);
+
+      if (result.success) {
+        return { success: true, data: result.data };
+      }
+
+      return {
+        success: false,
+        errors: result.error.errors.map(
+          (e) => `${e.path.join(".")}: ${e.message}`
+        ),
+      };
+    }
+
+    /**
+     * SQL injection prevention (for raw queries)
+     */
+    export function escapeSqlString(str: string): string {
+      return str
+        .replace(/\\/g, "\\\\")
+        .replace(/'/g, "\\'")
+        .replace(/"/g, '\\"')
+        .replace(/\n/g, "\\n")
+        .replace(/\r/g, "\\r")
+        .replace(/\t/g, "\\t")
+        .replace(/\0/g, "\\0");
+    }
+
+    /**
+     * NoSQL injection prevention
+     */
+    export function sanitizeMongoInput(input: unknown): unknown {
+      if (typeof input === "string") {
+        // Remove MongoDB operators
+        return input.replace(/\$[a-zA-Z]+/g, "");
+      }
+      if (Array.isArray(input)) {
+        return input.map(sanitizeMongoInput);
+      }
+      if (typeof input === "object" && input !== null) {
+        const sanitized: Record<string, unknown> = {};
+        for (const [key, value] of Object.entries(input)) {
+          // Skip keys that look like operators
+          if (!key.startsWith("$")) {
+            sanitized[key] = sanitizeMongoInput(value);
+          }
+        }
+        return sanitized;
+      }
+      return input;
+    }
+
+  hooks/use-sanitized-input.ts: |
+    "use client";
+
+    import { useState, useCallback, useMemo } from "react";
+    import { stripHtml, sanitizeForStorage } from "@/lib/sanitize";
+
+    interface UseSanitizedInputOptions {
+      /** Maximum length of input */
+      maxLength?: number;
+      /** Whether to strip HTML tags */
+      stripTags?: boolean;
+      /** Custom sanitizer function */
+      sanitizer?: (value: string) => string;
+      /** Debounce delay in ms */
+      debounce?: number;
+    }
+
+    interface UseSanitizedInputResult {
+      value: string;
+      sanitizedValue: string;
+      onChange: (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => void;
+      setValue: (value: string) => void;
+      reset: () => void;
+      isValid: boolean;
+    }
+
+    /**
+     * Hook for handling sanitized input
+     */
+    export function useSanitizedInput(
+      initialValue: string = "",
+      options: UseSanitizedInputOptions = {}
+    ): UseSanitizedInputResult {
+      const {
+        maxLength,
+        stripTags = true,
+        sanitizer = sanitizeForStorage,
+      } = options;
+
+      const [value, setValueState] = useState(initialValue);
+
+      const sanitizedValue = useMemo(() => {
+        let clean = value;
+
+        if (stripTags) {
+          clean = stripHtml(clean);
+        }
+
+        clean = sanitizer(clean);
+
+        if (maxLength && clean.length > maxLength) {
+          clean = clean.slice(0, maxLength);
+        }
+
+        return clean;
+      }, [value, stripTags, sanitizer, maxLength]);
+
+      const onChange = useCallback(
+        (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => {
+          setValueState(e.target.value);
+        },
+        []
+      );
+
+      const setValue = useCallback((newValue: string) => {
+        setValueState(newValue);
+      }, []);
+
+      const reset = useCallback(() => {
+        setValueState(initialValue);
+      }, [initialValue]);
+
+      const isValid = useMemo(() => {
+        if (maxLength && sanitizedValue.length > maxLength) {
+          return false;
+        }
+        return true;
+      }, [sanitizedValue, maxLength]);
+
+      return {
+        value,
+        sanitizedValue,
+        onChange,
+        setValue,
+        reset,
+        isValid,
+      };
+    }
+
+    /**
+     * Hook for form with multiple sanitized fields
+     */
+    export function useSanitizedForm<T extends Record<string, string>>(
+      initialValues: T,
+      fieldOptions: Partial<Record<keyof T, UseSanitizedInputOptions>> = {}
+    ) {
+      const [values, setValues] = useState<T>(initialValues);
+
+      const sanitizedValues = useMemo(() => {
+        const result: Record<string, string> = {};
+
+        for (const [key, value] of Object.entries(values)) {
+          const options = fieldOptions[key as keyof T] || {};
+          let clean = value;
+
+          if (options.stripTags !== false) {
+            clean = stripHtml(clean);
+          }
+
+          if (options.sanitizer) {
+            clean = options.sanitizer(clean);
+          } else {
+            clean = sanitizeForStorage(clean);
+          }
+
+          if (options.maxLength && clean.length > options.maxLength) {
+            clean = clean.slice(0, options.maxLength);
+          }
+
+          result[key] = clean;
+        }
+
+        return result as T;
+      }, [values, fieldOptions]);
+
+      const handleChange = useCallback(
+        (field: keyof T) =>
+          (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => {
+            setValues((prev) => ({ ...prev, [field]: e.target.value }));
+          },
+        []
+      );
+
+      const reset = useCallback(() => {
+        setValues(initialValues);
+      }, [initialValues]);
+
+      return {
+        values,
+        sanitizedValues,
+        handleChange,
+        setValues,
+        reset,
+      };
+    }
+
+  components/safe-html.tsx: |
+    import { sanitizeHtml, SANITIZE_PRESETS } from "@/lib/sanitize";
+
+    type SanitizePreset = keyof typeof SANITIZE_PRESETS;
+
+    interface SafeHtmlProps {
+      /** Raw HTML content to sanitize and render */
+      html: string;
+      /** Sanitization preset */
+      preset?: SanitizePreset;
+      /** HTML element to render as */
+      as?: keyof JSX.IntrinsicElements;
+      /** Additional class names */
+      className?: string;
+    }
+
+    /**
+     * Component for safely rendering HTML content
+     * Sanitizes HTML before rendering to prevent XSS
+     */
+    export function SafeHtml({
+      html,
+      preset = "standard",
+      as: Component = "div",
+      className,
+    }: SafeHtmlProps) {
+      const sanitized = sanitizeHtml(html, preset);
+
+      return (
+        <Component
+          className={className}
+          dangerouslySetInnerHTML={{ __html: sanitized }}
+        />
+      );
+    }
+
+    /**
+     * Render user-generated content with strict sanitization
+     */
+    export function UserContent({
+      content,
+      className,
+    }: {
+      content: string;
+      className?: string;
+    }) {
+      return (
+        <SafeHtml
+          html={content}
+          preset="userContent"
+          className={className}
+        />
+      );
+    }
+
+    /**
+     * Render rich text content (from CMS, etc.)
+     */
+    export function RichContent({
+      content,
+      className,
+    }: {
+      content: string;
+      className?: string;
+    }) {
+      return (
+        <SafeHtml
+          html={content}
+          preset="rich"
+          className={`prose ${className || ""}`}
+        />
+      );
+    }
+
+  app/api/submit/route.ts: |
+    import { NextRequest, NextResponse } from "next/server";
+    import { userInputSchema, validateInput } from "@/lib/validators";
+
+    export async function POST(request: NextRequest) {
+      try {
+        const body = await request.json();
+
+        // Validate and sanitize input
+        const result = validateInput(userInputSchema, body);
+
+        if (!result.success) {
+          return NextResponse.json(
+            { error: "Validation failed", details: result.errors },
+            { status: 400 }
+          );
+        }
+
+        // result.data is now sanitized and type-safe
+        const { name, email, bio, website } = result.data;
+
+        // Safe to use in database queries
+        // await db.user.create({ data: { name, email, bio, website } });
+
+        return NextResponse.json({
+          success: true,
+          data: { name, email, bio, website },
+        });
+      } catch (error) {
+        return NextResponse.json(
+          { error: "Internal server error" },
+          { status: 500 }
+        );
+      }
+    }
+
+edge_cases:
+  - id: unicode-bypass
+    symptom: "XSS payload using unicode encoding"
+    cause: "Unicode characters bypassing sanitization"
+    solution: |
+      Normalize unicode before sanitization:
+      const normalized = input.normalize("NFC");
+      const clean = sanitizeHtml(normalized);
+
+      DOMPurify handles most unicode issues by default.
+
+  - id: mutation-xss
+    symptom: "XSS appears after DOM mutation"
+    cause: "mXSS - mutation-based XSS"
+    solution: |
+      Always sanitize on the server side, not just client.
+      Use the latest DOMPurify version.
+      Set SAFE_FOR_TEMPLATES: true for template contexts.
+
+  - id: data-uri-attack
+    symptom: "XSS via data: URI in image"
+    cause: "Malicious data URI in src attribute"
+    solution: |
+      The sanitize.ts already validates image URLs.
+      For extra security, disallow all data URIs:
+      DOMPurify.sanitize(html, {
+        ALLOW_UNKNOWN_PROTOCOLS: false,
+        FORBID_TAGS: ['svg', 'math'],
+      });
+
+  - id: server-side-sanitization-missing
+    symptom: "XSS stored in database"
+    cause: "Only client-side sanitization applied"
+    solution: |
+      ALWAYS sanitize on the server:
+      // In API route
+      const sanitized = sanitizeForStorage(input);
+      await db.insert({ content: sanitized });
+
+      // Sanitize again on display
+      <SafeHtml html={content} />
+
+validation:
+  manual_test:
+    - "Install isomorphic-dompurify: npm install isomorphic-dompurify"
+    - "Try submitting: <script>alert('xss')</script>"
+    - "Verify script tags are stripped"
+    - "Try: <img src=x onerror=alert('xss')>"
+    - "Verify onerror attribute is removed"
+    - "Try: javascript:alert('xss') in href"
+    - "Verify javascript: URLs are blocked"
+    - "Use SafeHtml component - verify safe rendering"

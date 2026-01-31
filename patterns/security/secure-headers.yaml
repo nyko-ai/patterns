@@ -1,0 +1,384 @@
+id: secure-headers
+version: "1.0.0"
+updated_at: "2026-01-31"
+author: "nyko-team"
+status: beta
+
+name: "Secure Headers Configuration"
+description: "Security headers configuration for Next.js with Helmet.js patterns"
+
+category: security
+tags:
+  - headers
+  - security
+  - helmet
+  - nextjs
+  - csp
+
+difficulty: intermediate
+time_estimate: "15-20 min"
+
+stack:
+  required:
+    - name: "next"
+      version: "^15.1.0"
+      reason: "App Router with next.config headers"
+
+requires: []
+
+enables:
+  - csp-configuration
+
+env_vars:
+  required: []
+  optional:
+    - key: NEXT_PUBLIC_APP_URL
+      description: "Your application URL for CSP"
+      default: "http://localhost:3000"
+
+external_setup: []
+
+files:
+  - path: "next.config.ts"
+    action: modify
+    description: "Security headers configuration"
+    priority: 1
+
+  - path: "lib/security-headers.ts"
+    action: create
+    description: "Security headers utilities"
+    priority: 2
+
+  - path: "middleware.ts"
+    action: create
+    description: "Dynamic security headers"
+    priority: 3
+
+code:
+  lib/security-headers.ts: |
+    /**
+     * Security Headers Configuration
+     * Based on OWASP and Helmet.js recommendations
+     */
+
+    export interface SecurityHeadersConfig {
+      /** Enable Content Security Policy */
+      csp?: boolean;
+      /** Enable HSTS (only in production) */
+      hsts?: boolean;
+      /** Frame options: DENY, SAMEORIGIN, or false to disable */
+      frameOptions?: "DENY" | "SAMEORIGIN" | false;
+      /** Content type sniffing prevention */
+      noSniff?: boolean;
+      /** XSS protection (legacy, but still useful) */
+      xssProtection?: boolean;
+      /** Referrer policy */
+      referrerPolicy?:
+        | "no-referrer"
+        | "no-referrer-when-downgrade"
+        | "origin"
+        | "origin-when-cross-origin"
+        | "same-origin"
+        | "strict-origin"
+        | "strict-origin-when-cross-origin"
+        | "unsafe-url";
+      /** Permissions policy */
+      permissionsPolicy?: Record<string, string[]>;
+    }
+
+    const DEFAULT_CONFIG: SecurityHeadersConfig = {
+      csp: true,
+      hsts: true,
+      frameOptions: "DENY",
+      noSniff: true,
+      xssProtection: true,
+      referrerPolicy: "strict-origin-when-cross-origin",
+      permissionsPolicy: {
+        camera: [],
+        microphone: [],
+        geolocation: [],
+        "interest-cohort": [], // Block FLoC
+      },
+    };
+
+    /**
+     * Generate security headers for next.config.js
+     */
+    export function generateSecurityHeaders(
+      config: SecurityHeadersConfig = {}
+    ): Array<{ key: string; value: string }> {
+      const mergedConfig = { ...DEFAULT_CONFIG, ...config };
+      const headers: Array<{ key: string; value: string }> = [];
+
+      // X-DNS-Prefetch-Control
+      headers.push({
+        key: "X-DNS-Prefetch-Control",
+        value: "on",
+      });
+
+      // Strict-Transport-Security (HSTS)
+      if (mergedConfig.hsts && process.env.NODE_ENV === "production") {
+        headers.push({
+          key: "Strict-Transport-Security",
+          value: "max-age=31536000; includeSubDomains; preload",
+        });
+      }
+
+      // X-Frame-Options
+      if (mergedConfig.frameOptions) {
+        headers.push({
+          key: "X-Frame-Options",
+          value: mergedConfig.frameOptions,
+        });
+      }
+
+      // X-Content-Type-Options
+      if (mergedConfig.noSniff) {
+        headers.push({
+          key: "X-Content-Type-Options",
+          value: "nosniff",
+        });
+      }
+
+      // X-XSS-Protection (legacy but still useful)
+      if (mergedConfig.xssProtection) {
+        headers.push({
+          key: "X-XSS-Protection",
+          value: "1; mode=block",
+        });
+      }
+
+      // Referrer-Policy
+      if (mergedConfig.referrerPolicy) {
+        headers.push({
+          key: "Referrer-Policy",
+          value: mergedConfig.referrerPolicy,
+        });
+      }
+
+      // Permissions-Policy
+      if (mergedConfig.permissionsPolicy) {
+        const policy = Object.entries(mergedConfig.permissionsPolicy)
+          .map(([key, values]) => {
+            if (values.length === 0) {
+              return `${key}=()`;
+            }
+            return `${key}=(${values.join(" ")})`;
+          })
+          .join(", ");
+
+        headers.push({
+          key: "Permissions-Policy",
+          value: policy,
+        });
+      }
+
+      return headers;
+    }
+
+    /**
+     * CSP directives builder
+     */
+    export function buildCspDirectives(
+      nonce?: string
+    ): Record<string, string[]> {
+      const baseDirectives: Record<string, string[]> = {
+        "default-src": ["'self'"],
+        "script-src": [
+          "'self'",
+          nonce ? `'nonce-${nonce}'` : "'unsafe-inline'",
+          "'strict-dynamic'",
+        ],
+        "style-src": ["'self'", "'unsafe-inline'"], // Required for many CSS-in-JS
+        "img-src": ["'self'", "data:", "blob:", "https:"],
+        "font-src": ["'self'", "data:"],
+        "connect-src": [
+          "'self'",
+          process.env.NEXT_PUBLIC_APP_URL || "",
+          "https://api.stripe.com", // If using Stripe
+        ].filter(Boolean),
+        "frame-ancestors": ["'none'"],
+        "base-uri": ["'self'"],
+        "form-action": ["'self'"],
+        "object-src": ["'none'"],
+        "upgrade-insecure-requests":
+          process.env.NODE_ENV === "production" ? [] : [],
+      };
+
+      return baseDirectives;
+    }
+
+    /**
+     * Convert CSP directives to header string
+     */
+    export function cspToString(
+      directives: Record<string, string[]>
+    ): string {
+      return Object.entries(directives)
+        .filter(([, values]) => values.length > 0 || values.length === 0)
+        .map(([key, values]) => {
+          if (values.length === 0) {
+            return key; // For directives like upgrade-insecure-requests
+          }
+          return `${key} ${values.join(" ")}`;
+        })
+        .join("; ");
+    }
+
+    /**
+     * Generate a random nonce for CSP
+     */
+    export function generateNonce(): string {
+      const array = new Uint8Array(16);
+      crypto.getRandomValues(array);
+      return Buffer.from(array).toString("base64");
+    }
+
+  next.config.ts: |
+    import type { NextConfig } from "next";
+    import { generateSecurityHeaders } from "./lib/security-headers";
+
+    const securityHeaders = generateSecurityHeaders({
+      csp: false, // We'll handle CSP in middleware for nonce support
+      hsts: true,
+      frameOptions: "DENY",
+      noSniff: true,
+      xssProtection: true,
+      referrerPolicy: "strict-origin-when-cross-origin",
+      permissionsPolicy: {
+        camera: [],
+        microphone: [],
+        geolocation: [],
+        payment: ["self"], // Allow Payment Request API
+        "interest-cohort": [], // Block FLoC
+      },
+    });
+
+    const nextConfig: NextConfig = {
+      async headers() {
+        return [
+          {
+            // Apply to all routes
+            source: "/:path*",
+            headers: securityHeaders,
+          },
+          {
+            // Stricter headers for API routes
+            source: "/api/:path*",
+            headers: [
+              ...securityHeaders,
+              {
+                key: "Cache-Control",
+                value: "no-store, no-cache, must-revalidate",
+              },
+            ],
+          },
+          {
+            // Allow embedding for specific routes if needed
+            source: "/embed/:path*",
+            headers: securityHeaders.filter(
+              (h) => h.key !== "X-Frame-Options"
+            ),
+          },
+        ];
+      },
+
+      // Other Next.js config...
+      poweredByHeader: false, // Remove X-Powered-By header
+    };
+
+    export default nextConfig;
+
+  middleware.ts: |
+    import { NextResponse, type NextRequest } from "next/server";
+    import {
+      generateNonce,
+      buildCspDirectives,
+      cspToString,
+    } from "@/lib/security-headers";
+
+    export function middleware(request: NextRequest) {
+      const response = NextResponse.next();
+
+      // Generate nonce for CSP
+      const nonce = generateNonce();
+
+      // Build and set CSP header
+      const cspDirectives = buildCspDirectives(nonce);
+      const cspValue = cspToString(cspDirectives);
+
+      response.headers.set("Content-Security-Policy", cspValue);
+
+      // Pass nonce to the page via header (for use in Script components)
+      response.headers.set("x-nonce", nonce);
+
+      // Additional runtime headers
+      response.headers.set("X-Request-Id", crypto.randomUUID());
+
+      return response;
+    }
+
+    export const config = {
+      matcher: [
+        // Apply to all pages except static files
+        "/((?!_next/static|_next/image|favicon.ico|.*\\.(?:svg|png|jpg|jpeg|gif|webp)$).*)",
+      ],
+    };
+
+edge_cases:
+  - id: csp-breaking-inline-scripts
+    symptom: "Inline scripts not executing"
+    cause: "CSP blocking inline scripts"
+    solution: |
+      Use nonce-based CSP:
+      // In your page
+      import Script from 'next/script';
+
+      <Script nonce={nonce} strategy="afterInteractive">
+        {`console.log('Hello')`}
+      </Script>
+
+      Or move scripts to external files.
+
+  - id: third-party-blocked
+    symptom: "Third-party resources not loading"
+    cause: "CSP blocking external sources"
+    solution: |
+      Add trusted domains to CSP:
+      const cspDirectives = {
+        'script-src': ['self', 'https://trusted-cdn.com'],
+        'connect-src': ['self', 'https://api.example.com'],
+      };
+
+  - id: hsts-preload
+    symptom: "HSTS not working on first visit"
+    cause: "HSTS only applied after first secure visit"
+    solution: |
+      Submit your domain to HSTS preload list:
+      1. Ensure HSTS header includes 'preload'
+      2. Visit https://hstspreload.org
+      3. Submit your domain
+
+  - id: iframe-embedding-blocked
+    symptom: "Cannot embed site in iframe"
+    cause: "X-Frame-Options set to DENY"
+    solution: |
+      For specific embeddable routes:
+      // In next.config.ts headers
+      {
+        source: "/embed/:path*",
+        headers: securityHeaders.filter(h => h.key !== "X-Frame-Options"),
+      }
+
+      Or use CSP frame-ancestors for more control.
+
+validation:
+  manual_test:
+    - "Build and start production server"
+    - "Open browser DevTools > Network"
+    - "Check response headers for security headers"
+    - "Visit https://securityheaders.com and enter your URL"
+    - "Verify A+ rating (or close to it)"
+    - "Test that inline scripts work with nonce"
+    - "Verify no CSP violations in console"
+    - "Check https://observatory.mozilla.org for score"
