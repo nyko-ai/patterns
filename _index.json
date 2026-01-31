@@ -1,5 +1,5 @@
 {
-  "version": "1.0.0",
+  "version": "1.6.0",
   "updated_at": "2026-01-31",
   "patterns": [
     {
@@ -584,6 +584,114 @@
       "name": "Feature Flags",
       "description": "Feature flag management with Vercel Edge Config or custom implementation",
       "tags": ["feature-flags", "vercel", "edge-config", "toggles", "ab-testing"],
+      "difficulty": "intermediate",
+      "status": "beta"
+    },
+    {
+      "id": "algolia-setup",
+      "category": "search",
+      "name": "Algolia Search Setup",
+      "description": "Full-text search with Algolia - client setup, indexing, and InstantSearch components",
+      "tags": ["algolia", "search", "full-text", "instant-search", "nextjs"],
+      "difficulty": "intermediate",
+      "status": "beta"
+    },
+    {
+      "id": "meilisearch-setup",
+      "category": "search",
+      "name": "Meilisearch Setup",
+      "description": "Self-hosted full-text search with Meilisearch - setup, indexing, and search components",
+      "tags": ["meilisearch", "search", "full-text", "self-hosted", "nextjs"],
+      "difficulty": "intermediate",
+      "status": "beta"
+    },
+    {
+      "id": "typesense-setup",
+      "category": "search",
+      "name": "Typesense Search Setup",
+      "description": "Self-hosted full-text search with Typesense - setup, indexing, and search components",
+      "tags": ["typesense", "search", "full-text", "self-hosted", "nextjs"],
+      "difficulty": "intermediate",
+      "status": "beta"
+    },
+    {
+      "id": "next-intl-setup",
+      "category": "i18n",
+      "name": "next-intl App Router Setup",
+      "description": "Complete internationalization setup with next-intl for Next.js App Router",
+      "tags": ["next-intl", "i18n", "internationalization", "localization", "app-router"],
+      "difficulty": "intermediate",
+      "status": "beta"
+    },
+    {
+      "id": "language-switcher",
+      "category": "i18n",
+      "name": "Language Switcher Component",
+      "description": "Language switcher components for Next.js with next-intl",
+      "tags": ["i18n", "language-switcher", "next-intl", "localization", "nextjs"],
+      "difficulty": "beginner",
+      "status": "beta"
+    },
+    {
+      "id": "metadata-nextjs",
+      "category": "seo",
+      "name": "Next.js Metadata API",
+      "description": "Complete SEO metadata setup using Next.js 14+ Metadata API",
+      "tags": ["seo", "metadata", "next.js", "open-graph", "twitter-cards"],
+      "difficulty": "beginner",
+      "status": "beta"
+    },
+    {
+      "id": "sitemap-generation",
+      "category": "seo",
+      "name": "Dynamic Sitemap Generation",
+      "description": "Dynamic sitemap.xml generation with Next.js for SEO optimization",
+      "tags": ["seo", "sitemap", "next.js", "indexing", "google"],
+      "difficulty": "intermediate",
+      "status": "beta"
+    },
+    {
+      "id": "structured-data",
+      "category": "seo",
+      "name": "JSON-LD Structured Data",
+      "description": "Schema.org JSON-LD structured data for SEO enhancement",
+      "tags": ["seo", "json-ld", "schema.org", "structured-data", "rich-snippets"],
+      "difficulty": "intermediate",
+      "status": "beta"
+    },
+    {
+      "id": "multi-step-form",
+      "category": "forms",
+      "name": "Multi-Step Form Wizard",
+      "description": "Multi-step wizard form with validation, progress tracking, and navigation",
+      "tags": ["forms", "wizard", "multi-step", "react-hook-form", "validation"],
+      "difficulty": "intermediate",
+      "status": "beta"
+    },
+    {
+      "id": "file-upload-form",
+      "category": "forms",
+      "name": "File Upload Form",
+      "description": "File upload form with drag-and-drop, preview, progress, and validation",
+      "tags": ["forms", "file-upload", "drag-and-drop", "preview", "react-hook-form"],
+      "difficulty": "intermediate",
+      "status": "beta"
+    },
+    {
+      "id": "autosave-form",
+      "category": "forms",
+      "name": "Autosave Draft Form",
+      "description": "Form with automatic draft saving to localStorage and server sync",
+      "tags": ["forms", "autosave", "draft", "localStorage", "react-hook-form"],
+      "difficulty": "intermediate",
+      "status": "beta"
+    },
+    {
+      "id": "dynamic-form-fields",
+      "category": "forms",
+      "name": "Dynamic Form Fields",
+      "description": "Dynamic add/remove field arrays with react-hook-form useFieldArray",
+      "tags": ["forms", "dynamic-fields", "field-array", "react-hook-form", "validation"],
       "difficulty": "intermediate",
       "status": "beta"
     }
