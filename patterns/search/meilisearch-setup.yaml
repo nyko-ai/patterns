@@ -1,0 +1,596 @@
+id: meilisearch-setup
+name: Meilisearch Setup
+description: Self-hosted full-text search with Meilisearch - setup, indexing, and search components
+category: search
+tags:
+  - meilisearch
+  - search
+  - full-text
+  - self-hosted
+  - nextjs
+dependencies:
+  - meilisearch: "^0.55.0"
+files:
+  - path: lib/meilisearch/client.ts
+    description: Meilisearch client configuration
+    content: |
+      import { MeiliSearch, Index } from 'meilisearch';
+
+      if (!process.env.MEILISEARCH_HOST) {
+        throw new Error('Missing MEILISEARCH_HOST');
+      }
+
+      // Client instance
+      export const meiliClient = new MeiliSearch({
+        host: process.env.MEILISEARCH_HOST,
+        apiKey: process.env.MEILISEARCH_API_KEY,
+      });
+
+      // Index names
+      export const INDICES = {
+        products: 'products',
+        articles: 'articles',
+        users: 'users',
+      } as const;
+
+      export type IndexName = keyof typeof INDICES;
+
+      // Get typed index
+      export function getIndex<T extends Record<string, any>>(
+        indexName: IndexName
+      ): Index<T> {
+        return meiliClient.index<T>(INDICES[indexName]);
+      }
+
+  - path: lib/meilisearch/setup.ts
+    description: Index setup and configuration
+    content: |
+      import { meiliClient, INDICES, IndexName } from './client';
+
+      interface IndexSettings {
+        searchableAttributes: string[];
+        filterableAttributes: string[];
+        sortableAttributes: string[];
+        displayedAttributes?: string[];
+        rankingRules?: string[];
+        stopWords?: string[];
+        synonyms?: Record<string, string[]>;
+        typoTolerance?: {
+          enabled?: boolean;
+          minWordSizeForTypos?: {
+            oneTypo?: number;
+            twoTypos?: number;
+          };
+        };
+      }
+
+      const indexConfigs: Record<IndexName, IndexSettings> = {
+        products: {
+          searchableAttributes: ['title', 'description', 'category', 'tags'],
+          filterableAttributes: ['category', 'price', 'inStock', 'tags'],
+          sortableAttributes: ['price', 'createdAt', 'popularity'],
+          rankingRules: [
+            'words',
+            'typo',
+            'proximity',
+            'attribute',
+            'sort',
+            'exactness',
+            'popularity:desc',
+          ],
+          typoTolerance: {
+            enabled: true,
+            minWordSizeForTypos: {
+              oneTypo: 4,
+              twoTypos: 8,
+            },
+          },
+        },
+        articles: {
+          searchableAttributes: ['title', 'content', 'author', 'tags'],
+          filterableAttributes: ['author', 'category', 'publishedAt', 'tags'],
+          sortableAttributes: ['publishedAt', 'views'],
+        },
+        users: {
+          searchableAttributes: ['name', 'email', 'bio'],
+          filterableAttributes: ['role', 'verified', 'createdAt'],
+          sortableAttributes: ['createdAt', 'name'],
+        },
+      };
+
+      // Create and configure all indices
+      export async function setupIndices() {
+        for (const [name, settings] of Object.entries(indexConfigs)) {
+          const indexName = INDICES[name as IndexName];
+
+          // Create index if not exists
+          try {
+            await meiliClient.createIndex(indexName, { primaryKey: 'id' });
+            console.log(`Created index: ${indexName}`);
+          } catch (error: any) {
+            if (error.code !== 'index_already_exists') {
+              throw error;
+            }
+            console.log(`Index already exists: ${indexName}`);
+          }
+
+          // Update settings
+          const index = meiliClient.index(indexName);
+          await index.updateSettings(settings);
+          console.log(`Configured index: ${indexName}`);
+        }
+      }
+
+      // Setup single index
+      export async function setupIndex(indexName: IndexName) {
+        const name = INDICES[indexName];
+        const settings = indexConfigs[indexName];
+
+        try {
+          await meiliClient.createIndex(name, { primaryKey: 'id' });
+        } catch (error: any) {
+          if (error.code !== 'index_already_exists') {
+            throw error;
+          }
+        }
+
+        const index = meiliClient.index(name);
+        await index.updateSettings(settings);
+
+        return index;
+      }
+
+      // Get index stats
+      export async function getIndexStats(indexName: IndexName) {
+        const index = meiliClient.index(INDICES[indexName]);
+        return index.getStats();
+      }
+
+      // Get all stats
+      export async function getAllStats() {
+        return meiliClient.getStats();
+      }
+
+  - path: lib/meilisearch/indexer.ts
+    description: Document indexing utilities
+    content: |
+      import { getIndex, IndexName } from './client';
+
+      // Add or update documents
+      export async function indexDocuments<T extends { id: string }>(
+        indexName: IndexName,
+        documents: T[]
+      ) {
+        const index = getIndex<T>(indexName);
+        const task = await index.addDocuments(documents);
+
+        // Wait for task completion
+        await index.waitForTask(task.taskUid);
+
+        console.log(`Indexed ${documents.length} documents to ${indexName}`);
+        return task;
+      }
+
+      // Update specific documents
+      export async function updateDocuments<T extends { id: string }>(
+        indexName: IndexName,
+        documents: Partial<T>[]
+      ) {
+        const index = getIndex<T>(indexName);
+        const task = await index.updateDocuments(documents);
+
+        await index.waitForTask(task.taskUid);
+
+        console.log(`Updated ${documents.length} documents in ${indexName}`);
+        return task;
+      }
+
+      // Delete documents
+      export async function deleteDocuments(
+        indexName: IndexName,
+        ids: string[]
+      ) {
+        const index = getIndex(indexName);
+        const task = await index.deleteDocuments(ids);
+
+        await index.waitForTask(task.taskUid);
+
+        console.log(`Deleted ${ids.length} documents from ${indexName}`);
+        return task;
+      }
+
+      // Delete all documents
+      export async function clearIndex(indexName: IndexName) {
+        const index = getIndex(indexName);
+        const task = await index.deleteAllDocuments();
+
+        await index.waitForTask(task.taskUid);
+
+        console.log(`Cleared index ${indexName}`);
+        return task;
+      }
+
+      // Batch indexing with progress
+      export async function batchIndex<T extends { id: string }>(
+        indexName: IndexName,
+        documents: T[],
+        batchSize = 1000,
+        onProgress?: (indexed: number, total: number) => void
+      ) {
+        const index = getIndex<T>(indexName);
+        const total = documents.length;
+        let indexed = 0;
+
+        for (let i = 0; i < documents.length; i += batchSize) {
+          const batch = documents.slice(i, i + batchSize);
+          const task = await index.addDocuments(batch);
+          await index.waitForTask(task.taskUid);
+
+          indexed += batch.length;
+          onProgress?.(indexed, total);
+        }
+
+        console.log(`Batch indexed ${total} documents to ${indexName}`);
+      }
+
+  - path: components/search/meilisearch.tsx
+    description: Meilisearch search component
+    content: |
+      'use client';
+
+      import { useState, useEffect, useCallback } from 'react';
+      import { useDebounce } from '@/hooks/use-debounce';
+
+      interface SearchResult {
+        id: string;
+        title: string;
+        description: string;
+        category?: string;
+        _formatted?: {
+          title?: string;
+          description?: string;
+        };
+      }
+
+      interface SearchResponse {
+        hits: SearchResult[];
+        query: string;
+        processingTimeMs: number;
+        estimatedTotalHits: number;
+      }
+
+      interface MeiliSearchProps {
+        index?: string;
+        placeholder?: string;
+        filters?: string;
+        limit?: number;
+        onSelect?: (result: SearchResult) => void;
+      }
+
+      export function MeiliSearch({
+        index = 'products',
+        placeholder = 'Search...',
+        filters,
+        limit = 20,
+        onSelect,
+      }: MeiliSearchProps) {
+        const [query, setQuery] = useState('');
+        const [results, setResults] = useState<SearchResponse | null>(null);
+        const [loading, setLoading] = useState(false);
+        const [error, setError] = useState<string | null>(null);
+
+        const debouncedQuery = useDebounce(query, 300);
+
+        const search = useCallback(async () => {
+          if (!debouncedQuery.trim()) {
+            setResults(null);
+            return;
+          }
+
+          setLoading(true);
+          setError(null);
+
+          try {
+            const params = new URLSearchParams({
+              q: debouncedQuery,
+              index,
+              limit: String(limit),
+            });
+
+            if (filters) {
+              params.set('filters', filters);
+            }
+
+            const response = await fetch(`/api/search?${params}`);
+
+            if (!response.ok) {
+              throw new Error('Search failed');
+            }
+
+            const data = await response.json();
+            setResults(data);
+          } catch (err) {
+            setError(err instanceof Error ? err.message : 'Search failed');
+          } finally {
+            setLoading(false);
+          }
+        }, [debouncedQuery, index, filters, limit]);
+
+        useEffect(() => {
+          search();
+        }, [search]);
+
+        return (
+          <div className="w-full max-w-2xl mx-auto">
+            {/* Search Input */}
+            <div className="relative">
+              <input
+                type="text"
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                placeholder={placeholder}
+                className="w-full px-4 py-3 pl-10 border rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+              />
+              <svg
+                className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-gray-400"
+                fill="none"
+                stroke="currentColor"
+                viewBox="0 0 24 24"
+              >
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  strokeWidth={2}
+                  d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"
+                />
+              </svg>
+              {loading && (
+                <div className="absolute right-3 top-1/2 -translate-y-1/2">
+                  <div className="w-5 h-5 border-2 border-blue-500 border-t-transparent rounded-full animate-spin" />
+                </div>
+              )}
+            </div>
+
+            {/* Error */}
+            {error && (
+              <div className="mt-2 p-3 bg-red-50 text-red-600 rounded-lg">
+                {error}
+              </div>
+            )}
+
+            {/* Results */}
+            {results && results.hits.length > 0 && (
+              <div className="mt-4 space-y-3">
+                <p className="text-sm text-gray-500">
+                  {results.estimatedTotalHits} results in {results.processingTimeMs}ms
+                </p>
+
+                {results.hits.map((hit) => (
+                  <button
+                    key={hit.id}
+                    onClick={() => onSelect?.(hit)}
+                    className="w-full p-4 text-left border rounded-lg hover:shadow-md transition-shadow"
+                  >
+                    <h3
+                      className="text-lg font-semibold"
+                      dangerouslySetInnerHTML={{
+                        __html: hit._formatted?.title || hit.title,
+                      }}
+                    />
+                    <p
+                      className="text-gray-600 mt-1"
+                      dangerouslySetInnerHTML={{
+                        __html: hit._formatted?.description || hit.description,
+                      }}
+                    />
+                    {hit.category && (
+                      <span className="inline-block mt-2 px-2 py-1 bg-gray-100 text-sm rounded">
+                        {hit.category}
+                      </span>
+                    )}
+                  </button>
+                ))}
+              </div>
+            )}
+
+            {/* Empty State */}
+            {results && results.hits.length === 0 && debouncedQuery && (
+              <div className="mt-4 p-8 text-center text-gray-500">
+                No results found for "{debouncedQuery}"
+              </div>
+            )}
+          </div>
+        );
+      }
+
+  - path: app/api/search/route.ts
+    description: Search API endpoint
+    content: |
+      import { NextRequest, NextResponse } from 'next/server';
+      import { getIndex, IndexName, INDICES } from '@/lib/meilisearch/client';
+
+      export async function GET(request: NextRequest) {
+        const searchParams = request.nextUrl.searchParams;
+
+        const query = searchParams.get('q') || '';
+        const indexName = searchParams.get('index') as IndexName || 'products';
+        const limit = parseInt(searchParams.get('limit') || '20');
+        const offset = parseInt(searchParams.get('offset') || '0');
+        const filters = searchParams.get('filters') || undefined;
+        const sort = searchParams.get('sort')?.split(',') || undefined;
+
+        // Validate index name
+        if (!INDICES[indexName]) {
+          return NextResponse.json(
+            { error: 'Invalid index name' },
+            { status: 400 }
+          );
+        }
+
+        try {
+          const index = getIndex(indexName);
+
+          const results = await index.search(query, {
+            limit,
+            offset,
+            filter: filters,
+            sort,
+            attributesToHighlight: ['title', 'description'],
+            highlightPreTag: '<mark>',
+            highlightPostTag: '</mark>',
+          });
+
+          return NextResponse.json(results);
+        } catch (error) {
+          console.error('Search error:', error);
+          return NextResponse.json(
+            { error: 'Search failed' },
+            { status: 500 }
+          );
+        }
+      }
+
+  - path: app/api/search/index/route.ts
+    description: Indexing API endpoint
+    content: |
+      import { NextRequest, NextResponse } from 'next/server';
+      import { indexDocuments, deleteDocuments } from '@/lib/meilisearch/indexer';
+      import { IndexName, INDICES } from '@/lib/meilisearch/client';
+
+      // Protect with API key
+      function validateAuth(request: NextRequest): boolean {
+        const authHeader = request.headers.get('authorization');
+        return authHeader === `Bearer ${process.env.INDEX_API_KEY}`;
+      }
+
+      // Add documents
+      export async function POST(request: NextRequest) {
+        if (!validateAuth(request)) {
+          return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+        }
+
+        try {
+          const { index, documents } = await request.json();
+
+          if (!INDICES[index as IndexName]) {
+            return NextResponse.json(
+              { error: 'Invalid index name' },
+              { status: 400 }
+            );
+          }
+
+          await indexDocuments(index, documents);
+
+          return NextResponse.json({
+            success: true,
+            indexed: documents.length,
+          });
+        } catch (error) {
+          console.error('Index error:', error);
+          return NextResponse.json(
+            { error: 'Indexing failed' },
+            { status: 500 }
+          );
+        }
+      }
+
+      // Delete documents
+      export async function DELETE(request: NextRequest) {
+        if (!validateAuth(request)) {
+          return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+        }
+
+        try {
+          const { index, ids } = await request.json();
+
+          if (!INDICES[index as IndexName]) {
+            return NextResponse.json(
+              { error: 'Invalid index name' },
+              { status: 400 }
+            );
+          }
+
+          await deleteDocuments(index, ids);
+
+          return NextResponse.json({
+            success: true,
+            deleted: ids.length,
+          });
+        } catch (error) {
+          console.error('Delete error:', error);
+          return NextResponse.json(
+            { error: 'Delete failed' },
+            { status: 500 }
+          );
+        }
+      }
+
+  - path: scripts/setup-meilisearch.ts
+    description: Setup script for indices
+    content: |
+      import { setupIndices, getAllStats } from '@/lib/meilisearch/setup';
+
+      async function main() {
+        console.log('Setting up Meilisearch indices...\n');
+
+        try {
+          await setupIndices();
+
+          console.log('\nGetting stats...');
+          const stats = await getAllStats();
+          console.log('Stats:', JSON.stringify(stats, null, 2));
+
+          console.log('\n✅ Meilisearch setup complete!');
+        } catch (error) {
+          console.error('Setup failed:', error);
+          process.exit(1);
+        }
+      }
+
+      main();
+
+external_setup:
+  - step: Install Meilisearch
+    details: |
+      # Docker (recommended)
+      docker run -d --name meilisearch \
+        -p 7700:7700 \
+        -e MEILI_MASTER_KEY='your-master-key' \
+        -v $(pwd)/meili_data:/meili_data \
+        getmeili/meilisearch:latest
+
+      # Or use Meilisearch Cloud at https://cloud.meilisearch.com
+  - step: Set environment variables
+    details: |
+      # .env.local
+      MEILISEARCH_HOST=http://localhost:7700
+      MEILISEARCH_API_KEY=your-master-key
+      INDEX_API_KEY=your-index-secret
+  - step: Run setup script
+    details: npx tsx scripts/setup-meilisearch.ts
+  - step: Docker Compose for development
+    details: |
+      # docker-compose.yml
+      services:
+        meilisearch:
+          image: getmeili/meilisearch:latest
+          ports:
+            - "7700:7700"
+          environment:
+            - MEILI_MASTER_KEY=${MEILI_MASTER_KEY}
+          volumes:
+            - meili_data:/meili_data
+      volumes:
+        meili_data:
+
+edge_cases:
+  - case: Meilisearch not running
+    solution: Check Docker container status, implement health check endpoint
+  - case: Large dataset initial sync
+    solution: Use batchIndex with progress callback, run as background job
+  - case: Real-time sync failures
+    solution: Implement retry queue for failed index operations
+  - case: Index out of sync
+    solution: Schedule periodic full reindex, track sync timestamps
+  - case: Typo tolerance too aggressive
+    solution: Configure typoTolerance settings per index, set minWordSizeForTypos

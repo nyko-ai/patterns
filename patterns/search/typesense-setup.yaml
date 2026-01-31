@@ -1,0 +1,413 @@
+id: typesense-setup
+name: Typesense Search Setup
+description: Self-hosted full-text search with Typesense - setup, indexing, and search components
+category: search
+tags:
+  - typesense
+  - search
+  - full-text
+  - self-hosted
+  - nextjs
+dependencies:
+  - typesense: "^2.1.0"
+files:
+  - path: lib/typesense/client.ts
+    description: Typesense client configuration
+    content: |
+      import Typesense from 'typesense';
+
+      if (!process.env.TYPESENSE_HOST) {
+        throw new Error('Missing TYPESENSE_HOST');
+      }
+      if (!process.env.TYPESENSE_API_KEY) {
+        throw new Error('Missing TYPESENSE_API_KEY');
+      }
+
+      export const typesenseClient = new Typesense.Client({
+        nodes: [
+          {
+            host: process.env.TYPESENSE_HOST,
+            port: parseInt(process.env.TYPESENSE_PORT || '8108'),
+            protocol: process.env.TYPESENSE_PROTOCOL || 'http',
+          },
+        ],
+        apiKey: process.env.TYPESENSE_API_KEY,
+        connectionTimeoutSeconds: 2,
+      });
+
+      // Collection names
+      export const COLLECTIONS = {
+        products: 'products',
+        articles: 'articles',
+        users: 'users',
+      } as const;
+
+      export type CollectionName = keyof typeof COLLECTIONS;
+
+  - path: lib/typesense/schemas.ts
+    description: Collection schemas
+    content: |
+      import { CollectionCreateSchema } from 'typesense/lib/Typesense/Collections';
+
+      export const productSchema: CollectionCreateSchema = {
+        name: 'products',
+        fields: [
+          { name: 'id', type: 'string' },
+          { name: 'title', type: 'string' },
+          { name: 'description', type: 'string' },
+          { name: 'category', type: 'string', facet: true },
+          { name: 'tags', type: 'string[]', facet: true },
+          { name: 'price', type: 'float', facet: true },
+          { name: 'inStock', type: 'bool', facet: true },
+          { name: 'popularity', type: 'int32' },
+          { name: 'createdAt', type: 'int64' },
+        ],
+        default_sorting_field: 'popularity',
+      };
+
+      export const articleSchema: CollectionCreateSchema = {
+        name: 'articles',
+        fields: [
+          { name: 'id', type: 'string' },
+          { name: 'title', type: 'string' },
+          { name: 'content', type: 'string' },
+          { name: 'author', type: 'string', facet: true },
+          { name: 'category', type: 'string', facet: true },
+          { name: 'tags', type: 'string[]', facet: true },
+          { name: 'publishedAt', type: 'int64' },
+          { name: 'views', type: 'int32' },
+        ],
+        default_sorting_field: 'publishedAt',
+      };
+
+  - path: lib/typesense/setup.ts
+    description: Collection setup utilities
+    content: |
+      import { typesenseClient, COLLECTIONS, CollectionName } from './client';
+      import { productSchema, articleSchema } from './schemas';
+      import { CollectionCreateSchema } from 'typesense/lib/Typesense/Collections';
+
+      const schemas: Record<CollectionName, CollectionCreateSchema> = {
+        products: productSchema,
+        articles: articleSchema,
+        users: {
+          name: 'users',
+          fields: [
+            { name: 'id', type: 'string' },
+            { name: 'name', type: 'string' },
+            { name: 'email', type: 'string' },
+            { name: 'bio', type: 'string', optional: true },
+            { name: 'role', type: 'string', facet: true },
+            { name: 'verified', type: 'bool', facet: true },
+            { name: 'createdAt', type: 'int64' },
+          ],
+          default_sorting_field: 'createdAt',
+        },
+      };
+
+      export async function createCollection(name: CollectionName) {
+        const schema = schemas[name];
+
+        try {
+          await typesenseClient.collections(COLLECTIONS[name]).retrieve();
+          console.log(`Collection ${name} already exists`);
+        } catch (error: any) {
+          if (error.httpStatus === 404) {
+            await typesenseClient.collections().create(schema);
+            console.log(`Created collection ${name}`);
+          } else {
+            throw error;
+          }
+        }
+      }
+
+      export async function setupAllCollections() {
+        for (const name of Object.keys(COLLECTIONS) as CollectionName[]) {
+          await createCollection(name);
+        }
+      }
+
+      export async function deleteCollection(name: CollectionName) {
+        try {
+          await typesenseClient.collections(COLLECTIONS[name]).delete();
+          console.log(`Deleted collection ${name}`);
+        } catch (error: any) {
+          if (error.httpStatus !== 404) {
+            throw error;
+          }
+        }
+      }
+
+  - path: lib/typesense/indexer.ts
+    description: Document indexing utilities
+    content: |
+      import { typesenseClient, COLLECTIONS, CollectionName } from './client';
+
+      export async function indexDocuments<T extends { id: string }>(
+        collectionName: CollectionName,
+        documents: T[]
+      ) {
+        const collection = typesenseClient.collections(COLLECTIONS[collectionName]);
+
+        const results = await collection.documents().import(documents, {
+          action: 'upsert',
+        });
+
+        const errors = results.filter((r) => !r.success);
+        if (errors.length > 0) {
+          console.error('Indexing errors:', errors);
+        }
+
+        console.log(`Indexed ${documents.length - errors.length} documents to ${collectionName}`);
+        return results;
+      }
+
+      export async function deleteDocument(
+        collectionName: CollectionName,
+        id: string
+      ) {
+        const collection = typesenseClient.collections(COLLECTIONS[collectionName]);
+        await collection.documents(id).delete();
+        console.log(`Deleted document ${id} from ${collectionName}`);
+      }
+
+      export async function deleteDocuments(
+        collectionName: CollectionName,
+        filter: string
+      ) {
+        const collection = typesenseClient.collections(COLLECTIONS[collectionName]);
+        const result = await collection.documents().delete({ filter_by: filter });
+        console.log(`Deleted ${result.num_deleted} documents from ${collectionName}`);
+        return result;
+      }
+
+  - path: components/search/typesense-search.tsx
+    description: Typesense search component
+    content: |
+      'use client';
+
+      import { useState, useEffect, useCallback } from 'react';
+      import { useDebounce } from '@/hooks/use-debounce';
+
+      interface SearchResult {
+        id: string;
+        title: string;
+        description: string;
+        category?: string;
+        highlights?: Array<{
+          field: string;
+          snippet: string;
+        }>;
+      }
+
+      interface TypesenseSearchProps {
+        collection?: string;
+        placeholder?: string;
+        filters?: string;
+        limit?: number;
+        onSelect?: (result: SearchResult) => void;
+      }
+
+      export function TypesenseSearch({
+        collection = 'products',
+        placeholder = 'Search...',
+        filters,
+        limit = 20,
+        onSelect,
+      }: TypesenseSearchProps) {
+        const [query, setQuery] = useState('');
+        const [results, setResults] = useState<SearchResult[]>([]);
+        const [loading, setLoading] = useState(false);
+        const [error, setError] = useState<string | null>(null);
+
+        const debouncedQuery = useDebounce(query, 300);
+
+        const search = useCallback(async () => {
+          if (!debouncedQuery.trim()) {
+            setResults([]);
+            return;
+          }
+
+          setLoading(true);
+          setError(null);
+
+          try {
+            const params = new URLSearchParams({
+              q: debouncedQuery,
+              collection,
+              limit: String(limit),
+            });
+
+            if (filters) {
+              params.set('filters', filters);
+            }
+
+            const response = await fetch(`/api/search?${params}`);
+
+            if (!response.ok) {
+              throw new Error('Search failed');
+            }
+
+            const data = await response.json();
+            setResults(data.hits || []);
+          } catch (err) {
+            setError(err instanceof Error ? err.message : 'Search failed');
+          } finally {
+            setLoading(false);
+          }
+        }, [debouncedQuery, collection, filters, limit]);
+
+        useEffect(() => {
+          search();
+        }, [search]);
+
+        return (
+          <div className="w-full max-w-2xl mx-auto">
+            <div className="relative">
+              <input
+                type="text"
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                placeholder={placeholder}
+                className="w-full px-4 py-3 pl-10 border rounded-lg focus:ring-2 focus:ring-blue-500"
+              />
+              <svg
+                className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-gray-400"
+                fill="none"
+                stroke="currentColor"
+                viewBox="0 0 24 24"
+              >
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  strokeWidth={2}
+                  d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"
+                />
+              </svg>
+              {loading && (
+                <div className="absolute right-3 top-1/2 -translate-y-1/2">
+                  <div className="w-5 h-5 border-2 border-blue-500 border-t-transparent rounded-full animate-spin" />
+                </div>
+              )}
+            </div>
+
+            {error && (
+              <div className="mt-2 p-3 bg-red-50 text-red-600 rounded-lg">
+                {error}
+              </div>
+            )}
+
+            {results.length > 0 && (
+              <div className="mt-4 space-y-2">
+                {results.map((result) => (
+                  <button
+                    key={result.id}
+                    onClick={() => onSelect?.(result)}
+                    className="w-full p-4 text-left border rounded-lg hover:shadow-md transition-shadow"
+                  >
+                    <h3 className="font-semibold">{result.title}</h3>
+                    <p className="text-gray-600 text-sm mt-1">{result.description}</p>
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+        );
+      }
+
+  - path: app/api/search/route.ts
+    description: Search API endpoint
+    content: |
+      import { NextRequest, NextResponse } from 'next/server';
+      import { typesenseClient, COLLECTIONS, CollectionName } from '@/lib/typesense/client';
+
+      export async function GET(request: NextRequest) {
+        const searchParams = request.nextUrl.searchParams;
+
+        const query = searchParams.get('q') || '*';
+        const collectionName = searchParams.get('collection') as CollectionName || 'products';
+        const limit = parseInt(searchParams.get('limit') || '20');
+        const page = parseInt(searchParams.get('page') || '1');
+        const filters = searchParams.get('filters') || undefined;
+
+        if (!COLLECTIONS[collectionName]) {
+          return NextResponse.json({ error: 'Invalid collection' }, { status: 400 });
+        }
+
+        try {
+          const results = await typesenseClient
+            .collections(COLLECTIONS[collectionName])
+            .documents()
+            .search({
+              q: query,
+              query_by: 'title,description',
+              filter_by: filters,
+              per_page: limit,
+              page,
+              highlight_full_fields: 'title,description',
+            });
+
+          const hits = results.hits?.map((hit) => ({
+            id: hit.document.id,
+            ...hit.document,
+            highlights: hit.highlights,
+          })) || [];
+
+          return NextResponse.json({
+            hits,
+            found: results.found,
+            page: results.page,
+            totalPages: Math.ceil((results.found || 0) / limit),
+          });
+        } catch (error) {
+          console.error('Search error:', error);
+          return NextResponse.json({ error: 'Search failed' }, { status: 500 });
+        }
+      }
+
+external_setup:
+  - step: Install Typesense
+    details: |
+      # Docker
+      docker run -d --name typesense \
+        -p 8108:8108 \
+        -v $(pwd)/typesense-data:/data \
+        typesense/typesense:27.1 \
+        --data-dir=/data \
+        --api-key=your-api-key
+  - step: Set environment variables
+    details: |
+      # .env.local
+      TYPESENSE_HOST=localhost
+      TYPESENSE_PORT=8108
+      TYPESENSE_PROTOCOL=http
+      TYPESENSE_API_KEY=your-api-key
+  - step: Create collections
+    details: npx tsx scripts/setup-typesense.ts
+  - step: Docker Compose
+    details: |
+      # docker-compose.yml
+      services:
+        typesense:
+          image: typesense/typesense:27.1
+          ports:
+            - "8108:8108"
+          environment:
+            - TYPESENSE_API_KEY=${TYPESENSE_API_KEY}
+            - TYPESENSE_DATA_DIR=/data
+          volumes:
+            - typesense_data:/data
+      volumes:
+        typesense_data:
+
+edge_cases:
+  - case: Typesense not running
+    solution: Add health check endpoint, show user-friendly error
+  - case: Collection not found
+    solution: Auto-create collection on first index, or run setup script
+  - case: Large dataset sync
+    solution: Use batch imports with action=upsert for incremental updates
+  - case: Real-time updates
+    solution: Index on create/update, delete on remove in your API routes
+  - case: Typo tolerance tuning
+    solution: Configure typo_tokens_threshold per collection based on field length

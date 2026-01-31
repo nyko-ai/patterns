@@ -1,0 +1,437 @@
+id: algolia-setup
+name: Algolia Search Setup
+description: Full-text search with Algolia - client setup, indexing, and search components
+category: search
+tags:
+  - algolia
+  - search
+  - full-text
+  - instant-search
+  - nextjs
+dependencies:
+  - algoliasearch: "^5.47.0"
+  - react-instantsearch: "^7.17.0"
+files:
+  - path: lib/algolia/client.ts
+    description: Algolia client configuration
+    content: |
+      import algoliasearch from 'algoliasearch';
+
+      if (!process.env.NEXT_PUBLIC_ALGOLIA_APP_ID) {
+        throw new Error('Missing NEXT_PUBLIC_ALGOLIA_APP_ID');
+      }
+      if (!process.env.NEXT_PUBLIC_ALGOLIA_SEARCH_KEY) {
+        throw new Error('Missing NEXT_PUBLIC_ALGOLIA_SEARCH_KEY');
+      }
+
+      // Client for search (public, read-only)
+      export const searchClient = algoliasearch(
+        process.env.NEXT_PUBLIC_ALGOLIA_APP_ID,
+        process.env.NEXT_PUBLIC_ALGOLIA_SEARCH_KEY
+      );
+
+      // Index names
+      export const INDICES = {
+        products: 'products',
+        articles: 'articles',
+        users: 'users',
+      } as const;
+
+      export type IndexName = keyof typeof INDICES;
+
+  - path: lib/algolia/admin.ts
+    description: Algolia admin client for indexing (server-side only)
+    content: |
+      import algoliasearch from 'algoliasearch';
+      import { INDICES } from './client';
+
+      if (!process.env.ALGOLIA_APP_ID) {
+        throw new Error('Missing ALGOLIA_APP_ID');
+      }
+      if (!process.env.ALGOLIA_ADMIN_KEY) {
+        throw new Error('Missing ALGOLIA_ADMIN_KEY');
+      }
+
+      // Admin client for indexing (private, server-side only)
+      const adminClient = algoliasearch(
+        process.env.ALGOLIA_APP_ID,
+        process.env.ALGOLIA_ADMIN_KEY
+      );
+
+      // Get index with proper typing
+      export function getIndex(indexName: keyof typeof INDICES) {
+        return adminClient.initIndex(INDICES[indexName]);
+      }
+
+      // Index configuration
+      export async function configureIndex(indexName: keyof typeof INDICES) {
+        const index = getIndex(indexName);
+
+        await index.setSettings({
+          searchableAttributes: [
+            'title',
+            'description',
+            'content',
+            'tags',
+          ],
+          attributesForFaceting: [
+            'filterOnly(category)',
+            'searchable(tags)',
+            'price',
+          ],
+          customRanking: [
+            'desc(popularity)',
+            'desc(date)',
+          ],
+          highlightPreTag: '<mark>',
+          highlightPostTag: '</mark>',
+          hitsPerPage: 20,
+          paginationLimitedTo: 1000,
+        });
+
+        console.log(`Index ${indexName} configured successfully`);
+      }
+
+      // Batch indexing
+      export async function indexObjects<T extends { id: string }>(
+        indexName: keyof typeof INDICES,
+        objects: T[]
+      ) {
+        const index = getIndex(indexName);
+
+        const objectsWithId = objects.map((obj) => ({
+          ...obj,
+          objectID: obj.id,
+        }));
+
+        const { objectIDs } = await index.saveObjects(objectsWithId);
+        console.log(`Indexed ${objectIDs.length} objects to ${indexName}`);
+
+        return objectIDs;
+      }
+
+      // Delete objects
+      export async function deleteObjects(
+        indexName: keyof typeof INDICES,
+        objectIDs: string[]
+      ) {
+        const index = getIndex(indexName);
+        await index.deleteObjects(objectIDs);
+        console.log(`Deleted ${objectIDs.length} objects from ${indexName}`);
+      }
+
+      // Clear index
+      export async function clearIndex(indexName: keyof typeof INDICES) {
+        const index = getIndex(indexName);
+        await index.clearObjects();
+        console.log(`Cleared index ${indexName}`);
+      }
+
+  - path: components/search/algolia-search.tsx
+    description: Algolia InstantSearch component
+    content: |
+      'use client';
+
+      import { InstantSearch, SearchBox, Hits, Highlight, RefinementList, Pagination, Stats } from 'react-instantsearch';
+      import { searchClient, INDICES } from '@/lib/algolia/client';
+
+      interface HitProps {
+        hit: {
+          objectID: string;
+          title: string;
+          description: string;
+          category: string;
+          image?: string;
+        };
+      }
+
+      function Hit({ hit }: HitProps) {
+        return (
+          <article className="p-4 border rounded-lg hover:shadow-md transition-shadow">
+            {hit.image && (
+              <img
+                src={hit.image}
+                alt={hit.title}
+                className="w-full h-48 object-cover rounded mb-3"
+              />
+            )}
+            <h3 className="text-lg font-semibold">
+              <Highlight attribute="title" hit={hit} />
+            </h3>
+            <p className="text-gray-600 mt-1">
+              <Highlight attribute="description" hit={hit} />
+            </p>
+            <span className="inline-block mt-2 px-2 py-1 bg-gray-100 text-sm rounded">
+              {hit.category}
+            </span>
+          </article>
+        );
+      }
+
+      interface AlgoliaSearchProps {
+        indexName?: keyof typeof INDICES;
+        placeholder?: string;
+        showFilters?: boolean;
+      }
+
+      export function AlgoliaSearch({
+        indexName = 'products',
+        placeholder = 'Search...',
+        showFilters = true,
+      }: AlgoliaSearchProps) {
+        return (
+          <InstantSearch
+            searchClient={searchClient}
+            indexName={INDICES[indexName]}
+          >
+            <div className="max-w-4xl mx-auto">
+              {/* Search Box */}
+              <SearchBox
+                placeholder={placeholder}
+                classNames={{
+                  root: 'mb-6',
+                  form: 'relative',
+                  input: 'w-full px-4 py-3 pl-10 border rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500',
+                  submit: 'absolute left-3 top-1/2 -translate-y-1/2',
+                  reset: 'absolute right-3 top-1/2 -translate-y-1/2',
+                }}
+              />
+
+              {/* Stats */}
+              <Stats
+                classNames={{
+                  root: 'text-sm text-gray-500 mb-4',
+                }}
+              />
+
+              <div className="flex gap-8">
+                {/* Filters Sidebar */}
+                {showFilters && (
+                  <aside className="w-64 flex-shrink-0">
+                    <h3 className="font-semibold mb-3">Categories</h3>
+                    <RefinementList
+                      attribute="category"
+                      classNames={{
+                        list: 'space-y-2',
+                        item: 'flex items-center gap-2',
+                        checkbox: 'rounded',
+                        label: 'flex items-center gap-2 cursor-pointer',
+                        count: 'text-sm text-gray-500 ml-auto',
+                      }}
+                    />
+
+                    <h3 className="font-semibold mb-3 mt-6">Tags</h3>
+                    <RefinementList
+                      attribute="tags"
+                      searchable
+                      classNames={{
+                        list: 'space-y-2',
+                        item: 'flex items-center gap-2',
+                        checkbox: 'rounded',
+                        label: 'flex items-center gap-2 cursor-pointer',
+                        count: 'text-sm text-gray-500 ml-auto',
+                      }}
+                    />
+                  </aside>
+                )}
+
+                {/* Results */}
+                <div className="flex-1">
+                  <Hits
+                    hitComponent={Hit}
+                    classNames={{
+                      list: 'grid gap-4 md:grid-cols-2',
+                    }}
+                  />
+
+                  {/* Pagination */}
+                  <Pagination
+                    classNames={{
+                      root: 'mt-8',
+                      list: 'flex justify-center gap-2',
+                      item: 'px-3 py-2 border rounded hover:bg-gray-50',
+                      selectedItem: 'bg-blue-500 text-white border-blue-500',
+                      disabledItem: 'opacity-50 cursor-not-allowed',
+                    }}
+                  />
+                </div>
+              </div>
+            </div>
+          </InstantSearch>
+        );
+      }
+
+  - path: app/api/search/reindex/route.ts
+    description: API route to trigger reindexing
+    content: |
+      import { NextRequest, NextResponse } from 'next/server';
+      import { indexObjects, configureIndex } from '@/lib/algolia/admin';
+      import { prisma } from '@/lib/prisma';
+
+      // Protect with API key or admin auth
+      export async function POST(request: NextRequest) {
+        const authHeader = request.headers.get('authorization');
+
+        if (authHeader !== `Bearer ${process.env.REINDEX_API_KEY}`) {
+          return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+        }
+
+        try {
+          const { index } = await request.json();
+
+          if (index === 'products' || index === 'all') {
+            // Configure index settings
+            await configureIndex('products');
+
+            // Fetch all products from database
+            const products = await prisma.product.findMany({
+              where: { published: true },
+              select: {
+                id: true,
+                title: true,
+                description: true,
+                category: true,
+                tags: true,
+                price: true,
+                image: true,
+                createdAt: true,
+              },
+            });
+
+            // Transform for Algolia
+            const documents = products.map((p) => ({
+              ...p,
+              date: p.createdAt.getTime(),
+            }));
+
+            // Index documents
+            await indexObjects('products', documents);
+          }
+
+          return NextResponse.json({
+            success: true,
+            message: `Reindexed ${index}`
+          });
+        } catch (error) {
+          console.error('Reindex error:', error);
+          return NextResponse.json(
+            { error: 'Reindex failed' },
+            { status: 500 }
+          );
+        }
+      }
+
+  - path: hooks/use-algolia-search.ts
+    description: Custom hook for programmatic search
+    content: |
+      'use client';
+
+      import { useState, useCallback } from 'react';
+      import { searchClient, INDICES, IndexName } from '@/lib/algolia/client';
+
+      interface SearchOptions {
+        hitsPerPage?: number;
+        page?: number;
+        filters?: string;
+        facetFilters?: string[];
+      }
+
+      interface SearchResult<T> {
+        hits: T[];
+        nbHits: number;
+        page: number;
+        nbPages: number;
+        hitsPerPage: number;
+        processingTimeMS: number;
+      }
+
+      export function useAlgoliaSearch<T extends Record<string, any>>(
+        indexName: IndexName
+      ) {
+        const [results, setResults] = useState<SearchResult<T> | null>(null);
+        const [loading, setLoading] = useState(false);
+        const [error, setError] = useState<Error | null>(null);
+
+        const search = useCallback(
+          async (query: string, options: SearchOptions = {}) => {
+            setLoading(true);
+            setError(null);
+
+            try {
+              const index = searchClient.initIndex(INDICES[indexName]);
+
+              const response = await index.search<T>(query, {
+                hitsPerPage: options.hitsPerPage ?? 20,
+                page: options.page ?? 0,
+                filters: options.filters,
+                facetFilters: options.facetFilters,
+              });
+
+              setResults({
+                hits: response.hits,
+                nbHits: response.nbHits,
+                page: response.page,
+                nbPages: response.nbPages,
+                hitsPerPage: response.hitsPerPage,
+                processingTimeMS: response.processingTimeMS,
+              });
+
+              return response;
+            } catch (err) {
+              const error = err instanceof Error ? err : new Error('Search failed');
+              setError(error);
+              throw error;
+            } finally {
+              setLoading(false);
+            }
+          },
+          [indexName]
+        );
+
+        const clearResults = useCallback(() => {
+          setResults(null);
+          setError(null);
+        }, []);
+
+        return {
+          search,
+          results,
+          loading,
+          error,
+          clearResults,
+        };
+      }
+
+external_setup:
+  - step: Create Algolia account
+    details: Sign up at https://www.algolia.com/ and create an application
+  - step: Get API keys
+    details: |
+      From Algolia dashboard → API Keys:
+      - Application ID (public)
+      - Search-Only API Key (public)
+      - Admin API Key (private, server-side only)
+  - step: Set environment variables
+    details: |
+      # .env.local
+      NEXT_PUBLIC_ALGOLIA_APP_ID=your_app_id
+      NEXT_PUBLIC_ALGOLIA_SEARCH_KEY=your_search_key
+      ALGOLIA_APP_ID=your_app_id
+      ALGOLIA_ADMIN_KEY=your_admin_key
+      REINDEX_API_KEY=your_reindex_secret
+  - step: Create indices
+    details: Create indices in Algolia dashboard or use the configureIndex function
+  - step: Initial indexing
+    details: Run the reindex API endpoint or create a seed script to populate initial data
+
+edge_cases:
+  - case: Empty search results
+    solution: Show empty state with suggestions or popular items
+  - case: Rate limiting
+    solution: Algolia has generous limits, but implement client-side debouncing for search-as-you-type
+  - case: Large dataset indexing
+    solution: Use batch operations with saveObjects, process in chunks of 1000
+  - case: Real-time sync
+    solution: Index on create/update/delete in your API routes or use webhooks
+  - case: Multi-language content
+    solution: Create separate indices per language or use distinct attributes
