@@ -298,6 +298,114 @@
       "tags": ["csp", "security", "xss", "nextjs", "headers"],
       "difficulty": "advanced",
       "status": "beta"
+    },
+    {
+      "id": "toast-sonner",
+      "category": "frontend",
+      "name": "Toast Notifications with Sonner",
+      "description": "Modern toast notifications using Sonner with rich colors, actions, and promises",
+      "tags": ["sonner", "toast", "notifications", "ui", "nextjs"],
+      "difficulty": "beginner",
+      "status": "beta"
+    },
+    {
+      "id": "modal-dialog-radix",
+      "category": "frontend",
+      "name": "Modal Dialog with Radix UI",
+      "description": "Accessible modal dialogs and alert dialogs using Radix UI primitives",
+      "tags": ["radix", "dialog", "modal", "accessibility", "ui"],
+      "difficulty": "intermediate",
+      "status": "beta"
+    },
+    {
+      "id": "form-rhf-zod",
+      "category": "frontend",
+      "name": "Forms with React Hook Form + Zod",
+      "description": "Type-safe form validation using React Hook Form and Zod schemas",
+      "tags": ["react-hook-form", "zod", "forms", "validation", "typescript"],
+      "difficulty": "intermediate",
+      "status": "beta"
+    },
+    {
+      "id": "dark-mode-toggle",
+      "category": "frontend",
+      "name": "Dark Mode with next-themes",
+      "description": "System-aware dark mode toggle using next-themes with CSS variables",
+      "tags": ["dark-mode", "themes", "next-themes", "tailwind", "css"],
+      "difficulty": "beginner",
+      "status": "beta"
+    },
+    {
+      "id": "infinite-scroll",
+      "category": "frontend",
+      "name": "Infinite Scroll with React Query",
+      "description": "Infinite scrolling list using TanStack React Query and Intersection Observer",
+      "tags": ["infinite-scroll", "react-query", "pagination", "performance"],
+      "difficulty": "intermediate",
+      "status": "beta"
+    },
+    {
+      "id": "skeleton-loaders",
+      "category": "frontend",
+      "name": "Skeleton Loading Components",
+      "description": "Skeleton loading placeholders for improved perceived performance",
+      "tags": ["skeleton", "loading", "ui", "performance", "ux"],
+      "difficulty": "beginner",
+      "status": "beta"
+    },
+    {
+      "id": "command-palette",
+      "category": "frontend",
+      "name": "Command Palette with cmdk",
+      "description": "Keyboard-driven command palette using cmdk for power user navigation",
+      "tags": ["cmdk", "command-palette", "keyboard", "navigation", "ui"],
+      "difficulty": "intermediate",
+      "status": "beta"
+    },
+    {
+      "id": "openai-streaming",
+      "category": "ai",
+      "name": "OpenAI Streaming with Vercel AI SDK",
+      "description": "Real-time streaming responses from OpenAI using Vercel AI SDK",
+      "tags": ["openai", "streaming", "ai-sdk", "chat", "nextjs"],
+      "difficulty": "intermediate",
+      "status": "beta"
+    },
+    {
+      "id": "anthropic-claude",
+      "category": "ai",
+      "name": "Claude API Integration",
+      "description": "Anthropic Claude integration with streaming and tool use",
+      "tags": ["anthropic", "claude", "ai-sdk", "streaming", "nextjs"],
+      "difficulty": "intermediate",
+      "status": "beta"
+    },
+    {
+      "id": "rag-basic",
+      "category": "ai",
+      "name": "Basic RAG with Vector Search",
+      "description": "Retrieval-Augmented Generation using embeddings and vector search",
+      "tags": ["rag", "embeddings", "vector-search", "ai", "retrieval"],
+      "difficulty": "advanced",
+      "status": "beta"
+    },
+    {
+      "id": "token-counting",
+      "category": "ai",
+      "name": "Token Counting with Tiktoken",
+      "description": "Accurate token counting for OpenAI models using tiktoken",
+      "tags": ["tokens", "tiktoken", "openai", "limits", "optimization"],
+      "difficulty": "intermediate",
+      "status": "beta"
+    },
+    {
+      "id": "ai-response-cache",
+      "category": "ai",
+      "name": "AI Response Caching",
+      "description": "Cache AI responses using content hashing and Redis for cost optimization",
+      "tags": ["cache", "ai", "redis", "optimization", "cost-saving"],
+      "difficulty": "intermediate",
+      "status": "beta"
     }
   ]
 }
