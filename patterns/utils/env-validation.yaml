@@ -1,0 +1,401 @@
+id: env-validation
+version: "1.0.0"
+updated_at: "2026-01-31"
+author: "nyko-team"
+status: beta
+
+name: "T3 Env Validation"
+description: "Type-safe environment variable validation with T3 Env and Zod for Next.js"
+
+category: utils
+tags:
+  - t3-env
+  - zod
+  - environment
+  - validation
+  - typescript
+
+difficulty: beginner
+time_estimate: "15-20 min"
+
+stack:
+  required:
+    - name: "next"
+      version: "^15.1.0"
+      reason: "App Router"
+    - name: "@t3-oss/env-nextjs"
+      version: "^0.13.10"
+      reason: "Environment validation"
+    - name: "zod"
+      version: "^4.3.6"
+      reason: "Schema validation"
+
+requires: []
+
+enables: []
+
+env_vars:
+  required: []
+
+external_setup: []
+
+files:
+  - path: "lib/env.ts"
+    action: create
+    description: "Environment validation schema"
+    priority: 1
+
+  - path: "lib/env.mjs"
+    action: create
+    description: "Environment config for next.config.mjs"
+    priority: 2
+
+  - path: "next.config.ts"
+    action: modify
+    description: "Add environment validation to Next.js config"
+    priority: 3
+
+code:
+  lib/env.ts: |
+    import { createEnv } from "@t3-oss/env-nextjs";
+    import { z } from "zod";
+
+    /**
+     * Environment Variables Schema
+     *
+     * This file validates all environment variables at build time and runtime.
+     * Add all your env vars here to get:
+     * - Type-safe access throughout your app
+     * - Build-time validation (fails fast if missing)
+     * - Runtime validation in development
+     * - IntelliSense and autocompletion
+     */
+    export const env = createEnv({
+      /**
+       * Server-side environment variables
+       * These are only available on the server and are not exposed to the client.
+       */
+      server: {
+        // Database
+        DATABASE_URL: z.string().url().startsWith("postgres"),
+        DATABASE_URL_POOLED: z.string().url().optional(),
+
+        // Authentication
+        NEXTAUTH_SECRET: z
+          .string()
+          .min(32, "NEXTAUTH_SECRET must be at least 32 characters"),
+        NEXTAUTH_URL: z.string().url().optional(),
+
+        // Third-party APIs
+        STRIPE_SECRET_KEY: z.string().startsWith("sk_"),
+        STRIPE_WEBHOOK_SECRET: z.string().startsWith("whsec_").optional(),
+
+        RESEND_API_KEY: z.string().startsWith("re_").optional(),
+
+        OPENAI_API_KEY: z.string().startsWith("sk-").optional(),
+
+        // Supabase (server)
+        SUPABASE_SERVICE_ROLE_KEY: z.string().optional(),
+
+        // Storage
+        UPLOADTHING_SECRET: z.string().optional(),
+        UPLOADTHING_APP_ID: z.string().optional(),
+
+        // Redis/Upstash
+        UPSTASH_REDIS_REST_URL: z.string().url().optional(),
+        UPSTASH_REDIS_REST_TOKEN: z.string().optional(),
+
+        // Background Jobs
+        INNGEST_EVENT_KEY: z.string().optional(),
+        INNGEST_SIGNING_KEY: z.string().optional(),
+
+        // Environment
+        NODE_ENV: z
+          .enum(["development", "test", "production"])
+          .default("development"),
+      },
+
+      /**
+       * Client-side environment variables
+       * These are exposed to the client and must be prefixed with NEXT_PUBLIC_.
+       */
+      client: {
+        // App
+        NEXT_PUBLIC_APP_URL: z.string().url(),
+        NEXT_PUBLIC_APP_NAME: z.string().default("My App"),
+
+        // Supabase (client)
+        NEXT_PUBLIC_SUPABASE_URL: z.string().url().optional(),
+        NEXT_PUBLIC_SUPABASE_ANON_KEY: z.string().optional(),
+
+        // Stripe
+        NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY: z.string().startsWith("pk_").optional(),
+
+        // Analytics
+        NEXT_PUBLIC_POSTHOG_KEY: z.string().optional(),
+        NEXT_PUBLIC_POSTHOG_HOST: z.string().url().optional(),
+
+        // Pusher
+        NEXT_PUBLIC_PUSHER_KEY: z.string().optional(),
+        NEXT_PUBLIC_PUSHER_CLUSTER: z.string().optional(),
+
+        // Feature Flags
+        NEXT_PUBLIC_ENABLE_ANALYTICS: z
+          .string()
+          .transform((val) => val === "true")
+          .default("false"),
+      },
+
+      /**
+       * Runtime environment variables
+       * Map process.env to the schema above.
+       * This is needed for Next.js to properly bundle env vars.
+       */
+      runtimeEnv: {
+        // Server
+        DATABASE_URL: process.env.DATABASE_URL,
+        DATABASE_URL_POOLED: process.env.DATABASE_URL_POOLED,
+        NEXTAUTH_SECRET: process.env.NEXTAUTH_SECRET,
+        NEXTAUTH_URL: process.env.NEXTAUTH_URL,
+        STRIPE_SECRET_KEY: process.env.STRIPE_SECRET_KEY,
+        STRIPE_WEBHOOK_SECRET: process.env.STRIPE_WEBHOOK_SECRET,
+        RESEND_API_KEY: process.env.RESEND_API_KEY,
+        OPENAI_API_KEY: process.env.OPENAI_API_KEY,
+        SUPABASE_SERVICE_ROLE_KEY: process.env.SUPABASE_SERVICE_ROLE_KEY,
+        UPLOADTHING_SECRET: process.env.UPLOADTHING_SECRET,
+        UPLOADTHING_APP_ID: process.env.UPLOADTHING_APP_ID,
+        UPSTASH_REDIS_REST_URL: process.env.UPSTASH_REDIS_REST_URL,
+        UPSTASH_REDIS_REST_TOKEN: process.env.UPSTASH_REDIS_REST_TOKEN,
+        INNGEST_EVENT_KEY: process.env.INNGEST_EVENT_KEY,
+        INNGEST_SIGNING_KEY: process.env.INNGEST_SIGNING_KEY,
+        NODE_ENV: process.env.NODE_ENV,
+
+        // Client
+        NEXT_PUBLIC_APP_URL: process.env.NEXT_PUBLIC_APP_URL,
+        NEXT_PUBLIC_APP_NAME: process.env.NEXT_PUBLIC_APP_NAME,
+        NEXT_PUBLIC_SUPABASE_URL: process.env.NEXT_PUBLIC_SUPABASE_URL,
+        NEXT_PUBLIC_SUPABASE_ANON_KEY: process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY,
+        NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY:
+          process.env.NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY,
+        NEXT_PUBLIC_POSTHOG_KEY: process.env.NEXT_PUBLIC_POSTHOG_KEY,
+        NEXT_PUBLIC_POSTHOG_HOST: process.env.NEXT_PUBLIC_POSTHOG_HOST,
+        NEXT_PUBLIC_PUSHER_KEY: process.env.NEXT_PUBLIC_PUSHER_KEY,
+        NEXT_PUBLIC_PUSHER_CLUSTER: process.env.NEXT_PUBLIC_PUSHER_CLUSTER,
+        NEXT_PUBLIC_ENABLE_ANALYTICS: process.env.NEXT_PUBLIC_ENABLE_ANALYTICS,
+      },
+
+      /**
+       * Skip validation in certain environments
+       */
+      skipValidation:
+        process.env.SKIP_ENV_VALIDATION === "true" ||
+        process.env.npm_lifecycle_event === "lint",
+
+      /**
+       * Allow empty strings for optional variables
+       */
+      emptyStringAsUndefined: true,
+
+      /**
+       * Called when validation fails
+       */
+      onValidationError: (error) => {
+        console.error("❌ Invalid environment variables:");
+        console.error(error.flatten().fieldErrors);
+        throw new Error("Invalid environment variables");
+      },
+
+      /**
+       * Called when server-side env is accessed on client
+       */
+      onInvalidAccess: (variable) => {
+        throw new Error(
+          `❌ Attempted to access server-side env var '${variable}' on the client. ` +
+            "This is a security risk. Move to NEXT_PUBLIC_ prefix if needed on client."
+        );
+      },
+    });
+
+    /**
+     * Type for environment variables
+     */
+    export type Env = typeof env;
+
+  lib/env.mjs: |
+    // @ts-check
+    import { createEnv } from "@t3-oss/env-nextjs";
+    import { z } from "zod";
+
+    /**
+     * Minimal environment validation for next.config.mjs
+     * This runs before the full TypeScript env.ts is available
+     */
+    export const env = createEnv({
+      server: {
+        NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
+      },
+      client: {},
+      runtimeEnv: {
+        NODE_ENV: process.env.NODE_ENV,
+      },
+      skipValidation: process.env.SKIP_ENV_VALIDATION === "true",
+    });
+
+  next.config.ts: |
+    import type { NextConfig } from "next";
+
+    // Validate env vars at build time
+    import "./lib/env";
+
+    const nextConfig: NextConfig = {
+      // Your existing config here
+      reactStrictMode: true,
+
+      // Example: Recommended settings
+      experimental: {
+        typedRoutes: true,
+      },
+
+      // Webpack config for env validation
+      webpack: (config, { isServer }) => {
+        // Ensure env validation runs
+        if (isServer) {
+          // Server-side validations
+        }
+        return config;
+      },
+    };
+
+    export default nextConfig;
+
+additional_files:
+  .env.example: |
+    # ===========================================
+    # App Configuration
+    # ===========================================
+    NEXT_PUBLIC_APP_URL=http://localhost:3000
+    NEXT_PUBLIC_APP_NAME="My App"
+
+    # ===========================================
+    # Database
+    # ===========================================
+    DATABASE_URL=postgresql://user:password@localhost:5432/mydb
+    # DATABASE_URL_POOLED=  # Optional: Pooled connection for serverless
+
+    # ===========================================
+    # Authentication
+    # ===========================================
+    # Generate with: openssl rand -base64 32
+    NEXTAUTH_SECRET=your-super-secret-key-at-least-32-chars
+    NEXTAUTH_URL=http://localhost:3000
+
+    # ===========================================
+    # Stripe
+    # ===========================================
+    STRIPE_SECRET_KEY=sk_test_...
+    NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY=pk_test_...
+    # STRIPE_WEBHOOK_SECRET=whsec_...
+
+    # ===========================================
+    # Supabase (Optional)
+    # ===========================================
+    # NEXT_PUBLIC_SUPABASE_URL=https://xxx.supabase.co
+    # NEXT_PUBLIC_SUPABASE_ANON_KEY=eyJ...
+    # SUPABASE_SERVICE_ROLE_KEY=eyJ...
+
+    # ===========================================
+    # Email (Optional)
+    # ===========================================
+    # RESEND_API_KEY=re_...
+
+    # ===========================================
+    # AI (Optional)
+    # ===========================================
+    # OPENAI_API_KEY=sk-...
+
+    # ===========================================
+    # Redis/Caching (Optional)
+    # ===========================================
+    # UPSTASH_REDIS_REST_URL=https://...
+    # UPSTASH_REDIS_REST_TOKEN=...
+
+    # ===========================================
+    # Background Jobs (Optional)
+    # ===========================================
+    # INNGEST_EVENT_KEY=...
+    # INNGEST_SIGNING_KEY=signkey-...
+
+    # ===========================================
+    # Analytics (Optional)
+    # ===========================================
+    # NEXT_PUBLIC_POSTHOG_KEY=phc_...
+    # NEXT_PUBLIC_POSTHOG_HOST=https://app.posthog.com
+    NEXT_PUBLIC_ENABLE_ANALYTICS=false
+
+    # ===========================================
+    # Realtime (Optional)
+    # ===========================================
+    # NEXT_PUBLIC_PUSHER_KEY=...
+    # NEXT_PUBLIC_PUSHER_CLUSTER=us2
+
+edge_cases:
+  - id: build-fails-missing-env
+    symptom: "Build fails with 'Invalid environment variables'"
+    cause: "Required env vars not set in build environment"
+    solution: |
+      1. Check your CI/CD environment has all required vars
+      2. For optional vars during build, add .optional():
+
+      OPTIONAL_VAR: z.string().optional(),
+
+      3. Skip validation in CI if needed:
+      SKIP_ENV_VALIDATION=true npm run build
+
+  - id: client-accessing-server-env
+    symptom: "Error: Attempted to access server-side env var on client"
+    cause: "Trying to use server env var in client component"
+    solution: |
+      1. If needed on client, add NEXT_PUBLIC_ prefix
+      2. Pass server var to client via props:
+
+      // In Server Component
+      export default function Page() {
+        return <ClientComponent apiUrl={env.API_URL} />;
+      }
+
+      3. Use API route to access server vars from client
+
+  - id: transform-not-working
+    symptom: "Boolean env var always false"
+    cause: "Not using transform for string to boolean"
+    solution: |
+      Use z.transform for boolean values:
+
+      NEXT_PUBLIC_FEATURE_ENABLED: z
+        .string()
+        .transform((val) => val === "true")
+        .default("false"),
+
+      // Or use z.coerce
+      NEXT_PUBLIC_PORT: z.coerce.number().default(3000),
+
+  - id: type-error-with-env
+    symptom: "TypeScript error when using env"
+    cause: "Not importing from the correct file"
+    solution: |
+      Always import from lib/env.ts:
+
+      // Correct
+      import { env } from "@/lib/env";
+
+      // Wrong - bypasses validation
+      const key = process.env.API_KEY;
+
+validation:
+  manual_test:
+    - "Create .env.local with required variables"
+    - "Run npm run build - should validate env vars"
+    - "Remove a required var and verify build fails"
+    - "Access env.DATABASE_URL in a server component"
+    - "Verify client can access NEXT_PUBLIC_ vars"
+    - "Try accessing server var on client - should error"

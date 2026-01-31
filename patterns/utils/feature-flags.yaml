@@ -1,0 +1,798 @@
+id: feature-flags
+version: "1.0.0"
+updated_at: "2026-01-31"
+author: "nyko-team"
+status: beta
+
+name: "Feature Flags"
+description: "Feature flag management with Vercel Edge Config or custom implementation"
+
+category: utils
+tags:
+  - feature-flags
+  - vercel
+  - edge-config
+  - toggles
+  - ab-testing
+
+difficulty: intermediate
+time_estimate: "25-30 min"
+
+stack:
+  required:
+    - name: "next"
+      version: "^15.1.0"
+      reason: "App Router"
+  optional:
+    - name: "@vercel/edge-config"
+      version: "^1.4.3"
+      reason: "Vercel Edge Config integration"
+
+requires: []
+
+enables: []
+
+env_vars:
+  required: []
+  optional:
+    - key: EDGE_CONFIG
+      description: "Vercel Edge Config connection string"
+      format: "https://edge-config.vercel.com/ecfg_xxxx?token=xxxx"
+      where_to_find: "Vercel Dashboard > Storage > Edge Config"
+    - key: FEATURE_FLAGS_SECRET
+      description: "Secret for custom feature flags API"
+      format: "your-secret-key"
+      where_to_find: "Generate a random string"
+
+external_setup:
+  - service: "Vercel Edge Config (Optional)"
+    url: "https://vercel.com/dashboard"
+    steps:
+      - "Go to Storage in Vercel Dashboard"
+      - "Create new Edge Config"
+      - "Add feature flags as JSON items"
+      - "Copy connection string to EDGE_CONFIG env var"
+      - "Link to your project"
+
+files:
+  - path: "lib/flags/types.ts"
+    action: create
+    description: "Feature flag type definitions"
+    priority: 1
+
+  - path: "lib/flags/provider.ts"
+    action: create
+    description: "Feature flag provider abstraction"
+    priority: 2
+
+  - path: "lib/flags/vercel-provider.ts"
+    action: create
+    description: "Vercel Edge Config provider"
+    priority: 3
+
+  - path: "lib/flags/custom-provider.ts"
+    action: create
+    description: "Custom feature flags provider"
+    priority: 4
+
+  - path: "lib/flags/index.ts"
+    action: create
+    description: "Feature flags client"
+    priority: 5
+
+  - path: "hooks/use-feature-flag.ts"
+    action: create
+    description: "React hook for feature flags"
+    priority: 6
+
+  - path: "components/feature-flag.tsx"
+    action: create
+    description: "Feature flag wrapper component"
+    priority: 7
+
+  - path: "app/api/flags/route.ts"
+    action: create
+    description: "Feature flags API endpoint"
+    priority: 8
+
+code:
+  lib/flags/types.ts: |
+    /**
+     * Feature flag definition
+     */
+    export interface FeatureFlag {
+      key: string;
+      enabled: boolean;
+      description?: string;
+      percentage?: number; // For gradual rollout (0-100)
+      allowedUsers?: string[]; // Specific user IDs
+      allowedGroups?: string[]; // User groups/roles
+      metadata?: Record<string, unknown>;
+      createdAt?: string;
+      updatedAt?: string;
+    }
+
+    /**
+     * Feature flag context for evaluation
+     */
+    export interface FlagContext {
+      userId?: string;
+      userEmail?: string;
+      userGroups?: string[];
+      country?: string;
+      device?: "mobile" | "desktop" | "tablet";
+      custom?: Record<string, unknown>;
+    }
+
+    /**
+     * Provider interface for different backends
+     */
+    export interface FeatureFlagProvider {
+      get(key: string): Promise<FeatureFlag | null>;
+      getAll(): Promise<FeatureFlag[]>;
+      isEnabled(key: string, context?: FlagContext): Promise<boolean>;
+      set?(key: string, value: Partial<FeatureFlag>): Promise<void>;
+    }
+
+    /**
+     * All feature flags in your app
+     * Add new flags here for type safety
+     */
+    export type FeatureFlagKey =
+      | "new-dashboard"
+      | "dark-mode-v2"
+      | "ai-features"
+      | "beta-features"
+      | "premium-only"
+      | "maintenance-mode"
+      | "new-checkout"
+      | "experimental-ui";
+
+    /**
+     * Default flag values (used as fallback)
+     */
+    export const DEFAULT_FLAGS: Record<FeatureFlagKey, FeatureFlag> = {
+      "new-dashboard": {
+        key: "new-dashboard",
+        enabled: false,
+        description: "New dashboard UI",
+        percentage: 0,
+      },
+      "dark-mode-v2": {
+        key: "dark-mode-v2",
+        enabled: true,
+        description: "Improved dark mode",
+      },
+      "ai-features": {
+        key: "ai-features",
+        enabled: false,
+        description: "AI-powered features",
+        allowedGroups: ["beta-testers", "premium"],
+      },
+      "beta-features": {
+        key: "beta-features",
+        enabled: false,
+        description: "Beta feature access",
+        allowedGroups: ["beta-testers"],
+      },
+      "premium-only": {
+        key: "premium-only",
+        enabled: true,
+        description: "Premium tier features",
+        allowedGroups: ["premium", "enterprise"],
+      },
+      "maintenance-mode": {
+        key: "maintenance-mode",
+        enabled: false,
+        description: "Site maintenance mode",
+      },
+      "new-checkout": {
+        key: "new-checkout",
+        enabled: false,
+        description: "New checkout flow",
+        percentage: 20, // 20% rollout
+      },
+      "experimental-ui": {
+        key: "experimental-ui",
+        enabled: false,
+        description: "Experimental UI components",
+      },
+    };
+
+  lib/flags/provider.ts: |
+    import type { FeatureFlag, FlagContext, FeatureFlagProvider } from "./types";
+    import { DEFAULT_FLAGS } from "./types";
+
+    /**
+     * Base provider with common evaluation logic
+     */
+    export abstract class BaseProvider implements FeatureFlagProvider {
+      abstract get(key: string): Promise<FeatureFlag | null>;
+      abstract getAll(): Promise<FeatureFlag[]>;
+
+      /**
+       * Evaluate if flag is enabled for given context
+       */
+      async isEnabled(key: string, context?: FlagContext): Promise<boolean> {
+        const flag = await this.get(key);
+
+        if (!flag) {
+          // Fall back to default
+          const defaultFlag = DEFAULT_FLAGS[key as keyof typeof DEFAULT_FLAGS];
+          return defaultFlag?.enabled ?? false;
+        }
+
+        // Base enabled check
+        if (!flag.enabled) {
+          return false;
+        }
+
+        // User-specific check
+        if (flag.allowedUsers?.length && context?.userId) {
+          if (flag.allowedUsers.includes(context.userId)) {
+            return true;
+          }
+        }
+
+        // Group-based check
+        if (flag.allowedGroups?.length && context?.userGroups?.length) {
+          const hasGroup = flag.allowedGroups.some((group) =>
+            context.userGroups?.includes(group)
+          );
+          if (hasGroup) {
+            return true;
+          }
+          // If groups defined but user not in any, deny
+          if (!flag.percentage) {
+            return false;
+          }
+        }
+
+        // Percentage-based rollout
+        if (flag.percentage !== undefined && flag.percentage < 100) {
+          return this.isInPercentage(context?.userId || "", flag.percentage);
+        }
+
+        return flag.enabled;
+      }
+
+      /**
+       * Deterministic percentage check based on user ID
+       */
+      protected isInPercentage(userId: string, percentage: number): boolean {
+        if (percentage >= 100) return true;
+        if (percentage <= 0) return false;
+
+        // Hash user ID to get consistent bucket
+        let hash = 0;
+        const str = userId || Math.random().toString();
+        for (let i = 0; i < str.length; i++) {
+          const char = str.charCodeAt(i);
+          hash = (hash << 5) - hash + char;
+          hash = hash & hash; // Convert to 32bit integer
+        }
+
+        const bucket = Math.abs(hash) % 100;
+        return bucket < percentage;
+      }
+    }
+
+  lib/flags/vercel-provider.ts: |
+    import { createClient, type EdgeConfigClient } from "@vercel/edge-config";
+    import { BaseProvider } from "./provider";
+    import type { FeatureFlag } from "./types";
+    import { DEFAULT_FLAGS } from "./types";
+
+    /**
+     * Vercel Edge Config provider
+     * Ultra-fast reads from the edge
+     */
+    export class VercelProvider extends BaseProvider {
+      private client: EdgeConfigClient | null = null;
+
+      constructor() {
+        super();
+        if (process.env.EDGE_CONFIG) {
+          this.client = createClient(process.env.EDGE_CONFIG);
+        }
+      }
+
+      async get(key: string): Promise<FeatureFlag | null> {
+        if (!this.client) {
+          return DEFAULT_FLAGS[key as keyof typeof DEFAULT_FLAGS] || null;
+        }
+
+        try {
+          const flag = await this.client.get<FeatureFlag>(key);
+          return flag || DEFAULT_FLAGS[key as keyof typeof DEFAULT_FLAGS] || null;
+        } catch (error) {
+          console.error(`Failed to get flag ${key}:`, error);
+          return DEFAULT_FLAGS[key as keyof typeof DEFAULT_FLAGS] || null;
+        }
+      }
+
+      async getAll(): Promise<FeatureFlag[]> {
+        if (!this.client) {
+          return Object.values(DEFAULT_FLAGS);
+        }
+
+        try {
+          const allFlags = await this.client.getAll<Record<string, FeatureFlag>>();
+          if (!allFlags) {
+            return Object.values(DEFAULT_FLAGS);
+          }
+
+          // Merge with defaults
+          const merged = { ...DEFAULT_FLAGS };
+          Object.entries(allFlags).forEach(([key, value]) => {
+            if (typeof value === "object" && value !== null && "enabled" in value) {
+              merged[key as keyof typeof DEFAULT_FLAGS] = value as FeatureFlag;
+            }
+          });
+
+          return Object.values(merged);
+        } catch (error) {
+          console.error("Failed to get all flags:", error);
+          return Object.values(DEFAULT_FLAGS);
+        }
+      }
+
+      /**
+       * Check if Edge Config is available
+       */
+      isAvailable(): boolean {
+        return this.client !== null;
+      }
+    }
+
+  lib/flags/custom-provider.ts: |
+    import { BaseProvider } from "./provider";
+    import type { FeatureFlag } from "./types";
+    import { DEFAULT_FLAGS } from "./types";
+
+    /**
+     * In-memory cache with TTL
+     */
+    interface CacheEntry {
+      value: FeatureFlag;
+      expiresAt: number;
+    }
+
+    /**
+     * Custom feature flags provider
+     * Stores flags in memory with optional persistence
+     */
+    export class CustomProvider extends BaseProvider {
+      private cache: Map<string, CacheEntry> = new Map();
+      private flags: Map<string, FeatureFlag> = new Map();
+      private cacheTTL: number;
+
+      constructor(options: { cacheTTL?: number } = {}) {
+        super();
+        this.cacheTTL = options.cacheTTL || 60 * 1000; // 1 minute default
+
+        // Initialize with defaults
+        Object.entries(DEFAULT_FLAGS).forEach(([key, value]) => {
+          this.flags.set(key, value);
+        });
+      }
+
+      async get(key: string): Promise<FeatureFlag | null> {
+        // Check cache first
+        const cached = this.cache.get(key);
+        if (cached && cached.expiresAt > Date.now()) {
+          return cached.value;
+        }
+
+        const flag = this.flags.get(key) || null;
+
+        if (flag) {
+          this.cache.set(key, {
+            value: flag,
+            expiresAt: Date.now() + this.cacheTTL,
+          });
+        }
+
+        return flag;
+      }
+
+      async getAll(): Promise<FeatureFlag[]> {
+        return Array.from(this.flags.values());
+      }
+
+      /**
+       * Set a flag value
+       */
+      async set(key: string, value: Partial<FeatureFlag>): Promise<void> {
+        const existing = this.flags.get(key) || DEFAULT_FLAGS[key as keyof typeof DEFAULT_FLAGS];
+        const updated: FeatureFlag = {
+          ...existing,
+          ...value,
+          key,
+          updatedAt: new Date().toISOString(),
+        };
+
+        this.flags.set(key, updated);
+        this.cache.delete(key); // Invalidate cache
+      }
+
+      /**
+       * Delete a flag (resets to default)
+       */
+      async delete(key: string): Promise<void> {
+        this.flags.delete(key);
+        this.cache.delete(key);
+      }
+
+      /**
+       * Load flags from external source
+       */
+      async loadFromSource(
+        source: () => Promise<Record<string, FeatureFlag>>
+      ): Promise<void> {
+        try {
+          const flags = await source();
+          Object.entries(flags).forEach(([key, value]) => {
+            this.flags.set(key, value);
+          });
+        } catch (error) {
+          console.error("Failed to load flags from source:", error);
+        }
+      }
+    }
+
+    /**
+     * Database-backed provider
+     * Extend this for your database implementation
+     */
+    export class DatabaseProvider extends BaseProvider {
+      async get(key: string): Promise<FeatureFlag | null> {
+        // Replace with your database query
+        // const flag = await db.featureFlag.findUnique({ where: { key } });
+        // return flag;
+        return DEFAULT_FLAGS[key as keyof typeof DEFAULT_FLAGS] || null;
+      }
+
+      async getAll(): Promise<FeatureFlag[]> {
+        // Replace with your database query
+        // const flags = await db.featureFlag.findMany();
+        // return flags;
+        return Object.values(DEFAULT_FLAGS);
+      }
+
+      async set(key: string, value: Partial<FeatureFlag>): Promise<void> {
+        // Replace with your database upsert
+        // await db.featureFlag.upsert({
+        //   where: { key },
+        //   create: { key, ...value },
+        //   update: value,
+        // });
+      }
+    }
+
+  lib/flags/index.ts: |
+    import { VercelProvider } from "./vercel-provider";
+    import { CustomProvider } from "./custom-provider";
+    import type {
+      FeatureFlag,
+      FlagContext,
+      FeatureFlagKey,
+      FeatureFlagProvider,
+    } from "./types";
+    import { DEFAULT_FLAGS } from "./types";
+
+    // Choose provider based on environment
+    const provider: FeatureFlagProvider = process.env.EDGE_CONFIG
+      ? new VercelProvider()
+      : new CustomProvider();
+
+    /**
+     * Get a feature flag by key
+     */
+    export async function getFlag(key: FeatureFlagKey): Promise<FeatureFlag | null> {
+      return provider.get(key);
+    }
+
+    /**
+     * Get all feature flags
+     */
+    export async function getAllFlags(): Promise<FeatureFlag[]> {
+      return provider.getAll();
+    }
+
+    /**
+     * Check if a feature is enabled
+     */
+    export async function isEnabled(
+      key: FeatureFlagKey,
+      context?: FlagContext
+    ): Promise<boolean> {
+      return provider.isEnabled(key, context);
+    }
+
+    /**
+     * Get multiple flags at once
+     */
+    export async function getFlags(
+      keys: FeatureFlagKey[]
+    ): Promise<Record<FeatureFlagKey, FeatureFlag | null>> {
+      const results: Record<string, FeatureFlag | null> = {};
+      await Promise.all(
+        keys.map(async (key) => {
+          results[key] = await getFlag(key);
+        })
+      );
+      return results as Record<FeatureFlagKey, FeatureFlag | null>;
+    }
+
+    /**
+     * Check multiple flags at once
+     */
+    export async function areEnabled(
+      keys: FeatureFlagKey[],
+      context?: FlagContext
+    ): Promise<Record<FeatureFlagKey, boolean>> {
+      const results: Record<string, boolean> = {};
+      await Promise.all(
+        keys.map(async (key) => {
+          results[key] = await isEnabled(key, context);
+        })
+      );
+      return results as Record<FeatureFlagKey, boolean>;
+    }
+
+    // Re-export types
+    export type { FeatureFlag, FlagContext, FeatureFlagKey };
+    export { DEFAULT_FLAGS };
+
+  hooks/use-feature-flag.ts: |
+    "use client";
+
+    import { useState, useEffect } from "react";
+    import type { FeatureFlagKey, FlagContext } from "@/lib/flags";
+
+    interface UseFeatureFlagOptions {
+      context?: FlagContext;
+      fallback?: boolean;
+    }
+
+    /**
+     * Hook to check if a feature flag is enabled
+     */
+    export function useFeatureFlag(
+      key: FeatureFlagKey,
+      options: UseFeatureFlagOptions = {}
+    ): { isEnabled: boolean; isLoading: boolean } {
+      const { context, fallback = false } = options;
+      const [isEnabled, setIsEnabled] = useState(fallback);
+      const [isLoading, setIsLoading] = useState(true);
+
+      useEffect(() => {
+        async function checkFlag() {
+          try {
+            const params = new URLSearchParams({ key });
+            if (context) {
+              params.set("context", JSON.stringify(context));
+            }
+
+            const response = await fetch(`/api/flags?${params}`);
+            const data = await response.json();
+
+            setIsEnabled(data.enabled);
+          } catch (error) {
+            console.error("Failed to fetch feature flag:", error);
+            setIsEnabled(fallback);
+          } finally {
+            setIsLoading(false);
+          }
+        }
+
+        checkFlag();
+      }, [key, context, fallback]);
+
+      return { isEnabled, isLoading };
+    }
+
+    /**
+     * Hook to get multiple feature flags
+     */
+    export function useFeatureFlags(
+      keys: FeatureFlagKey[],
+      options: UseFeatureFlagOptions = {}
+    ): {
+      flags: Record<FeatureFlagKey, boolean>;
+      isLoading: boolean;
+    } {
+      const { context, fallback = false } = options;
+      const [flags, setFlags] = useState<Record<FeatureFlagKey, boolean>>(
+        () => Object.fromEntries(keys.map((k) => [k, fallback])) as Record<FeatureFlagKey, boolean>
+      );
+      const [isLoading, setIsLoading] = useState(true);
+
+      useEffect(() => {
+        async function checkFlags() {
+          try {
+            const params = new URLSearchParams();
+            keys.forEach((k) => params.append("keys", k));
+            if (context) {
+              params.set("context", JSON.stringify(context));
+            }
+
+            const response = await fetch(`/api/flags?${params}`);
+            const data = await response.json();
+
+            setFlags(data.flags);
+          } catch (error) {
+            console.error("Failed to fetch feature flags:", error);
+          } finally {
+            setIsLoading(false);
+          }
+        }
+
+        checkFlags();
+      }, [keys.join(","), context]);
+
+      return { flags, isLoading };
+    }
+
+  components/feature-flag.tsx: |
+    "use client";
+
+    import { useFeatureFlag } from "@/hooks/use-feature-flag";
+    import type { FeatureFlagKey, FlagContext } from "@/lib/flags";
+
+    interface FeatureFlagProps {
+      flag: FeatureFlagKey;
+      context?: FlagContext;
+      children: React.ReactNode;
+      fallback?: React.ReactNode;
+      loading?: React.ReactNode;
+    }
+
+    /**
+     * Component to conditionally render based on feature flag
+     */
+    export function FeatureFlag({
+      flag,
+      context,
+      children,
+      fallback = null,
+      loading = null,
+    }: FeatureFlagProps) {
+      const { isEnabled, isLoading } = useFeatureFlag(flag, { context });
+
+      if (isLoading) {
+        return <>{loading}</>;
+      }
+
+      return <>{isEnabled ? children : fallback}</>;
+    }
+
+    /**
+     * Server component version (use with async)
+     */
+    export async function ServerFeatureFlag({
+      flag,
+      context,
+      children,
+      fallback = null,
+    }: Omit<FeatureFlagProps, "loading">) {
+      // Import dynamically to avoid client bundle
+      const { isEnabled } = await import("@/lib/flags");
+      const enabled = await isEnabled(flag, context);
+
+      return <>{enabled ? children : fallback}</>;
+    }
+
+  app/api/flags/route.ts: |
+    import { NextRequest, NextResponse } from "next/server";
+    import { isEnabled, areEnabled, getAllFlags } from "@/lib/flags";
+    import type { FeatureFlagKey, FlagContext } from "@/lib/flags";
+
+    export const runtime = "edge"; // Use edge for fast response
+
+    export async function GET(request: NextRequest) {
+      const { searchParams } = new URL(request.url);
+      const key = searchParams.get("key") as FeatureFlagKey | null;
+      const keys = searchParams.getAll("keys") as FeatureFlagKey[];
+      const contextStr = searchParams.get("context");
+      const all = searchParams.get("all") === "true";
+
+      let context: FlagContext | undefined;
+      if (contextStr) {
+        try {
+          context = JSON.parse(contextStr);
+        } catch {
+          // Invalid context, ignore
+        }
+      }
+
+      // Return all flags
+      if (all) {
+        const flags = await getAllFlags();
+        return NextResponse.json({ flags });
+      }
+
+      // Return multiple flags
+      if (keys.length > 0) {
+        const flags = await areEnabled(keys, context);
+        return NextResponse.json({ flags });
+      }
+
+      // Return single flag
+      if (key) {
+        const enabled = await isEnabled(key, context);
+        return NextResponse.json({ key, enabled });
+      }
+
+      return NextResponse.json(
+        { error: "Missing key or keys parameter" },
+        { status: 400 }
+      );
+    }
+
+edge_cases:
+  - id: edge-config-not-available
+    symptom: "Edge Config not working in development"
+    cause: "Edge Config only works on Vercel"
+    solution: |
+      Use fallback to custom provider in development:
+
+      const provider = process.env.EDGE_CONFIG
+        ? new VercelProvider()
+        : new CustomProvider();
+
+      Or create a local Edge Config emulator:
+      - Use environment variables
+      - Use a local JSON file
+
+  - id: flag-not-updating
+    symptom: "Flag changes not reflected immediately"
+    cause: "Caching at various levels"
+    solution: |
+      1. Clear Edge Config cache:
+         - Redeploy to clear edge cache
+         - Use cache: "no-store" in fetch
+
+      2. Clear client-side cache:
+         - Refresh page or call revalidate
+
+      3. Reduce cache TTL in custom provider:
+         new CustomProvider({ cacheTTL: 10 * 1000 }) // 10 seconds
+
+  - id: percentage-rollout-inconsistent
+    symptom: "User sees different flag state on different sessions"
+    cause: "No user ID provided for percentage calculation"
+    solution: |
+      Always provide a consistent user identifier:
+
+      const enabled = await isEnabled("new-feature", {
+        userId: user.id, // Consistent ID
+      });
+
+      // Or use a session ID for anonymous users
+      const sessionId = cookies().get("session_id")?.value;
+
+  - id: type-errors-with-flags
+    symptom: "TypeScript error: argument not assignable to FeatureFlagKey"
+    cause: "Flag key not added to type definition"
+    solution: |
+      Add new flags to the FeatureFlagKey type in types.ts:
+
+      export type FeatureFlagKey =
+        | "existing-flag"
+        | "new-flag"; // Add here
+
+      export const DEFAULT_FLAGS: Record<FeatureFlagKey, FeatureFlag> = {
+        // ... existing
+        "new-flag": { key: "new-flag", enabled: false },
+      };
+
+validation:
+  manual_test:
+    - "Add feature flags to Edge Config or local config"
+    - "Check flag status via /api/flags?key=flag-name"
+    - "Use FeatureFlag component to conditionally render"
+    - "Test percentage rollout with different user IDs"
+    - "Test group-based access control"
+    - "Verify flag changes take effect"
