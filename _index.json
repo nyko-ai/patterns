@@ -406,6 +406,96 @@
       "tags": ["cache", "ai", "redis", "optimization", "cost-saving"],
       "difficulty": "intermediate",
       "status": "beta"
+    },
+    {
+      "id": "stripe-proration",
+      "category": "payments",
+      "name": "Stripe Subscription Proration",
+      "description": "Handle subscription upgrades, downgrades, and proration calculations",
+      "tags": ["stripe", "subscriptions", "proration", "billing", "upgrades"],
+      "difficulty": "advanced",
+      "status": "beta"
+    },
+    {
+      "id": "stripe-invoices",
+      "category": "payments",
+      "name": "Stripe Invoices and Receipts",
+      "description": "Generate, customize, and manage invoices and receipts with Stripe",
+      "tags": ["stripe", "invoices", "receipts", "billing", "pdf"],
+      "difficulty": "intermediate",
+      "status": "beta"
+    },
+    {
+      "id": "stripe-metered-billing",
+      "category": "payments",
+      "name": "Stripe Metered/Usage-Based Billing",
+      "description": "Implement usage-based billing with Stripe metered subscriptions",
+      "tags": ["stripe", "metered", "usage-based", "billing", "subscriptions"],
+      "difficulty": "advanced",
+      "status": "beta"
+    },
+    {
+      "id": "stripe-connect",
+      "category": "payments",
+      "name": "Stripe Connect Marketplace",
+      "description": "Build a marketplace with Stripe Connect for multi-party payments",
+      "tags": ["stripe", "connect", "marketplace", "payouts", "platform"],
+      "difficulty": "advanced",
+      "status": "beta"
+    },
+    {
+      "id": "refund-handling",
+      "category": "payments",
+      "name": "Stripe Refund Handling",
+      "description": "Complete refund flow with full, partial, and Connect refunds",
+      "tags": ["stripe", "refunds", "payments", "chargebacks", "disputes"],
+      "difficulty": "intermediate",
+      "status": "beta"
+    },
+    {
+      "id": "full-text-search",
+      "category": "database",
+      "name": "Postgres Full-Text Search",
+      "description": "Implement full-text search with Postgres/Supabase using tsvector and GIN indexes",
+      "tags": ["postgres", "supabase", "search", "fts", "tsvector"],
+      "difficulty": "intermediate",
+      "status": "beta"
+    },
+    {
+      "id": "audit-logs",
+      "category": "database",
+      "name": "Database Audit Logs",
+      "description": "Automatic audit trail with Postgres triggers for tracking all data changes",
+      "tags": ["postgres", "audit", "triggers", "logging", "compliance"],
+      "difficulty": "intermediate",
+      "status": "beta"
+    },
+    {
+      "id": "multi-tenancy",
+      "category": "database",
+      "name": "Row-Based Multi-Tenancy",
+      "description": "Implement multi-tenant architecture with row-level security and tenant isolation",
+      "tags": ["postgres", "multi-tenancy", "rls", "saas", "isolation"],
+      "difficulty": "advanced",
+      "status": "beta"
+    },
+    {
+      "id": "connection-pooling",
+      "category": "database",
+      "name": "Database Connection Pooling",
+      "description": "Configure connection pooling with Supavisor, PgBouncer, or Prisma for serverless",
+      "tags": ["postgres", "connection-pooling", "pgbouncer", "supavisor", "serverless"],
+      "difficulty": "intermediate",
+      "status": "beta"
+    },
+    {
+      "id": "database-migrations",
+      "category": "database",
+      "name": "Database Migration Strategies",
+      "description": "Safe database migrations with Prisma including rollbacks, zero-downtime, and CI/CD",
+      "tags": ["prisma", "migrations", "database", "schema", "cicd"],
+      "difficulty": "intermediate",
+      "status": "beta"
     }
   ]
 }
