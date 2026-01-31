@@ -226,6 +226,78 @@
       "tags": ["pm2", "process-manager", "production", "nodejs", "clustering"],
       "difficulty": "intermediate",
       "status": "beta"
+    },
+    {
+      "id": "redis-upstash-cache",
+      "category": "cache",
+      "name": "Upstash Redis Caching Layer",
+      "description": "Serverless caching with Upstash Redis for API responses and data",
+      "tags": ["upstash", "redis", "cache", "serverless", "performance"],
+      "difficulty": "intermediate",
+      "status": "beta"
+    },
+    {
+      "id": "react-query-caching",
+      "category": "cache",
+      "name": "TanStack React Query Caching",
+      "description": "Client-side caching configuration with TanStack React Query for optimal performance",
+      "tags": ["react-query", "tanstack", "cache", "client", "nextjs"],
+      "difficulty": "intermediate",
+      "status": "beta"
+    },
+    {
+      "id": "nextjs-isr-ssg",
+      "category": "cache",
+      "name": "Next.js ISR and SSG Strategies",
+      "description": "Incremental Static Regeneration and Static Site Generation patterns for Next.js App Router",
+      "tags": ["nextjs", "isr", "ssg", "static", "performance"],
+      "difficulty": "intermediate",
+      "status": "beta"
+    },
+    {
+      "id": "memoization-patterns",
+      "category": "cache",
+      "name": "React and Lodash Memoization Patterns",
+      "description": "Memoization techniques for React components and utility functions",
+      "tags": ["memoization", "react", "lodash", "performance", "optimization"],
+      "difficulty": "intermediate",
+      "status": "beta"
+    },
+    {
+      "id": "csrf-protection",
+      "category": "security",
+      "name": "CSRF Protection for Next.js",
+      "description": "Cross-Site Request Forgery protection using double-submit cookie pattern",
+      "tags": ["csrf", "security", "nextjs", "protection", "cookies"],
+      "difficulty": "intermediate",
+      "status": "beta"
+    },
+    {
+      "id": "input-sanitization",
+      "category": "security",
+      "name": "Input Sanitization with DOMPurify",
+      "description": "Client and server-side input sanitization to prevent XSS attacks",
+      "tags": ["xss", "sanitization", "dompurify", "security", "validation"],
+      "difficulty": "intermediate",
+      "status": "beta"
+    },
+    {
+      "id": "secure-headers",
+      "category": "security",
+      "name": "Secure Headers Configuration",
+      "description": "Security headers configuration for Next.js with Helmet.js patterns",
+      "tags": ["headers", "security", "helmet", "nextjs", "csp"],
+      "difficulty": "intermediate",
+      "status": "beta"
+    },
+    {
+      "id": "csp-configuration",
+      "category": "security",
+      "name": "Content Security Policy Configuration",
+      "description": "Comprehensive CSP setup for Next.js with reporting and nonce support",
+      "tags": ["csp", "security", "xss", "nextjs", "headers"],
+      "difficulty": "advanced",
+      "status": "beta"
     }
   ]
 }
