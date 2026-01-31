@@ -496,6 +496,96 @@
       "tags": ["prisma", "migrations", "database", "schema", "cicd"],
       "difficulty": "intermediate",
       "status": "beta"
+    },
+    {
+      "id": "uploadthing-setup",
+      "category": "storage",
+      "name": "Uploadthing File Uploads",
+      "description": "Type-safe file uploads with Uploadthing for Next.js with progress, validation, and custom styling",
+      "tags": ["uploadthing", "file-upload", "next.js", "typescript", "images"],
+      "difficulty": "intermediate",
+      "status": "beta"
+    },
+    {
+      "id": "supabase-storage",
+      "category": "storage",
+      "name": "Supabase Storage with Signed URLs",
+      "description": "Secure file storage with Supabase Storage including signed URLs, public buckets, and image transformations",
+      "tags": ["supabase", "storage", "signed-urls", "file-upload", "images"],
+      "difficulty": "intermediate",
+      "status": "beta"
+    },
+    {
+      "id": "file-validation",
+      "category": "storage",
+      "name": "Server-Side File Validation",
+      "description": "Comprehensive file validation including type, size, magic bytes, and content scanning",
+      "tags": ["validation", "security", "file-upload", "mime-type", "magic-bytes"],
+      "difficulty": "intermediate",
+      "status": "beta"
+    },
+    {
+      "id": "pusher-setup",
+      "category": "realtime",
+      "name": "Pusher Realtime Events",
+      "description": "Realtime event broadcasting with Pusher Channels including presence channels and private channels",
+      "tags": ["pusher", "websocket", "realtime", "events", "presence"],
+      "difficulty": "intermediate",
+      "status": "beta"
+    },
+    {
+      "id": "socket-io",
+      "category": "realtime",
+      "name": "Socket.IO Setup for Next.js",
+      "description": "Real-time bidirectional communication with Socket.IO including rooms, namespaces, and custom events",
+      "tags": ["socket.io", "websocket", "realtime", "bidirectional", "next.js"],
+      "difficulty": "intermediate",
+      "status": "beta"
+    },
+    {
+      "id": "sse-streaming",
+      "category": "realtime",
+      "name": "Server-Sent Events Streaming",
+      "description": "Real-time server-to-client streaming with SSE for notifications, live updates, and progress tracking",
+      "tags": ["sse", "server-sent-events", "streaming", "realtime", "notifications"],
+      "difficulty": "intermediate",
+      "status": "beta"
+    },
+    {
+      "id": "inngest-setup",
+      "category": "jobs",
+      "name": "Inngest Background Jobs",
+      "description": "Serverless background jobs and workflows with Inngest including retries, scheduling, and fan-out",
+      "tags": ["inngest", "background-jobs", "workflows", "serverless", "queues"],
+      "difficulty": "intermediate",
+      "status": "beta"
+    },
+    {
+      "id": "trigger-dev",
+      "category": "jobs",
+      "name": "Trigger.dev Background Jobs",
+      "description": "Serverless background jobs with Trigger.dev including scheduling, webhooks, and integrations",
+      "tags": ["trigger.dev", "background-jobs", "serverless", "workflows", "scheduling"],
+      "difficulty": "intermediate",
+      "status": "beta"
+    },
+    {
+      "id": "env-validation",
+      "category": "utils",
+      "name": "T3 Env Validation",
+      "description": "Type-safe environment variable validation with T3 Env and Zod for Next.js",
+      "tags": ["t3-env", "zod", "environment", "validation", "typescript"],
+      "difficulty": "beginner",
+      "status": "beta"
+    },
+    {
+      "id": "feature-flags",
+      "category": "utils",
+      "name": "Feature Flags",
+      "description": "Feature flag management with Vercel Edge Config or custom implementation",
+      "tags": ["feature-flags", "vercel", "edge-config", "toggles", "ab-testing"],
+      "difficulty": "intermediate",
+      "status": "beta"
     }
   ]
 }
